@@ -89,12 +89,20 @@ public class SimulateMatch {
         GameRules rules = new GameRules(type);
         rules.setAppliedVariants(EnumSet.of(type));
 
+        // Parse per-player AI profiles (-P1 Profile1 -P2 Profile2 etc.)
+        Map<Integer, String> aiProfiles = new HashMap<>();
+        for (int p = 1; p <= 8; p++) {
+            if (params.containsKey("P" + p)) {
+                aiProfiles.put(p - 1, params.get("P" + p).get(0).trim());
+            }
+        }
+
         if (matchSize != 0) {
             rules.setGamesPerMatch(matchSize);
         }
 
         if (params.containsKey("t")) {
-            simulateTournament(params, rules, outputGamelog);
+            simulateTournament(params, rules, outputGamelog, aiProfiles);
             System.out.flush();
             return;
         }
@@ -124,7 +132,8 @@ public class SimulateMatch {
                 } else {
                     rp = new RegisteredPlayer(d);
                 }
-                rp.setPlayer(GamePlayerUtil.createAiPlayer(name, i - 1));
+                String profile = aiProfiles.getOrDefault(i - 1, "");
+                rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
                 pp.add(rp);
                 i++;
             }
@@ -169,6 +178,7 @@ public class SimulateMatch {
         System.out.println("\tF - format of games, defaults to constructed");
         System.out.println("\tc - Clock flag. Set the maximum time in seconds before calling the match a draw, defaults to 120.");
         System.out.println("\tq - Quiet flag. Output just the game result, not the entire game log.");
+        System.out.println("\tP1, P2, ... - AI profile for player 1, 2, etc. (Default, Cautious, Reckless, Experimental, Enhanced, AlwaysPass)");
     }
 
     public static void simulateSingleMatch(final Match mc, int iGame, boolean outputGamelog) {
@@ -214,7 +224,7 @@ public class SimulateMatch {
         }
     }
 
-    private static void simulateTournament(Map<String, List<String>> params, GameRules rules, boolean outputGamelog) {
+    private static void simulateTournament(Map<String, List<String>> params, GameRules rules, boolean outputGamelog, Map<Integer, String> aiProfiles) {
         String tournament = params.get("t").get(0);
         AbstractTournament tourney = null;
         int matchPlayers = params.containsKey("p") ? Integer.parseInt(params.get("p").get(0)) : 2;
@@ -231,7 +241,8 @@ public class SimulateMatch {
                 }
 
                 deckGroup.addAiDeck(d);
-                players.add(new TournamentPlayer(GamePlayerUtil.createAiPlayer(d.getName(), 0), numPlayers));
+                String profile = aiProfiles.getOrDefault(numPlayers, "");
+                players.add(new TournamentPlayer(GamePlayerUtil.createAiPlayer(d.getName(), profile), numPlayers));
                 numPlayers++;
             }
         }
@@ -250,7 +261,8 @@ public class SimulateMatch {
                         return;
                     }
                     deckGroup.addAiDeck(d);
-                    players.add(new TournamentPlayer(GamePlayerUtil.createAiPlayer(d.getName(), 0), numPlayers));
+                    String profile = aiProfiles.getOrDefault(numPlayers, "");
+                    players.add(new TournamentPlayer(GamePlayerUtil.createAiPlayer(d.getName(), profile), numPlayers));
                     numPlayers++;
                 }
             }

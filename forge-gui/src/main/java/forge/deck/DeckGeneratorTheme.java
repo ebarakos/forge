@@ -76,17 +76,15 @@ public class DeckGeneratorTheme extends DeckGeneratorBase {
 
         final File file = new File(ForgeConstants.THEMES_DIR);
 
-        if (!file.exists()) {
-            throw new RuntimeException("ThemeDeckGenerator : getThemeNames error -- file not found -- filename is "
-                    + file.getAbsolutePath());
-        }
-
-        if (!file.isDirectory()) {
-            throw new RuntimeException("ThemeDeckGenerator : getThemeNames error -- not a directory -- "
-                    + file.getAbsolutePath());
+        if (!file.exists() || !file.isDirectory()) {
+            // Return empty list if themes directory doesn't exist
+            return ltNames;
         }
 
         final String[] fileList = file.list();
+        if (fileList == null) {
+            return ltNames;
+        }
         for (final String element : fileList) {
             if (element.endsWith(".thm")) {
                 ltNames.add(element.substring(0, element.indexOf(".thm")));

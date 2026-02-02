@@ -20,6 +20,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import com.google.common.collect.ImmutableSet;
 
+import forge.ai.AiProfileUtil;
 import forge.Singletons;
 import forge.ai.AIOption;
 import forge.deck.DeckSection;
@@ -79,6 +80,8 @@ public class PlayerPanel extends FPanel {
 
     private final FComboBoxWrapper<Object> teamComboBox = new FComboBoxWrapper<>();
     private final FComboBoxWrapper<Object> aeTeamComboBox = new FComboBoxWrapper<>();
+    private final FComboBoxWrapper<String> aiProfileComboBox = new FComboBoxWrapper<>();
+    private FLabel aiProfileLabel;
 
     private final FLabel closeBtn;
     private final FLabel deckBtn = new FLabel.ButtonBuilder().text(localizer.getMessage("lblSelectaDeck")).build();
@@ -157,6 +160,15 @@ public class PlayerPanel extends FPanel {
         aeTeamComboBox.addActionListener(teamListener);
         teamComboBox.addTo(this, variantBtnConstraints + ", pushx, growx, gaptop 5px");
         aeTeamComboBox.addTo(this, variantBtnConstraints + ", pushx, growx, gaptop 5px");
+
+        // AI Profile dropdown (visible only when AI is selected)
+        aiProfileLabel = lobby.newLabel(localizer.getMessage("lblAI") + " Profile:");
+        for (String profile : AiProfileUtil.getProfilesDisplayList()) {
+            aiProfileComboBox.addItem(profile);
+        }
+        aiProfileComboBox.addActionListener(e -> lobby.firePlayerChangeListener(index));
+        this.add(aiProfileLabel, variantBtnConstraints + ", cell 4 1, ax right, hidemode 3");
+        aiProfileComboBox.addTo(this, variantBtnConstraints + ", cell 5 1, pushx, growx, hidemode 3");
 
         createReadyButton();
         if (allowNetworking) {
@@ -244,6 +256,11 @@ public class PlayerPanel extends FPanel {
         radioHuman.setSelected(type == LobbySlotType.LOCAL);
         radioAi.setSelected(type == LobbySlotType.AI);
         radioOpen.setSelected(type == LobbySlotType.OPEN);
+
+        // Show AI profile dropdown only when AI is selected
+        boolean showAiProfile = type == LobbySlotType.AI && mayEdit;
+        aiProfileLabel.setVisible(showAiProfile);
+        aiProfileComboBox.setVisible(showAiProfile);
 
         updateVariantControlsVisibility();
     }
@@ -458,6 +475,17 @@ public class PlayerPanel extends FPanel {
     }
     public void setUseAiSimulation(final boolean useSimulation) {
         radioAiUseSimulation.setSelected(useSimulation);
+    }
+
+    public String getAiProfile() {
+        Object selected = aiProfileComboBox.getSelectedItem();
+        return selected != null ? selected.toString() : "";
+    }
+
+    public void setAiProfile(final String profile) {
+        if (profile != null && !profile.isEmpty()) {
+            aiProfileComboBox.setSelectedItem(profile);
+        }
     }
 
     public boolean isArchenemy() {

@@ -21,6 +21,7 @@ public final class LobbySlot implements Serializable {
     private boolean isDevMode;
     private Deck deck;
     private ImmutableSet<AIOption> aiOptions;
+    private String aiProfile = "";
     private String AvatarVanguard;
     private String SchemeDeckName;
     private String PlanarDeckName;
@@ -74,6 +75,10 @@ public final class LobbySlot implements Serializable {
         }
         if (data.getAiOptions() != null) {
             setAiOptions(data.getAiOptions());
+            changed = true;
+        }
+        if (data.getAiProfile() != null) {
+            setAiProfile(data.getAiProfile());
             changed = true;
         }
         final Deck oldDeck = getDeck();
@@ -179,6 +184,14 @@ public final class LobbySlot implements Serializable {
 
     public void setAiOptions(final Set<AIOption> aiOptions) {
         this.aiOptions = aiOptions == null ? ImmutableSet.of() : ImmutableSet.copyOf(aiOptions);
+    }
+
+    public String getAiProfile() {
+        return aiProfile;
+    }
+
+    public void setAiProfile(final String aiProfile) {
+        this.aiProfile = aiProfile == null ? "" : aiProfile;
     }
 
 }

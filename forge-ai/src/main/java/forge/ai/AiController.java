@@ -897,6 +897,10 @@ public class AiController {
     }
 
     public AiPlayDecision canPlaySa(SpellAbility sa) {
+        // If ALWAYS_PASS is enabled, refuse to play any spell (for testing purposes)
+        if (getBoolProperty(AiProps.ALWAYS_PASS)) {
+            return AiPlayDecision.CantPlayAi;
+        }
         if (!checkAiSpecificRestrictions(sa)) {
             return AiPlayDecision.CantPlayAi;
         }
@@ -1357,6 +1361,11 @@ public class AiController {
     }
 
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        // If ALWAYS_PASS is enabled, don't play anything (for testing purposes)
+        if (getBoolProperty(AiProps.ALWAYS_PASS)) {
+            return null;
+        }
+
         // Reset cached predicted combat, as it may be stale. It will be
         // re-created if needed and used for any AI logic that needs it.
         predictedCombat = null;

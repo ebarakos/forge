@@ -24,6 +24,7 @@ package forge.ai;
  * from the text file.
  */
 public enum AiProps { /** */
+    ALWAYS_PASS ("false"), /** If true, AI will pass priority on all spells (for testing) */
     DEFAULT_MAX_PLANAR_DIE_ROLLS_PER_TURN ("1"), /** */
     DEFAULT_MIN_TURN_TO_ROLL_PLANAR_DIE ("3"), /** */
     DEFAULT_PLANAR_DIE_ROLL_CHANCE ("50"), /** */
