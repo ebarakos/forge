@@ -145,7 +145,21 @@ public enum AiProps { /** */
     SIDEBOARDING_CHANCE_ON_WIN("0"),
     SIDEBOARDING_IN_LIMITED_FORMATS("false"),
     SIDEBOARDING_SHARED_TYPE_ONLY("false"),
-    SIDEBOARDING_PLANESWALKER_EQ_CREATURE("false");
+    SIDEBOARDING_PLANESWALKER_EQ_CREATURE("false"),
+
+    // Enhanced simulation properties (for Enhanced profile and others)
+    // Maximum recursion depth for simulation lookahead
+    SIMULATION_MAX_DEPTH ("3"),
+    // Maximum time in milliseconds per decision
+    SIMULATION_TIME_LIMIT_MS ("5000"),
+    // Enable detection of infinite loops during simulation
+    LOOP_DETECTION_ENABLED ("false"),
+    // Enable transposition table for caching evaluated positions
+    USE_TRANSPOSITION_TABLE ("false"),
+    // Enable iterative deepening search
+    USE_ITERATIVE_DEEPENING ("false"),
+    // Bonus score for detecting combo-ready states
+    COMBO_STATE_BONUS ("0");
     // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting
     // <-- There are no experimental options here -->
 

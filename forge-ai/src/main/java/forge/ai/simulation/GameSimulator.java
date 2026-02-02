@@ -34,6 +34,8 @@ public class GameSimulator {
 
         aiPlayer = (Player) copier.find(origAiPlayer);
         eval = new GameStateEvaluator();
+        // Set combo state bonus from player's profile
+        eval.setComboStateBonusFromProfile(aiPlayer);
 
         origLines = new ArrayList<>();
         debugLines = origLines;

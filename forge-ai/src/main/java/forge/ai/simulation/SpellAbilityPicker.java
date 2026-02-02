@@ -88,7 +88,9 @@ public class SpellAbilityPicker {
             return null;
         }
 
-        Score origGameScore = new GameStateEvaluator().getScoreForGameState(game, player);
+        GameStateEvaluator evaluator = new GameStateEvaluator();
+        evaluator.setComboStateBonusFromProfile(player);
+        Score origGameScore = evaluator.getScoreForGameState(game, player);
         List<SpellAbility> candidateSAs = getCandidateSpellsAndAbilities();
         if (controller != null) {
             // This is a recursion during a higher-level simulation. Just return the head of the best
@@ -106,7 +108,8 @@ public class SpellAbilityPicker {
     }
 
     private Plan formulatePlanWithPhase(Score origGameScore, List<SpellAbility> candidateSAs, PhaseType phase) {
-        SimulationController controller = new SimulationController(origGameScore);
+        // Pass the player to SimulationController to enable profile-based settings
+        SimulationController controller = new SimulationController(origGameScore, player);
         SpellAbility sa = chooseSpellAbilityToPlayImpl(controller, candidateSAs, origGameScore, phase);
         if (sa != null) {
             return controller.getBestPlan();

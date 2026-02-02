@@ -1,12 +1,15 @@
 package forge.ai.simulation;
 
 import forge.ai.AiDeckStatistics;
+import forge.ai.AiProfileUtil;
+import forge.ai.AiProps;
 import forge.ai.CreatureEvaluator;
 import forge.card.mana.ManaAtom;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.card.CounterEnumType;
 import forge.game.cost.CostSacrifice;
+import forge.game.keyword.Keyword;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.AbilityManaPart;
@@ -25,8 +28,113 @@ public class GameStateEvaluator {
     private boolean debugging = false;
     private SimulationCreatureEvaluator eval = new SimulationCreatureEvaluator();
 
+    // Combo state bonus from profile (cached)
+    private int comboStateBonus = 0;
+
     public void setDebugging(boolean debugging) {
         this.debugging = debugging;
+    }
+
+    /**
+     * Sets the combo state bonus from the player's AI profile.
+     * @param player the AI player
+     */
+    public void setComboStateBonusFromProfile(Player player) {
+        if (player != null) {
+            this.comboStateBonus = AiProfileUtil.getIntProperty(player, AiProps.COMBO_STATE_BONUS);
+        }
+    }
+
+    /**
+     * Evaluates the game state for potential combo conditions.
+     * Returns a bonus score if the AI is in a favorable combo position.
+     *
+     * @param game the game state
+     * @param aiPlayer the AI player
+     * @return bonus score for combo-ready states
+     */
+    public int evaluateComboState(Game game, Player aiPlayer) {
+        if (comboStateBonus == 0) {
+            return 0;
+        }
+
+        int bonus = 0;
+
+        // Check for low opponent life (potential lethal)
+        for (Player opponent : aiPlayer.getOpponents()) {
+            if (opponent.getLife() <= 5) {
+                bonus += comboStateBonus / 2;
+            }
+            if (opponent.getLife() <= 3) {
+                bonus += comboStateBonus;
+            }
+        }
+
+        // Check for high mana availability (combo potential)
+        int untappedMana = countUntappedManaProducers(aiPlayer);
+        if (untappedMana >= 7) {
+            bonus += comboStateBonus / 4;
+        }
+
+        // Check for large hand size (combo pieces)
+        int handSize = aiPlayer.getCardsIn(ZoneType.Hand).size();
+        if (handSize >= 7) {
+            bonus += comboStateBonus / 4;
+        }
+
+        // Check for creatures with key combo keywords
+        for (Card c : aiPlayer.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isCreature()) {
+                // Creatures that can tap for value
+                if (c.hasKeyword(Keyword.VIGILANCE) && c.getNetPower() >= 3) {
+                    bonus += comboStateBonus / 8;
+                }
+                // Infinite combo enablers often have these keywords
+                if (c.hasKeyword(Keyword.HASTE) && c.hasKeyword(Keyword.LIFELINK)) {
+                    bonus += comboStateBonus / 8;
+                }
+            }
+        }
+
+        // Check for potential infinite mana (multiple mana doublers)
+        int manaDoublerCount = countManaDoublers(aiPlayer);
+        if (manaDoublerCount >= 2) {
+            bonus += comboStateBonus;
+        }
+
+        return bonus;
+    }
+
+    /**
+     * Counts the number of untapped mana producers the player controls.
+     */
+    private int countUntappedManaProducers(Player player) {
+        int count = 0;
+        for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isTapped() && !c.getManaAbilities().isEmpty()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Counts cards that double mana production (basic heuristic).
+     */
+    private int countManaDoublers(Player player) {
+        int count = 0;
+        for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+            String name = c.getName().toLowerCase();
+            // Common mana doublers
+            if (name.contains("mana reflection") ||
+                name.contains("vorinclex") ||
+                name.contains("nyxbloom") ||
+                name.contains("mirari's wake") ||
+                name.contains("zendikar resurgent")) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static void debugPrint(String s) {
@@ -131,6 +239,13 @@ public class GameStateEvaluator {
             opponentIndex++;
         }
         score -= 2* opponentLife / (game.getPlayers().size() - 1);
+
+        // Add combo state bonus if enabled
+        int comboBonus = evaluateComboState(game, aiPlayer);
+        if (comboBonus > 0) {
+            debugPrint("  Combo state bonus: " + comboBonus);
+            score += comboBonus;
+        }
 
         // evaluate mana base quality
         score += evalManaBase(game, aiPlayer, AiDeckStatistics.fromPlayer(aiPlayer));

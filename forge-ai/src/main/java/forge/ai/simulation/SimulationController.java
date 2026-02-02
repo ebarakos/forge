@@ -1,6 +1,9 @@
 package forge.ai.simulation;
 
+import forge.ai.AiProfileUtil;
+import forge.ai.AiProps;
 import forge.ai.simulation.GameStateEvaluator.Score;
+import forge.game.Game;
 import forge.game.GameObject;
 import forge.game.card.Card;
 import forge.game.player.Player;
@@ -12,7 +15,7 @@ import java.util.List;
 
 public class SimulationController {
     private static boolean DEBUG = false;
-    private static int MAX_DEPTH = 3;
+    private static final int DEFAULT_MAX_DEPTH = 3;
 
     private List<Plan.Decision> currentStack;
     private List<Score> scoreStack;
@@ -21,6 +24,16 @@ public class SimulationController {
     private Score bestScore;
     private List<CachedEffect> effectCache = new ArrayList<>();
     private GameObject[] currentHostAndTarget;
+
+    // Enhanced simulation components
+    private final Player aiPlayer;
+    private final int maxDepth;
+    private final boolean loopDetectionEnabled;
+    private final boolean useTranspositionTable;
+    private final GameStateHasher stateHasher;
+    private final TranspositionTable transpositionTable;
+    private final long startTimeMs;
+    private final long timeLimitMs;
 
     private static class CachedEffect {
         final GameObject hostCard;
@@ -38,12 +51,44 @@ public class SimulationController {
         }
     }
 
+    /**
+     * Creates a SimulationController with default settings (for backwards compatibility).
+     */
     public SimulationController(Score score) {
+        this(score, null);
+    }
+
+    /**
+     * Creates a SimulationController with profile-based settings.
+     * @param score the initial score
+     * @param player the AI player (used to read profile settings, can be null for defaults)
+     */
+    public SimulationController(Score score, Player player) {
         bestScore = score;
         scoreStack = new ArrayList<>();
         scoreStack.add(score);
         simulatorStack = new ArrayList<>();
         currentStack = new ArrayList<>();
+
+        this.aiPlayer = player;
+        this.startTimeMs = System.currentTimeMillis();
+
+        // Read settings from profile or use defaults
+        if (player != null) {
+            this.maxDepth = AiProfileUtil.getIntProperty(player, AiProps.SIMULATION_MAX_DEPTH);
+            this.timeLimitMs = AiProfileUtil.getIntProperty(player, AiProps.SIMULATION_TIME_LIMIT_MS);
+            this.loopDetectionEnabled = AiProfileUtil.getBoolProperty(player, AiProps.LOOP_DETECTION_ENABLED);
+            this.useTranspositionTable = AiProfileUtil.getBoolProperty(player, AiProps.USE_TRANSPOSITION_TABLE);
+        } else {
+            this.maxDepth = DEFAULT_MAX_DEPTH;
+            this.timeLimitMs = 5000;
+            this.loopDetectionEnabled = false;
+            this.useTranspositionTable = false;
+        }
+
+        // Initialize enhanced components if enabled
+        this.stateHasher = loopDetectionEnabled ? new GameStateHasher() : null;
+        this.transpositionTable = useTranspositionTable ? new TranspositionTable() : null;
     }
     
     private int getRecursionDepth() {
@@ -51,7 +96,81 @@ public class SimulationController {
     }
 
     public boolean shouldRecurse() {
-        return bestScore.value != Integer.MAX_VALUE && getRecursionDepth() < MAX_DEPTH;
+        // Don't recurse if we've already found a winning move
+        if (bestScore.value == Integer.MAX_VALUE) {
+            return false;
+        }
+
+        // Check depth limit
+        if (getRecursionDepth() >= maxDepth) {
+            return false;
+        }
+
+        // Check time limit
+        if (System.currentTimeMillis() - startTimeMs > timeLimitMs) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Checks if the given game state represents a potential infinite loop.
+     * Only effective when loop detection is enabled in the profile.
+     *
+     * @param game the game state to check
+     * @return true if this state has been seen before (potential loop)
+     */
+    public boolean isLoopDetected(Game game) {
+        if (stateHasher == null || aiPlayer == null) {
+            return false;
+        }
+        return stateHasher.hasSeenState(game, aiPlayer);
+    }
+
+    /**
+     * Gets the transposition table entry for a game state, if available.
+     *
+     * @param game the game state
+     * @return the cached entry, or null if not found or TT is disabled
+     */
+    public TranspositionTable.TTEntry probeTranspositionTable(Game game) {
+        if (transpositionTable == null || aiPlayer == null) {
+            return null;
+        }
+        long hash = stateHasher != null ? stateHasher.computeHash(game, aiPlayer) : 0;
+        return transpositionTable.probeForDepth(hash, getRecursionDepth());
+    }
+
+    /**
+     * Stores a score in the transposition table.
+     *
+     * @param game the game state
+     * @param score the evaluated score
+     * @param type the entry type (exact, lower bound, upper bound)
+     */
+    public void storeInTranspositionTable(Game game, Score score, TranspositionTable.EntryType type) {
+        if (transpositionTable == null || aiPlayer == null || stateHasher == null) {
+            return;
+        }
+        long hash = stateHasher.computeHash(game, aiPlayer);
+        transpositionTable.store(hash, score, getRecursionDepth(), type);
+    }
+
+    /**
+     * Gets the configured maximum depth for this controller.
+     * @return the maximum recursion depth
+     */
+    public int getMaxDepth() {
+        return maxDepth;
+    }
+
+    /**
+     * Gets the AI player associated with this controller.
+     * @return the AI player, or null if using defaults
+     */
+    public Player getAiPlayer() {
+        return aiPlayer;
     }
 
     public Plan.Decision getLastDecision() {
