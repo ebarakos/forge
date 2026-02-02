@@ -8,20 +8,7 @@ import com.google.common.collect.ObjectArrays;
 import forge.screens.deckeditor.views.*;
 import forge.screens.home.gauntlet.*;
 import forge.screens.home.online.VSubmenuOnlineLobby;
-import forge.screens.home.puzzle.VSubmenuPuzzleCreate;
-import forge.screens.home.puzzle.VSubmenuPuzzleSolve;
-import forge.screens.home.puzzle.VSubmenuTutorial;
-import forge.screens.home.quest.VSubmenuChallenges;
-import forge.screens.home.quest.VSubmenuDuels;
-import forge.screens.home.quest.VSubmenuQuestDecks;
-import forge.screens.home.quest.VSubmenuQuestDraft;
-import forge.screens.home.quest.VSubmenuQuestLoadData;
-import forge.screens.home.quest.VSubmenuQuestPrefs;
-import forge.screens.home.quest.VSubmenuQuestStart;
 import forge.screens.home.sanctioned.VSubmenuConstructed;
-import forge.screens.home.sanctioned.VSubmenuDraft;
-import forge.screens.home.sanctioned.VSubmenuSealed;
-import forge.screens.home.sanctioned.VSubmenuWinston;
 import forge.screens.home.settings.VSubmenuAchievements;
 import forge.screens.home.settings.VSubmenuAvatars;
 import forge.screens.home.settings.VSubmenuDownloaders;
@@ -58,13 +45,6 @@ public enum EDocID {
     WORKSHOP_CARDDESIGNER (VCardDesigner.SINGLETON_INSTANCE),
     WORKSHOP_CARDSCRIPT (VCardScript.SINGLETON_INSTANCE),
 
-    HOME_QUESTSTART (VSubmenuQuestStart.SINGLETON_INSTANCE),
-    HOME_QUESTLOADDATA(VSubmenuQuestLoadData.SINGLETON_INSTANCE),
-    HOME_QUESTDRAFTS (VSubmenuQuestDraft.SINGLETON_INSTANCE),
-    HOME_QUESTCHALLENGES (VSubmenuChallenges.SINGLETON_INSTANCE),
-    HOME_QUESTDUELS (VSubmenuDuels.SINGLETON_INSTANCE),
-    HOME_QUESTDECKS (VSubmenuQuestDecks.SINGLETON_INSTANCE),
-    HOME_QUESTPREFS (VSubmenuQuestPrefs.SINGLETON_INSTANCE),
     HOME_GAUNTLETBUILD (VSubmenuGauntletBuild.SINGLETON_INSTANCE),
     HOME_GAUNTLETLOAD (VSubmenuGauntletLoad.SINGLETON_INSTANCE),
     HOME_GAUNTLETQUICK (VSubmenuGauntletQuick.SINGLETON_INSTANCE),
@@ -75,13 +55,7 @@ public enum EDocID {
     HOME_ACHIEVEMENTS (VSubmenuAchievements.SINGLETON_INSTANCE),
     HOME_AVATARS (VSubmenuAvatars.SINGLETON_INSTANCE),
     HOME_UTILITIES (VSubmenuDownloaders.SINGLETON_INSTANCE),
-    HOME_TUTORIAL(VSubmenuTutorial.SINGLETON_INSTANCE),
-    HOME_PUZZLE_CREATE(VSubmenuPuzzleCreate.SINGLETON_INSTANCE),
-    HOME_PUZZLE_SOLVE(VSubmenuPuzzleSolve.SINGLETON_INSTANCE),
     HOME_CONSTRUCTED (VSubmenuConstructed.SINGLETON_INSTANCE),
-    HOME_DRAFT (VSubmenuDraft.SINGLETON_INSTANCE),
-    HOME_SEALED (VSubmenuSealed.SINGLETON_INSTANCE),
-    HOME_WINSTON (VSubmenuWinston.SINGLETON_INSTANCE),
     HOME_NETWORK (VSubmenuOnlineLobby.SINGLETON_INSTANCE),
     HOME_RELEASE_NOTES (VSubmenuReleaseNotes.SINGLETON_INSTANCE),
 

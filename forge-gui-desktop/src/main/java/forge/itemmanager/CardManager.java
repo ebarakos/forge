@@ -6,15 +6,11 @@ import com.google.common.collect.Multimaps;
 import forge.StaticData;
 import forge.card.CardEdition;
 import forge.game.GameFormat;
-import forge.gamemodes.quest.QuestWorld;
-import forge.gamemodes.quest.data.QuestPreferences;
 import forge.gui.GuiUtils;
 import forge.item.PaperCard;
 import forge.itemmanager.filters.*;
 import forge.localinstance.properties.ForgePreferences;
 import forge.model.FModel;
-import forge.screens.home.quest.DialogChooseFormats;
-import forge.screens.home.quest.DialogChooseSets;
 import forge.screens.match.controllers.CDetailPicture;
 import forge.util.Localizer;
 
@@ -30,12 +26,9 @@ import java.util.stream.Collectors;
  */
 @SuppressWarnings("serial")
 public class CardManager extends ItemManager<PaperCard> {
-    
-    private boolean QuestMode;
 
     public CardManager(final CDetailPicture cDetailPicture, final boolean wantUnique0, final boolean qm, boolean sr) {
         super(PaperCard.class, cDetailPicture, wantUnique0, sr);
-        QuestMode = qm;
     }
 
     @Override
@@ -129,14 +122,6 @@ public class CardManager extends ItemManager<PaperCard> {
         itemManager.addFilter(new CardColorFilter(itemManager));
         itemManager.addFilter(new CardTypeFilter(itemManager));
         itemManager.addFilter(new CardCMCFilter(itemManager));
-        if (FModel.getQuestPreferences()
-                .getPrefInt(QuestPreferences.QPref.FOIL_FILTER_DEFAULT) == 1) {
-            itemManager.addFilter(new CardFoilFilter(itemManager));
-        }
-        if (FModel.getQuestPreferences()
-                .getPrefInt(QuestPreferences.QPref.RATING_FILTER_DEFAULT) == 1) {
-            itemManager.addFilter(new CardRatingFilter(itemManager));
-        }
     }
 
     public static ItemFilter<PaperCard> createSearchFilter(final ItemManager<? super PaperCard> itemManager) {
@@ -153,47 +138,6 @@ public class CardManager extends ItemManager<PaperCard> {
             );
         }
         menu.add(fmt);
-
-        GuiUtils.addMenuItem(menu, localizer.getMessage("lblFormats") + "...", null, () -> {
-            final CardFormatFilter existingFilter = itemManager.getFilter(CardFormatFilter.class);
-            if (existingFilter != null) {
-                existingFilter.edit(itemManager);
-            } else {
-                final DialogChooseFormats dialog = new DialogChooseFormats();
-                dialog.setWantReprintsCB(true); // assume user wants things permissive...
-                dialog.setOkCallback(() -> {
-                    final List<GameFormat> formats = dialog.getSelectedFormats();
-                    if (!formats.isEmpty()) {
-                        itemManager.addFilter(new CardFormatFilter(itemManager,formats,dialog.getWantReprints()));
-                    }
-                });
-            }
-        });
-
-        GuiUtils.addMenuItem(menu, localizer.getMessage("lblSets") + "...", null, () -> {
-            CardSetFilter existingFilter = itemManager.getFilter(CardSetFilter.class);
-            if (existingFilter != null) {
-                existingFilter.edit(itemManager);
-            }
-            else {
-                List<String> limitedSets = getFilteredSetCodesInCatalog();
-                final DialogChooseSets dialog = new DialogChooseSets(null, null, limitedSets, true);
-                dialog.setOkCallback(() -> {
-                    List<String> sets = dialog.getSelectedSets();
-                    if (!sets.isEmpty()) {
-                        itemManager.addFilter(new CardSetFilter(itemManager, sets, limitedSets, dialog.getWantReprints()));
-                    }
-                });
-            }
-        });
-
-        JMenu world = GuiUtils.createMenu(localizer.getMessage("lblQuestWorld"));
-        for (final QuestWorld w : FModel.getWorlds()) {
-            GuiUtils.addMenuItem(world, w.getName(), null, () -> itemManager.addFilter(new CardQuestWorldFilter(itemManager, w)),
-                    CardQuestWorldFilter.canAddQuestWorld(w, itemManager.getFilter(CardQuestWorldFilter.class))
-            );
-        }
-        menu.add(world);
 
         if (FModel.getPreferences().getPrefBoolean(ForgePreferences.FPref.LOAD_ARCHIVED_FORMATS)) {
             JMenu blocks = GuiUtils.createMenu(localizer.getMessage("lblBlock"));
@@ -235,12 +179,6 @@ public class CardManager extends ItemManager<PaperCard> {
         GuiUtils.addMenuItem(menu, localizer.getMessage("lblFoil"), null, () -> itemManager.addFilter(new CardFoilFilter(itemManager)),
                 itemManager.getFilter(CardFoilFilter.class) == null
         );
-
-        if (QuestMode) {
-            GuiUtils.addMenuItem(menu, localizer.getMessage("lblPersonalRating"), null, () -> itemManager.addFilter(new CardRatingFilter(itemManager)),
-                    itemManager.getFilter(CardRatingFilter.class) == null
-            );
-        }
 
         GuiUtils.addSeparator(menu);
 

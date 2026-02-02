@@ -15,7 +15,6 @@ import forge.game.event.IGameEventVisitor;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
 import forge.game.player.RegisteredPlayer;
-import forge.gamemodes.quest.QuestController;
 import forge.gui.FThreads;
 import forge.gui.GuiBase;
 import forge.gui.control.FControlGameEventHandler;
@@ -160,15 +159,6 @@ public class HostedMatch {
         game.AI_CAN_USE_TIMEOUT = !GuiBase.isAndroid() || GuiBase.getAndroidAPILevel() > 30;
 
         StaticData.instance().setSourceImageForClone(FModel.getPreferences().getPrefBoolean(FPref.UI_CLONE_MODE_SOURCE));
-
-        if (game.getRules().getGameType() == GameType.Quest) {
-            final QuestController qc = FModel.getQuest();
-            // Reset new list when the Match round starts, not when each game starts
-            if (game.getMatch().getOutcomes().isEmpty()) {
-                qc.getCards().resetNewList();
-            }
-            game.subscribeToEvents(qc); // this one listens to player's mulligans ATM
-        }
 
         game.subscribeToEvents(SoundSystem.instance);
         game.subscribeToEvents(visitor);

@@ -33,15 +33,6 @@ import forge.game.GameType;
 import forge.game.card.CardUtil;
 import forge.game.spellability.Spell;
 import forge.gamemodes.gauntlet.GauntletData;
-import forge.gamemodes.limited.GauntletMini;
-import forge.gamemodes.limited.ThemedChaosDraft;
-import forge.gamemodes.planarconquest.ConquestController;
-import forge.gamemodes.planarconquest.ConquestPlane;
-import forge.gamemodes.planarconquest.ConquestPreferences;
-import forge.gamemodes.planarconquest.ConquestUtil;
-import forge.gamemodes.quest.QuestController;
-import forge.gamemodes.quest.QuestWorld;
-import forge.gamemodes.quest.data.QuestPreferences;
 import forge.gamemodes.tournament.TournamentData;
 import forge.gui.FThreads;
 import forge.gui.GuiBase;
@@ -86,33 +77,18 @@ public final class FModel {
             getPreferences().getPrefBoolean(FPref.UI_LOAD_NONLEGAL_CARDS),
             getPreferences().getPrefBoolean(FPref.ALLOW_CUSTOM_CARDS_IN_DECKS_CONFORMANCE),
             getPreferences().getPrefBoolean(FPref.UI_SMART_CARD_ART)));
-    private static final Supplier<QuestPreferences> questPreferences = Suppliers.memoize(QuestPreferences::new);
-    private static final Supplier<ConquestPreferences> conquestPreferences = Suppliers.memoize(() -> {
-       final ConquestPreferences cp = new ConquestPreferences();
-       ConquestUtil.updateRarityFilterOdds(cp);
-       return cp;
-    });
     private static ForgePreferences preferences;
     private static final Supplier<ForgeNetPreferences> netPreferences = Suppliers.memoize(ForgeNetPreferences::new);
     private static final Supplier<Map<GameType, AchievementCollection>> achievements = Suppliers.memoize(() -> {
         final Map<GameType, AchievementCollection> a = Maps.newHashMap();
         a.put(GameType.Constructed, new ConstructedAchievements());
-        a.put(GameType.Draft, new DraftAchievements());
-        a.put(GameType.Sealed, new SealedAchievements());
-        a.put(GameType.Quest, new QuestAchievements());
-        a.put(GameType.PlanarConquest, new PlanarConquestAchievements());
-        a.put(GameType.Puzzle, new PuzzleAchievements());
-        a.put(GameType.Adventure, new AdventureAchievements());
         return a;
     });
 
     // Someone should take care of 2 gauntlets here
     private static TournamentData tournamentData;
     private static GauntletData gauntletData;
-    private static final Supplier<GauntletMini> gauntletMini = Suppliers.memoize(GauntletMini::new);
 
-    private static final Supplier<QuestController> quest = Suppliers.memoize(QuestController::new);
-    private static final Supplier<ConquestController> conquest = Suppliers.memoize(ConquestController::new);
     private static final Supplier<CardCollections> decks = Suppliers.memoize(CardCollections::new);
 
     private static final Supplier<IStorage<CardBlock>> blocks = Suppliers.memoize(() -> {
@@ -128,16 +104,6 @@ public final class FModel {
         return cb;
     });
     private static final Supplier<IStorage<CardBlock>> fantasyBlocks = Suppliers.memoize(() -> new StorageBase<>("Custom blocks", new CardBlock.Reader(ForgeConstants.BLOCK_DATA_DIR + "fantasyblocks.txt", getMagicDb().getEditions())));
-    private static final Supplier<IStorage<ThemedChaosDraft>> themedChaosDrafts = Suppliers.memoize(() -> new StorageBase<>("Themed Chaos Drafts", new ThemedChaosDraft.Reader(ForgeConstants.BLOCK_DATA_DIR + "chaosdraftthemes.txt")));
-    private static final Supplier<IStorage<ConquestPlane>> planes = Suppliers.memoize(() -> new StorageBase<>("Conquest planes", new ConquestPlane.Reader(ForgeConstants.CONQUEST_PLANES_DIR + "planes.txt")));
-    private static final Supplier<IStorage<QuestWorld>> worlds = Suppliers.memoize(() -> {
-        final Map<String, QuestWorld> standardWorlds = new QuestWorld.Reader(ForgeConstants.QUEST_WORLD_DIR + "worlds.txt").readAll();
-        final Map<String, QuestWorld> customWorlds = new QuestWorld.Reader(ForgeConstants.USER_QUEST_WORLD_DIR + "customworlds.txt").readAll();
-        customWorlds.values().forEach(world -> world.setCustom(true));
-        standardWorlds.putAll(customWorlds);
-        final IStorage<QuestWorld> w = new StorageBase<>("Quest worlds", null, standardWorlds);
-        return w;
-    });
     private static final Supplier<GameFormat.Collection> formats = Suppliers.memoize(() -> new GameFormat.Collection(new GameFormat.Reader( new File(ForgeConstants.FORMATS_DATA_DIR), new File(ForgeConstants.USER_FORMATS_DIR), preferences.getPrefBoolean(FPref.LOAD_ARCHIVED_FORMATS))));
     private static final Supplier<ItemPool<PaperCard>> uniqueCardsNoAlt = Suppliers.memoize(() -> ItemPool.createFrom(getMagicDb().getCommonCards().getUniqueCardsNoAlt(), PaperCard.class));
     private static final Supplier<ItemPool<PaperCard>> allCardsNoAlt = Suppliers.memoize(() -> ItemPool.createFrom(getMagicDb().getCommonCards().getAllCardsNoAlt(), PaperCard.class));
@@ -284,14 +250,6 @@ public final class FModel {
         return deckGenMatrixLoaded;
     }
 
-    public static QuestController getQuest() {
-        return quest.get();
-    }
-
-    public static ConquestController getConquest() {
-        return conquest.get();
-    }
-
     public static ItemPool<PaperCard> getUniqueCardsNoAlt() {
         return uniqueCardsNoAlt.get();
     }
@@ -387,25 +345,11 @@ public final class FModel {
     }
 
     public static AchievementCollection getAchievements(GameType gameType) {
-        // Translate gameType to appropriate type if needed
-        return switch (gameType) {
-            case Constructed, Draft, Sealed, Quest, PlanarConquest, Puzzle, Adventure -> achievements.get().get(gameType);
-            case AdventureEvent -> achievements.get().get(GameType.Adventure);
-            case QuestDraft -> achievements.get().get(GameType.Quest);
-            default -> achievements.get().get(GameType.Constructed);
-        };
+        return achievements.get().get(GameType.Constructed);
     }
 
     public static IStorage<CardBlock> getBlocks() {
         return blocks.get();
-    }
-
-    public static QuestPreferences getQuestPreferences() {
-        return questPreferences.get();
-    }
-
-    public static ConquestPreferences getConquestPreferences() {
-        return conquestPreferences.get();
     }
 
     public static GauntletData getGauntletData() {
@@ -416,20 +360,8 @@ public final class FModel {
         gauntletData = data0;
     }
 
-    public static GauntletMini getGauntletMini() {
-        return gauntletMini.get();
-    }
-
     public static CardCollections getDecks() {
         return decks.get();
-    }
-
-    public static IStorage<ConquestPlane> getPlanes() {
-        return planes.get();
-    }
-
-    public static IStorage<QuestWorld> getWorlds() {
-        return worlds.get();
     }
 
     public static GameFormat.Collection getFormats() {
@@ -438,10 +370,6 @@ public final class FModel {
 
     public static IStorage<CardBlock> getFantasyBlocks() {
         return fantasyBlocks.get();
-    }
-
-    public static IStorage<ThemedChaosDraft> getThemedChaosDrafts() {
-        return themedChaosDrafts.get();
     }
 
     public static TournamentData getTournamentData() { return tournamentData; }

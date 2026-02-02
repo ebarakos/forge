@@ -8,7 +8,6 @@ import java.util.function.Predicate;
 import forge.deck.DeckProxy;
 import forge.game.GameFormat;
 import forge.itemmanager.ItemManager;
-import forge.screens.home.quest.DialogChooseSets;
 
 
 public class DeckSetFilter extends DeckFormatFilter {
@@ -55,21 +54,6 @@ public class DeckSetFilter extends DeckFormatFilter {
         this.formats.clear();
         this.formats.add(new GameFormat(null, this.sets, null));
         return true;
-    }
-
-    public void edit() {
-        final DialogChooseSets dialog = new DialogChooseSets(this.sets, null, this.limitedSets,
-                                                            true, this.allowReprints);
-        final DeckSetFilter itemFilter = this;
-
-        dialog.setOkCallback(() -> {
-            sets.clear();
-            sets.addAll(dialog.getSelectedSets());
-            allowReprints = dialog.getWantReprints();
-            formats.clear();
-            formats.add(new GameFormat(null, sets, null));
-            itemManager.addFilter(itemFilter); // this adds/updates the current filter
-        });
     }
 
     @Override

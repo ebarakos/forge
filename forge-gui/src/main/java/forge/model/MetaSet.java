@@ -18,18 +18,12 @@
 
 package forge.model;
 
-import forge.gamemodes.limited.CustomLimited;
-import forge.gamemodes.limited.SealedCardPoolGenerator;
 import forge.item.PaperCard;
 import forge.item.PaperCardPredicates;
 import forge.item.SealedTemplate;
 import forge.item.generation.IUnOpenedProduct;
 import forge.item.generation.UnOpenedProduct;
-import forge.localinstance.properties.ForgeConstants;
-import forge.util.FileUtil;
 
-import java.io.File;
-import java.util.List;
 import java.util.function.Predicate;
 
 /** 
@@ -185,22 +179,9 @@ public class MetaSet {
             case Combo:  return UnOpenedMeta.selectAll(data);
 
             case Cube:
-                final File dFolder = new File(ForgeConstants.SEALED_DIR);
+                // Sealed/Cube mode removed
+                return null;
 
-                if (!dFolder.exists()) {
-                    throw new RuntimeException("GenerateSealed : folder not found -- folder is " + dFolder.getAbsolutePath());
-                }
-
-                if (!dFolder.isDirectory()) {
-                    throw new RuntimeException("GenerateSealed : not a folder -- " + dFolder.getAbsolutePath());
-                }
-
-                List<String> dfData = FileUtil.readFile(ForgeConstants.SEALED_DIR + data + SealedCardPoolGenerator.FILE_EXT);
-                final CustomLimited myCube = CustomLimited.parse(dfData, FModel.getDecks().getCubes());
-
-                SealedTemplate fnPick = myCube.getSealedProductTemplate();
-                return new UnOpenedProduct(fnPick, myCube.getCardPool());
-                
             default: return null;
         }
     }

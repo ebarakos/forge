@@ -14,12 +14,7 @@ import forge.game.GameFormat;
 import forge.game.GameType;
 import forge.gamemodes.limited.ArchetypeDeckBuilder;
 import forge.gamemodes.limited.CardThemedCommanderDeckBuilder;
-import forge.gamemodes.limited.CardThemedConquestDeckBuilder;
 import forge.gamemodes.limited.CardThemedDeckBuilder;
-import forge.gamemodes.quest.QuestController;
-import forge.gamemodes.quest.QuestEvent;
-import forge.gamemodes.quest.QuestEventChallenge;
-import forge.gamemodes.quest.QuestEventDuel;
 import forge.gui.util.SOptionPane;
 import forge.item.PaperCard;
 import forge.item.PaperCardPredicates;
@@ -105,7 +100,7 @@ public class DeckgenUtil {
         CardThemedDeckBuilder dBuilder;
 
         if(forCommander){
-            dBuilder = new CardThemedConquestDeckBuilder(card, selectedCards, format ,isForAI, deckFormat);
+            dBuilder = new CardThemedDeckBuilder(card, null, selectedCards, format, isForAI, deckFormat);
         }else{
             dBuilder = new CardThemedDeckBuilder(card,secondKeycard, selectedCards,format,isForAI, deckFormat);
         }
@@ -367,18 +362,6 @@ public class DeckgenUtil {
         return buildColorDeck(selection, formatFilter, forAi); //try again if previous color deck couldn't be generated
     }
 
-    public static QuestEvent getQuestEvent(final String name) {
-        QuestController qCtrl = FModel.getQuest();
-        for (QuestEventChallenge challenge : qCtrl.getChallenges()) {
-            if (challenge.getTitle().equals(name)) {
-                return challenge;
-            }
-        }
-
-        QuestEventDuel duel = IterableUtil.find(qCtrl.getDuelsManager().getAllDuels(), in -> in.getName().equals(name));
-        return duel;
-    }
-
     /** @return {@link forge.deck.Deck} */
     public static Deck getRandomColorDeck(Predicate<PaperCard> formatFilter, boolean forAi) {
         final int[] colorCount = new int[] {1, 2, 3};
@@ -431,11 +414,10 @@ public class DeckgenUtil {
         final List<String> selection = new ArrayList<>();
         Deck deck = null;
         if (advPrecons.isEmpty()) {
-            advPrecons.addAll(DeckProxy.getAllPreconstructedDecks(QuestController.getPrecons()));
+            advPrecons.addAll(DeckProxy.getAllThemeDecks());
         }
         if (advThemes.isEmpty()) {
-            advThemes.addAll(DeckProxy.getAllPreconstructedDecks(QuestController.getPrecons()));
-            advThemes.addAll(DeckProxy.getNonEasyQuestDuelDecks());
+            advThemes.addAll(DeckProxy.getAllThemeDecks());
         }
         if (geneticAI.isEmpty()) {
             geneticAI.addAll(DeckProxy.getAllGeneticAIDecks());
@@ -482,7 +464,10 @@ public class DeckgenUtil {
 
     /** @return {@link forge.deck.Deck} */
     public static Deck getRandomPreconDeck() {
-        final List<DeckProxy> allDecks = DeckProxy.getAllPreconstructedDecks(QuestController.getPrecons());
+        final List<DeckProxy> allDecks = DeckProxy.getAllThemeDecks();
+        if (allDecks.isEmpty()) {
+            return getRandomColorDeck(true);
+        }
         final int rand = (int) (Math.floor(MyRandom.getRandom().nextDouble() * allDecks.size()));
         return allDecks.get(rand).getDeck();
     }
@@ -501,19 +486,8 @@ public class DeckgenUtil {
     }
 
     public static Deck getRandomQuestDeck() {
-        final List<Deck> allQuestDecks = new ArrayList<>();
-        QuestController qCtrl = FModel.getQuest();
-
-        for (final QuestEvent e : qCtrl.getDuelsManager().getAllDuels()) {
-            allQuestDecks.add(e.getEventDeck());
-        }
-
-        for (final QuestEvent e : qCtrl.getChallenges()) {
-            allQuestDecks.add(e.getEventDeck());
-        }
-
-        final int rand = (int) (Math.floor(MyRandom.getRandom().nextDouble() * allQuestDecks.size()));
-        return allQuestDecks.get(rand);
+        // Quest mode removed - return random theme deck instead
+        return getRandomThemeDeck();
     }
 
     public static void randomSelectColors(final IItemManager<DeckProxy> deckManager) {

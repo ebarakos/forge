@@ -1,6 +1,6 @@
 # ⚔️  Forge: The Magic: The Gathering Rules Engine
 
-> **Experimental Branch:** This branch contains experimental changes and modifications.
+> **Minimal Branch:** This is the `minimal` branch containing a stripped-down version with only the desktop GUI.
 
 Join the **Forge community** on [Discord](https://discord.gg/HcPJNyD66a)!
 

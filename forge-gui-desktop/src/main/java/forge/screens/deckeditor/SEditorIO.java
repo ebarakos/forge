@@ -10,7 +10,6 @@ import forge.Singletons;
 import forge.deck.DeckProxy;
 import forge.deck.io.DeckPreferences;
 import forge.gui.framework.FScreen;
-import forge.model.FModel;
 import forge.toolbox.FOptionPane;
 import forge.util.Localizer;
 
@@ -77,10 +76,6 @@ public class SEditorIO {
                     CAllDecks.SINGLETON_INSTANCE.refresh(); //pull new deck into deck list and select it
                     VAllDecks.SINGLETON_INSTANCE.getLstDecks().setSelectedString(deckStr);
                     break;
-            }
-            // Set current quest deck to selected
-            if (Singletons.getControl().getCurrentScreen() == FScreen.DECK_EDITOR_QUEST) {
-                FModel.getQuest().setCurrentDeck(name);
             }
         }
 

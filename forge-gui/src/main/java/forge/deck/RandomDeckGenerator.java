@@ -4,7 +4,6 @@ import com.google.common.collect.Iterables;
 import forge.game.GameFormat;
 import forge.game.GameType;
 import forge.game.IHasGameType;
-import forge.gamemodes.quest.QuestController;
 import forge.localinstance.properties.ForgePreferences;
 import forge.model.FModel;
 import forge.util.Aggregates;
@@ -94,9 +93,8 @@ public class RandomDeckGenerator extends DeckProxy implements Comparable<RandomD
                 while (true) {
                     switch (Aggregates.random(DeckType.ConstructedOptions)) {
                         case PRECONSTRUCTED_DECK:
-                            return Aggregates.random(DeckProxy.getAllPreconstructedDecks(QuestController.getPrecons())).getDeck();
                         case QUEST_OPPONENT_DECK:
-                            return Aggregates.random(DeckProxy.getAllQuestEventAndChallenges()).getDeck();
+                            return Aggregates.random(DeckProxy.getAllThemeDecks()).getDeck();
                         case COLOR_DECK:
                             List<String> colors = new ArrayList<>();
                             int count = Aggregates.randomInt(1, 3);

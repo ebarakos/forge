@@ -15,7 +15,6 @@ import forge.card.ColorSet;
 import forge.card.MagicColor;
 import forge.deck.DeckProxy;
 import forge.game.GameFormat;
-import forge.gamemodes.quest.data.StarRating;
 import forge.gui.interfaces.IButton;
 import forge.item.InventoryItem;
 import forge.item.PaperCard;
@@ -356,50 +355,9 @@ public class SFilterUtil {
         }
     }
 
-    public static Predicate<PaperCard> buildStarRatingFilter(Map<SItemManagerUtil.StatTypes, ? extends IButton> buttonMap, final HashSet<StarRating> QuestRatings) {
-        final Map<SItemManagerUtil.StatTypes, ? extends IButton> buttonMap2 = buttonMap;
-        return card -> {
-
-            StarRating r = new StarRating();
-            r.Name = card.getName();
-            r.Edition = card.getEdition();
-            int j = 0;
-            for (int i = 1; i < 6; i++) {
-                r.rating = i;
-                if (QuestRatings.contains(r)) {
-                    j = i;
-                }
-            }
-            boolean result = true;
-
-            if (j == 0) {
-                if (!buttonMap2.get(StatTypes.RATE_NONE).isSelected()) {
-                    result = false;
-                }
-            } else if (j == 1) {
-                if (!buttonMap2.get(StatTypes.RATE_1).isSelected()) {
-                    result = false;
-                }
-            } else if (j == 2) {
-                if (!buttonMap2.get(StatTypes.RATE_2).isSelected()) {
-                    result = false;
-                }
-            } else if (j == 3) {
-                if (!buttonMap2.get(StatTypes.RATE_3).isSelected()) {
-                    result = false;
-                }
-            } else if (j == 4) {
-                if (!buttonMap2.get(StatTypes.RATE_4).isSelected()) {
-                    result = false;
-                }
-            } else if (j == 5) {
-                if (!buttonMap2.get(StatTypes.RATE_5).isSelected()) {
-                    result = false;
-                }
-            }
-            return result;
-
-        };
+    public static <T> Predicate<PaperCard> buildStarRatingFilter(Map<SItemManagerUtil.StatTypes, ? extends IButton> buttonMap, final HashSet<T> QuestRatings) {
+        // Quest mode removed - star rating filter disabled
+        return card -> true;
     }
 
     public static Predicate<PaperCard> buildFoilFilter(Map<SItemManagerUtil.StatTypes, ? extends IButton> buttonMap) {

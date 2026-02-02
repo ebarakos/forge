@@ -80,20 +80,6 @@ public class ViewWinLose implements IWinLoseView<FButton> {
         // modes.
         ControlWinLose control = null;
         switch (game0.getGameType()) {
-            case Quest:
-                control = new QuestWinLose(this, game0, matchUI);
-                break;
-            case QuestDraft:
-                control = new QuestDraftWinLose(this, game0, matchUI);
-                break;
-            case Draft:
-                if (!FModel.getGauntletMini().isGauntletDraft()) {
-                    break;
-                }
-                //$FALL-THROUGH$
-            case Sealed:
-                control = new LimitedWinLose(this, game0, matchUI);
-                break;
             case CommanderGauntlet:
             case Gauntlet:
                 control = new GauntletWinLose(this, game0, matchUI);

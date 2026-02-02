@@ -7,7 +7,6 @@ import java.util.Set;
 import forge.game.GameFormat;
 import forge.item.PaperCard;
 import forge.itemmanager.ItemManager;
-import forge.screens.home.quest.DialogChooseSets;
 
 /**
  * TODO: Write javadoc for this type.
@@ -56,19 +55,6 @@ public class CardSetFilter extends CardFormatFilter {
         this.formats.clear();
         this.formats.add(new GameFormat(null, this.sets, null));
         return true;
-    }
-
-    public void edit(final ItemManager<? super PaperCard> itemManager) {
-        final DialogChooseSets dialog = new DialogChooseSets(this.sets, null, this.limitedSets,
-                                                            true, this.allowReprints);
-        final CardSetFilter itemFilter = this;
-
-        dialog.setOkCallback(() -> {
-            sets.clear();
-            sets.addAll(dialog.getSelectedSets());
-            allowReprints = dialog.getWantReprints();
-            itemManager.addFilter(itemFilter); // this adds/updates the current filter
-        });
     }
 
     @Override

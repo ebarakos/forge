@@ -43,19 +43,7 @@ import forge.localinstance.skin.FSkinProp;
 import forge.model.FModel;
 import forge.screens.home.gauntlet.*;
 import forge.screens.home.online.VSubmenuOnlineLobby;
-import forge.screens.home.puzzle.VSubmenuPuzzleCreate;
-import forge.screens.home.puzzle.VSubmenuPuzzleSolve;
-//import forge.screens.home.puzzle.VSubmenuTutorial;
-import forge.screens.home.quest.VSubmenuChallenges;
-import forge.screens.home.quest.VSubmenuDuels;
-import forge.screens.home.quest.VSubmenuQuestDecks;
-import forge.screens.home.quest.VSubmenuQuestDraft;
-import forge.screens.home.quest.VSubmenuQuestLoadData;
-import forge.screens.home.quest.VSubmenuQuestPrefs;
-import forge.screens.home.quest.VSubmenuQuestStart;
 import forge.screens.home.sanctioned.VSubmenuConstructed;
-import forge.screens.home.sanctioned.VSubmenuDraft;
-import forge.screens.home.sanctioned.VSubmenuSealed;
 import forge.screens.home.settings.VSubmenuAchievements;
 import forge.screens.home.settings.VSubmenuAvatars;
 import forge.screens.home.settings.VSubmenuDownloaders;
@@ -115,19 +103,8 @@ public enum VHomeUI implements IVTopLevelUI {
 
         // Add new menu items here (order doesn't matter).
         allSubmenus.add(VSubmenuConstructed.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuDraft.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuSealed.SINGLETON_INSTANCE);
-        //allSubmenus.add(VSubmenuWinston.SINGLETON_INSTANCE);
 
         allSubmenus.add(VSubmenuOnlineLobby.SINGLETON_INSTANCE);
-
-        allSubmenus.add(VSubmenuQuestStart.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuQuestLoadData.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuQuestDecks.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuDuels.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuChallenges.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuQuestDraft.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuQuestPrefs.SINGLETON_INSTANCE);
 
         allSubmenus.add(VSubmenuGauntletQuick.SINGLETON_INSTANCE);
         allSubmenus.add(VSubmenuGauntletBuild.SINGLETON_INSTANCE);
@@ -135,10 +112,6 @@ public enum VHomeUI implements IVTopLevelUI {
         allSubmenus.add(VSubmenuGauntletContests.SINGLETON_INSTANCE);
         allSubmenus.add(VSubmenuGauntletCommanderQuick.SINGLETON_INSTANCE);
         allSubmenus.add(VSubmenuGauntletCommanderBuild.SINGLETON_INSTANCE);
-
-        allSubmenus.add(VSubmenuPuzzleSolve.SINGLETON_INSTANCE);
-        allSubmenus.add(VSubmenuPuzzleCreate.SINGLETON_INSTANCE);
-        //allSubmenus.add(VSubmenuTutorial.SINGLETON_INSTANCE);
 
         allSubmenus.add(VSubmenuPreferences.SINGLETON_INSTANCE);
         allSubmenus.add(VSubmenuAchievements.SINGLETON_INSTANCE);

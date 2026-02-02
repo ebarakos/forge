@@ -25,7 +25,6 @@ import java.awt.event.KeyEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
-import java.io.IOException;
 import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.Collections;
@@ -44,8 +43,6 @@ import forge.ImageCache;
 import forge.LobbyPlayer;
 import forge.Singletons;
 import forge.gamemodes.match.HostedMatch;
-import forge.gamemodes.quest.data.QuestPreferences.QPref;
-import forge.gamemodes.quest.io.QuestDataIO;
 import forge.gui.GuiBase;
 import forge.gui.SOverlayUtils;
 import forge.gui.framework.FScreen;
@@ -268,19 +265,6 @@ public enum FControl implements KeyEventDispatcher {
 
         closeAction = CloseAction.valueOf(prefs.getPref(FPref.UI_CLOSE_ACTION));
 
-        FView.SINGLETON_INSTANCE.setSplashProgessBarMessage(getLocalizer().getMessage("lblLoadingQuest"));
-        // Preload quest data if present
-        final File dirQuests = new File(ForgeConstants.QUEST_SAVE_DIR);
-        final String questname = FModel.getQuestPreferences().getPref(QPref.CURRENT_QUEST);
-        final File data = new File(dirQuests.getPath(), questname);
-        if (data.exists()) {
-            try {
-                FModel.getQuest().load(QuestDataIO.loadData(data));
-            } catch (IOException ex) {
-                ex.printStackTrace();
-                System.err.printf("Error loading quest data (%s).. skipping for now..%n", questname);
-            }
-        }
         // format release notes upon loading
         try {
             TextUtil.getFormattedChangelog(new File(FileUtil.pathCombine(System.getProperty("user.dir"), ForgeConstants.CHANGES_FILE_NO_RELEASE)), "");

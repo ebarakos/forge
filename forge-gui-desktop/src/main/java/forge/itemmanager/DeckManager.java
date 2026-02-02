@@ -22,7 +22,6 @@ import forge.deck.io.DeckPreferences;
 import forge.game.GameFormat;
 import forge.game.GameType;
 import forge.game.IHasGameType;
-import forge.gamemodes.quest.QuestWorld;
 import forge.gui.GuiUtils;
 import forge.gui.UiCommand;
 import forge.gui.framework.FScreen;
@@ -36,10 +35,6 @@ import forge.screens.deckeditor.CDeckEditorUI;
 import forge.screens.deckeditor.SEditorIO;
 import forge.screens.deckeditor.controllers.ACEditorBase;
 import forge.screens.deckeditor.controllers.CEditorConstructed;
-import forge.screens.deckeditor.controllers.CEditorLimited;
-import forge.screens.deckeditor.controllers.CEditorQuest;
-import forge.screens.home.quest.DialogChooseFormats;
-import forge.screens.home.quest.DialogChooseSets;
 import forge.screens.match.controllers.CDetailPicture;
 import forge.toolbox.FOptionPane;
 import forge.toolbox.FSkin;
@@ -213,48 +208,6 @@ public final class DeckManager extends ItemManager<DeckProxy> implements IHasGam
         }
         menu.add(fmt);
 
-        GuiUtils.addMenuItem(menu, localizer.getMessage("lblFormats") + "...", null, () -> {
-            final DeckFormatFilter existingFilter = getFilter(DeckFormatFilter.class);
-            if (existingFilter != null) {
-                existingFilter.edit();
-            } else {
-                final DialogChooseFormats dialog = new DialogChooseFormats();
-                dialog.setOkCallback(() -> {
-                    final List<GameFormat> formats = dialog.getSelectedFormats();
-                    if (!formats.isEmpty()) {
-                        for(GameFormat format: formats) {
-                            addFilter(new DeckFormatFilter(DeckManager.this, format));
-                        }
-                    }
-                });
-            }
-        });
-
-
-        GuiUtils.addMenuItem(menu, localizer.getMessage("lblSets") + "...", null, () -> {
-            final DeckSetFilter existingFilter = getFilter(DeckSetFilter.class);
-            if (existingFilter != null) {
-                existingFilter.edit();
-            } else {
-                List<String> limitedSets = getFilteredSetCodesInCatalog();
-                final DialogChooseSets dialog = new DialogChooseSets(null, null, limitedSets, true);
-                dialog.setOkCallback(() -> {
-                    final List<String> sets = dialog.getSelectedSets();
-                    if (!sets.isEmpty()) {
-                        addFilter(new DeckSetFilter(DeckManager.this, sets, limitedSets, dialog.getWantReprints()));
-                    }
-                });
-            }
-        });
-
-        final JMenu world = GuiUtils.createMenu(localizer.getMessage("lblQuestWorld"));
-        for (final QuestWorld w : FModel.getWorlds()) {
-            GuiUtils.addMenuItem(world, w.getName(), null, () -> addFilter(new DeckQuestWorldFilter(DeckManager.this, w)),
-                    DeckQuestWorldFilter.canAddQuestWorld(w, getFilter(DeckQuestWorldFilter.class))
-            );
-        }
-        menu.add(world);
-
         if (FModel.getPreferences().getPrefBoolean(ForgePreferences.FPref.LOAD_ARCHIVED_FORMATS)) {
             JMenu blocks = GuiUtils.createMenu(localizer.getMessage("lblBlock"));
             final Iterable<GameFormat> blockFormats = FModel.getFormats().getBlockList();
@@ -306,10 +259,6 @@ public final class DeckManager extends ItemManager<DeckProxy> implements IHasGam
         FScreen screen = null;
 
         switch (this.gameType) {
-            case Quest:
-                screen = FScreen.DECK_EDITOR_QUEST;
-                editorCtrl = new CEditorQuest(FModel.getQuest(), getCDetailPicture());
-                break;
             case Constructed:
                 screen = FScreen.DECK_EDITOR_CONSTRUCTED;
                 DeckPreferences.setCurrentDeck((deck != null) ? deck.toString() : "");
@@ -334,18 +283,6 @@ public final class DeckManager extends ItemManager<DeckProxy> implements IHasGam
                 screen = FScreen.DECK_EDITOR_CONSTRUCTED;  // re-use "Deck Editor", rather than creating a new top level tab
                 DeckPreferences.setTinyLeadersDeck((deck != null) ? deck.toString() : "");
                 editorCtrl = new CEditorConstructed(getCDetailPicture(), this.gameType);
-                break;
-            case Sealed:
-                screen = FScreen.DECK_EDITOR_SEALED;
-                editorCtrl = new CEditorLimited(FModel.getDecks().getSealed(), screen, getCDetailPicture());
-                break;
-            case Draft:
-                screen = FScreen.DECK_EDITOR_DRAFT;
-                editorCtrl = new CEditorLimited(FModel.getDecks().getDraft(), screen, getCDetailPicture());
-                break;
-            case Winston:
-                screen = FScreen.DECK_EDITOR_DRAFT;
-                editorCtrl = new CEditorLimited(FModel.getDecks().getWinston(), screen, getCDetailPicture());
                 break;
 
             default:
@@ -390,10 +327,6 @@ public final class DeckManager extends ItemManager<DeckProxy> implements IHasGam
             case Draft:
             case Sealed:
                 deck.deleteFromStorage();
-                break;
-            case Quest:
-                deck.deleteFromStorage();
-                FModel.getQuest().save();
                 break;
             default:
                 throw new UnsupportedOperationException("Delete not implemented for game type = " + gameType.toString());

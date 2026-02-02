@@ -13,7 +13,6 @@ import javax.swing.border.Border;
 
 import forge.gamemodes.gauntlet.GauntletData;
 import forge.gamemodes.gauntlet.GauntletIO;
-import forge.gamemodes.quest.QuestUtil;
 import forge.gui.UiCommand;
 import forge.localinstance.skin.FSkinProp;
 import forge.toolbox.FLabel;
@@ -304,7 +303,7 @@ public class QuickGauntletLister extends JPanel {
             gauntletName = FOptionPane.showInputDialog("Rename gauntlet to:", "Gauntlet Rename", null, oldGauntletName);
             if (gauntletName == null) { return; }
 
-            gauntletName = QuestUtil.cleanString(gauntletName);
+            gauntletName = gauntletName.trim().replaceAll("[\\\\/:*?\"<>|]", "");
             if (gauntletName.equals(oldGauntletName)) { return; } //quit if chose same name
 
             if (gauntletName.isEmpty()) {

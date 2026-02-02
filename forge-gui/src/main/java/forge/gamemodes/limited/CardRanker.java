@@ -135,7 +135,7 @@ public class CardRanker {
             rawScore = SCORE_UNPICKABLE;
         } else {
             Double rkg;
-            String customRankings = IBoosterDraft.CUSTOM_RANKINGS_FILE[0];
+            String customRankings = null; // Draft mode removed
             if (customRankings != null) {
                 rkg = DraftRankCache.getCustomRanking(customRankings, card.getName());
                 if (rkg == null) {

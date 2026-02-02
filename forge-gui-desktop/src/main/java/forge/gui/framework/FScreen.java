@@ -6,8 +6,6 @@ import forge.Singletons;
 import forge.localinstance.properties.FileLocation;
 import forge.localinstance.properties.ForgeConstants;
 import forge.localinstance.skin.FSkinProp;
-import forge.screens.bazaar.CBazaarUI;
-import forge.screens.bazaar.VBazaarUI;
 import forge.screens.deckeditor.CDeckEditorUI;
 import forge.screens.deckeditor.VDeckEditorUI;
 import forge.screens.home.CHomeUI;
@@ -171,15 +169,7 @@ public class FScreen {
             "lblLeaveDraft",
             ForgeConstants.EDITOR_LAYOUT_FILE,
             false);
-    public static final FScreen QUEST_BAZAAR = new FScreen(
-            VBazaarUI.SINGLETON_INSTANCE,
-            CBazaarUI.SINGLETON_INSTANCE,
-            "lblBazaar",
-            FSkin.getIcon(FSkinProp.ICO_QUEST_BOTTLES),
-            true,
-            "lblLeaveBazaar",
-            null,
-            false);
+    // QUEST_BAZAAR removed - Quest mode not available
 
     private final IVTopLevelUI view;
     private final ICDoc controller;

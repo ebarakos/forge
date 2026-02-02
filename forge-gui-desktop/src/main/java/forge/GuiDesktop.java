@@ -22,7 +22,6 @@ import javax.swing.ImageIcon;
 import javax.swing.JFileChooser;
 import javax.swing.SwingUtilities;
 
-import org.apache.commons.lang3.StringUtils;
 import org.jupnp.DefaultUpnpServiceConfiguration;
 import org.jupnp.UpnpServiceConfiguration;
 
@@ -35,15 +34,11 @@ import forge.gui.CardListViewer;
 import forge.gui.FThreads;
 import forge.gui.GuiChoose;
 import forge.gui.download.GuiDownloadService;
-import forge.gui.framework.FScreen;
 import forge.gui.interfaces.IGuiBase;
 import forge.gui.interfaces.IGuiGame;
 import forge.item.PaperCard;
 import forge.localinstance.skin.FSkinProp;
 import forge.localinstance.skin.ISkinImage;
-import forge.model.FModel;
-import forge.screens.deckeditor.CDeckEditorUI;
-import forge.screens.deckeditor.controllers.CEditorQuestCardShop;
 import forge.screens.match.CMatchUI;
 import forge.sound.AltSoundSystem;
 import forge.sound.AudioClip;
@@ -329,16 +324,12 @@ public class GuiDesktop implements IGuiBase {
 
     @Override
     public void showSpellShop() {
-        Singletons.getControl().setCurrentScreen(FScreen.QUEST_CARD_SHOP);
-        CDeckEditorUI.SINGLETON_INSTANCE.setEditorController(
-                new CEditorQuestCardShop(FModel.getQuest(), CDeckEditorUI.SINGLETON_INSTANCE.getCDetailPicture()));
+        // Quest mode removed
     }
 
     @Override
     public void showBazaar() {
-        Singletons.getControl().setCurrentScreen(FScreen.QUEST_BAZAAR);
-        FScreen.QUEST_BAZAAR.getController().update();
-        Singletons.getView().getFrame().validate();
+        // Quest mode removed
     }
 
     @Override

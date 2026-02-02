@@ -6,9 +6,6 @@ import forge.card.mana.ManaCostShard;
 import forge.deck.io.DeckPreferences;
 import forge.game.GameFormat;
 import forge.game.GameType;
-import forge.gamemodes.quest.QuestController;
-import forge.gamemodes.quest.QuestEvent;
-import forge.gamemodes.quest.QuestEventDifficulty;
 import forge.item.InventoryItem;
 import forge.item.PaperCard;
 import forge.item.PreconDeck;
@@ -20,8 +17,6 @@ import forge.util.IHasName;
 import forge.util.IterableUtil;
 import forge.util.storage.IStorage;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.tuple.ImmutablePair;
-import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.*;
 import java.util.Map.Entry;
@@ -612,43 +607,6 @@ public class DeckProxy implements InventoryItem {
         return decks;
     }
 
-    public static List<DeckProxy> getAllQuestEventAndChallenges() {
-        final List<DeckProxy> decks = new ArrayList<>();
-        final QuestController quest = FModel.getQuest();
-        for (final QuestEvent e : quest.getDuelsManager().getAllDuels()) {
-            decks.add(new DeckProxy(e.getEventDeck(), "Quest Event", null, null));
-        }
-        for (final QuestEvent e : quest.getChallenges()) {
-            decks.add(new DeckProxy(e.getEventDeck(), "Quest Event", null, null));
-        }
-        return decks;
-    }
-
-    public static Map<DeckProxy, Pair<List<String>, List<String>>> getAllQuestChallenges() {
-        final Map<DeckProxy, Pair<List<String>, List<String>>> deckMap = new HashMap<>();
-        final QuestController quest = FModel.getQuest();
-        for (final QuestEvent e : quest.getChallenges()) {
-            Pair<List<String>, List<String>> extras = new ImmutablePair<>(e.getHumanExtraCards(), e.getAiExtraCards());
-            deckMap.put(new DeckProxy(e.getEventDeck(), "Quest Event", null, null), extras);
-        }
-        return deckMap;
-    }
-
-    public static List<DeckProxy> getNonEasyQuestDuelDecks() {
-        final List<DeckProxy> decks = new ArrayList<>();
-        final QuestController quest = FModel.getQuest();
-        for (final QuestEvent e : quest.getDuelsManager().getDuels(QuestEventDifficulty.MEDIUM)) {
-            decks.add(new DeckProxy(e.getEventDeck(), "Quest Event", null, null));
-        }
-        for (final QuestEvent e : quest.getDuelsManager().getDuels(QuestEventDifficulty.HARD)) {
-            decks.add(new DeckProxy(e.getEventDeck(), "Quest Event", null, null));
-        }
-        for (final QuestEvent e : quest.getDuelsManager().getDuels(QuestEventDifficulty.EXPERT)) {
-            decks.add(new DeckProxy(e.getEventDeck(), "Quest Event", null, null));
-        }
-        return decks;
-    }
-
     public static List<DeckProxy> getAllGeneticAIDecks() {
         final List<DeckProxy> decks = new ArrayList<>();
         final IStorage<Deck> genetic = FModel.getDecks().getGeneticAIDecks();
@@ -675,16 +633,6 @@ public class DeckProxy implements InventoryItem {
             humanDecks.add(new DeckProxy(d, "Sealed", (Function<IHasName, Deck>)(Object) (Function<DeckGroup, Deck>) DeckGroup::getHumanDeck, GameType.Sealed, sealed));
         }
         return humanDecks;
-    }
-
-    public static List<DeckProxy> getAllQuestDecks(final IStorage<Deck> storage) {
-        final List<DeckProxy> decks = new ArrayList<>();
-        if (storage != null) {
-            for (final Deck deck : storage) {
-                decks.add(new DeckProxy(deck, "Quest", GameType.Quest, storage));
-            }
-        }
-        return decks;
     }
 
     @SuppressWarnings("unchecked")

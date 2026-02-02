@@ -1,6 +1,5 @@
 package forge.itemmanager;
 
-import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -13,7 +12,6 @@ import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 
 import forge.card.CardEdition;
@@ -22,17 +20,11 @@ import forge.card.CardRules;
 import forge.card.CardSplitType;
 import forge.card.CardType;
 import forge.card.MagicColor;
-import forge.deck.Deck;
 import forge.deck.CardPool;
 import forge.deck.DeckProxy;
 import forge.deck.DeckSection;
 import forge.game.GameFormat;
 import forge.game.keyword.Keyword;
-import forge.gamemodes.planarconquest.ConquestCommander;
-import forge.gamemodes.planarconquest.ConquestPlane;
-import forge.gamemodes.planarconquest.ConquestRegion;
-import forge.gamemodes.quest.QuestSpellShop;
-import forge.gamemodes.quest.QuestWorld;
 import forge.gui.FThreads;
 import forge.gui.GuiBase;
 import forge.gui.UiCommand;
@@ -109,39 +101,6 @@ public class AdvancedSearch {
             @Override
             protected Set<GameFormat> getItemValues(PaperCard input) {
                 return FModel.getFormats().getAllFormatsOfCard(input);
-            }
-        }),
-        CARD_PLANE("lblPlane", PaperCard.class, FilterOperator.MULTI_LIST_OPS, new CustomListEvaluator<PaperCard, ConquestPlane>(ImmutableList.copyOf(FModel.getPlanes())) {
-            @Override
-            protected ConquestPlane getItemValue(PaperCard input) {
-                throw new RuntimeException("getItemValues should be called instead");
-            }
-
-            @Override
-            protected Set<ConquestPlane> getItemValues(PaperCard input) {
-                return ConquestPlane.getAllPlanesOfCard(input);
-            }
-        }),
-        CARD_REGION("lblRegion", PaperCard.class, FilterOperator.MULTI_LIST_OPS, new CustomListEvaluator<PaperCard, ConquestRegion>(ConquestRegion.getAllRegions()) {
-            @Override
-            protected ConquestRegion getItemValue(PaperCard input) {
-                throw new RuntimeException("getItemValues should be called instead");
-            }
-
-            @Override
-            protected Set<ConquestRegion> getItemValues(PaperCard input) {
-                return ConquestRegion.getAllRegionsOfCard(input);
-            }
-        }),
-        CARD_QUEST_WORLD("lblQuestWorld", PaperCard.class, FilterOperator.MULTI_LIST_OPS, new CustomListEvaluator<PaperCard, QuestWorld>(ImmutableList.copyOf(FModel.getWorlds())) {
-            @Override
-            protected QuestWorld getItemValue(PaperCard input) {
-                throw new RuntimeException("getItemValues should be called instead");
-            }
-
-            @Override
-            protected Set<QuestWorld> getItemValues(PaperCard input) {
-                return QuestWorld.getAllQuestWorldsOfCard(input);
             }
         }),
         CARD_COLOR("lblColor", PaperCard.class, FilterOperator.COMBINATION_OPS, new ColorEvaluator<PaperCard>() {
@@ -370,48 +329,6 @@ public class AdvancedSearch {
                 return FModel.getFormats().getAllFormatsOfCard((PaperCard) input);
             }
         }),
-        INVITEM_PLANE("lblPlane", InventoryItem.class, FilterOperator.MULTI_LIST_OPS, new CustomListEvaluator<InventoryItem, ConquestPlane>(ImmutableList.copyOf(FModel.getPlanes())) {
-            @Override
-            protected ConquestPlane getItemValue(InventoryItem input) {
-                throw new RuntimeException("getItemValues should be called instead");
-            }
-
-            @Override
-            protected Set<ConquestPlane> getItemValues(InventoryItem input) {
-                if (!(input instanceof PaperCard)) {
-                    return new HashSet<>();
-                }
-                return ConquestPlane.getAllPlanesOfCard((PaperCard) input);
-            }
-        }),
-        INVITEM_REGION("lblRegion", InventoryItem.class, FilterOperator.MULTI_LIST_OPS, new CustomListEvaluator<InventoryItem, ConquestRegion>(ConquestRegion.getAllRegions()) {
-            @Override
-            protected ConquestRegion getItemValue(InventoryItem input) {
-                throw new RuntimeException("getItemValues should be called instead");
-            }
-
-            @Override
-            protected Set<ConquestRegion> getItemValues(InventoryItem input) {
-                if (!(input instanceof PaperCard)) {
-                    return new HashSet<>();
-                }
-                return ConquestRegion.getAllRegionsOfCard((PaperCard) input);
-            }
-        }),
-        INVITEM_QUEST_WORLD("lblQuestWorld", InventoryItem.class, FilterOperator.MULTI_LIST_OPS, new CustomListEvaluator<InventoryItem, QuestWorld>(ImmutableList.copyOf(FModel.getWorlds())) {
-            @Override
-            protected QuestWorld getItemValue(InventoryItem input) {
-                throw new RuntimeException("getItemValues should be called instead");
-            }
-
-            @Override
-            protected Set<QuestWorld> getItemValues(InventoryItem input) {
-                if (!(input instanceof PaperCard)) {
-                    return new HashSet<>();
-                }
-                return QuestWorld.getAllQuestWorldsOfCard(((PaperCard) input));
-            }
-        }),
         INVITEM_COLOR("lblColor", InventoryItem.class, FilterOperator.COMBINATION_OPS, new ColorEvaluator<InventoryItem>() {
             @Override
             protected MagicColor.Color getItemValue(InventoryItem input) {
@@ -575,24 +492,6 @@ public class AdvancedSearch {
                 return ((PaperCard) input).getRarity();
             }
         }),
-        INVITEM_BUY_PRICE("lblBuyPrice", InventoryItem.class, FilterOperator.NUMBER_OPS, new NumericEvaluator<InventoryItem>(0, 10000000) {
-            @Override
-            protected Integer getItemValue(InventoryItem input) {
-                return (Integer) QuestSpellShop.fnPriceGet.apply(new AbstractMap.SimpleEntry<InventoryItem, Integer>(input, 1));
-            }
-        }),
-        INVITEM_SELL_PRICE("lblSellPrice", InventoryItem.class, FilterOperator.NUMBER_OPS, new NumericEvaluator<InventoryItem>(0, 10000000) {
-            @Override
-            protected Integer getItemValue(InventoryItem input) {
-                return (Integer) QuestSpellShop.fnPriceSellGet.apply(new AbstractMap.SimpleEntry<InventoryItem, Integer>(input, 1));
-            }
-        }),
-        INVITEM_USED_IN_QUEST_DECKS("lblUsedInQuestDecks", InventoryItem.class, FilterOperator.NUMBER_OPS, new NumericEvaluator<InventoryItem>(0, 100) {
-            @Override
-            protected Integer getItemValue(InventoryItem input) {
-                return (Integer) Integer.parseInt((String) QuestSpellShop.fnDeckGet.apply(new AbstractMap.SimpleEntry<InventoryItem, Integer>(input, 1)));
-            }
-        }),
         DECK_NAME("lblName", DeckProxy.class, FilterOperator.STRING_OPS, new StringEvaluator<DeckProxy>() {
             @Override
             protected String getItemValue(DeckProxy input) {
@@ -620,17 +519,6 @@ public class AdvancedSearch {
             @Override
             protected Set<GameFormat> getItemValues(DeckProxy input) {
                 return input.getExhaustiveFormats();
-            }
-        }),
-        DECK_QUEST_WORLD("lblQuestWorld", DeckProxy.class, FilterOperator.MULTI_LIST_OPS, new CustomListEvaluator<DeckProxy, QuestWorld>(ImmutableList.copyOf(FModel.getWorlds())) {
-            @Override
-            protected QuestWorld getItemValue(DeckProxy input) {
-                throw new RuntimeException("getItemValues should be called instead");
-            }
-
-            @Override
-            protected Set<QuestWorld> getItemValues(DeckProxy input) {
-                return QuestWorld.getAllQuestWorldsOfDeck(input.getDeck());
             }
         }),
         DECK_COLOR("lblColor", DeckProxy.class, FilterOperator.COMBINATION_OPS, new ColorEvaluator<DeckProxy>() {
@@ -693,47 +581,6 @@ public class AdvancedSearch {
             @Override
             protected Integer getItemValue(DeckProxy input) {
                 return Math.max(input.getSideSize(), 0);
-            }
-        }),
-        COMMANDER_NAME("lblName", ConquestCommander.class, FilterOperator.STRING_OPS, new StringEvaluator<ConquestCommander>() {
-            @Override
-            protected String getItemValue(ConquestCommander input) {
-                return input.getDisplayName();
-            }
-        }),
-        COMMANDER_ORIGIN("lblOrigin", ConquestCommander.class, FilterOperator.SINGLE_LIST_OPS, new CustomListEvaluator<ConquestCommander, ConquestPlane>(ImmutableList.copyOf(FModel.getPlanes())) {
-            @Override
-            protected ConquestPlane getItemValue(ConquestCommander input) {
-                return input.getOriginPlane();
-            }
-        }),
-        COMMANDER_COLOR("lblColor", ConquestCommander.class, FilterOperator.COMBINATION_OPS, new ColorEvaluator<ConquestCommander>() {
-            @Override
-            protected MagicColor.Color getItemValue(ConquestCommander input) {
-                throw new RuntimeException("getItemValues should be called instead");
-            }
-
-            @Override
-            protected Set<MagicColor.Color> getItemValues(ConquestCommander input) {
-                return input.getCard().getRules().getColorIdentity().toEnumSet();
-            }
-        }),
-        COMMANDER_COLOR_COUNT("lblColorCount", ConquestCommander.class, FilterOperator.NUMBER_OPS, new NumericEvaluator<ConquestCommander>(0, 5) {
-            @Override
-            protected Integer getItemValue(ConquestCommander input) {
-                return input.getCard().getRules().getColorIdentity().countColors();
-            }
-        }),
-        COMMANDER_DECK_AVERAGE_CMC("lblDeckAverageCMC", ConquestCommander.class, FilterOperator.NUMBER_OPS, new NumericEvaluator<ConquestCommander>(0, 20) {
-            @Override
-            protected Integer getItemValue(ConquestCommander input) {
-                return Deck.getAverageCMC(input.getDeck());
-            }
-        }),
-        COMMANDER_DECK_CONTENTS("lblDeckContents", ConquestCommander.class, FilterOperator.DECK_CONTENT_OPS, new DeckContentEvaluator<ConquestCommander>() {
-            @Override
-            protected Map<String, Integer> getItemValue(ConquestCommander input) {
-                return input.getDeck().getMain().toNameLookup();
             }
         }),
         COMMANDER_DECK_SIZE("lblDeckSize", DeckProxy.class, FilterOperator.NUMBER_OPS, new NumericEvaluator<DeckProxy>(40, 250) {
