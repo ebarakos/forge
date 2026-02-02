@@ -1,5 +1,7 @@
 # ⚔️  Forge: The Magic: The Gathering Rules Engine
 
+> **Experimental Branch:** This branch contains experimental changes and modifications.
+
 Join the **Forge community** on [Discord](https://discord.gg/HcPJNyD66a)!
 
 [![Test build](https://github.com/Card-Forge/forge/actions/workflows/test-build.yaml/badge.svg)](https://github.com/Card-Forge/forge/actions/workflows/test-build.yaml)
