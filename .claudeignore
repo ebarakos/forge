@@ -1,0 +1,38 @@
+# Build outputs (regenerated on build)
+target/
+*/target/
+
+# Large asset collections (200+ MB total)
+forge-gui/res/cardsfolder/
+forge-gui/res/music/
+forge-gui/res/sound/
+forge-gui/res/skins/
+forge-gui/res/languages/
+forge-gui/res/effects/
+
+# Generated/ML data files
+forge-gui/res/deckgendecks/
+forge-gui/res/geneticaidecks/
+forge-gui/res/tokenscripts/
+
+# UI assets
+forge-gui/res/fonts/
+
+# Game data/configuration (large but not code)
+forge-gui/res/defaults/
+forge-gui/res/blockdata/
+forge-gui/res/editions/
+forge-gui/res/formats/
+forge-gui/res/lists/
+forge-gui/res/setlookup/
+forge-gui/res/licenses/
+
+# User data
+user/
+
+# Documentation (optional - remove if you want docs indexed)
+docs/
+
+# CI/CD (optional)
+.github/workflows/
+.github/ISSUE_TEMPLATE/
