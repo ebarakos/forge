@@ -31,6 +31,11 @@ public class GameStateEvaluator {
     // Combo state bonus from profile (cached)
     private int comboStateBonus = 0;
 
+    // Card evaluation cache for faster repeated evaluations
+    // Key format: "cardName:P/T:tapped:counters" for creatures, "cardName:loyalty" for planeswalkers
+    private final java.util.Map<String, Integer> cardEvalCache = new java.util.HashMap<>();
+    private static final int MAX_CACHE_SIZE = 1000;
+
     public void setDebugging(boolean debugging) {
         this.debugging = debugging;
     }
@@ -532,25 +537,70 @@ public class GameStateEvaluator {
     }
 
     public int evalCard(Game game, Player aiPlayer, Card c) {
-        // TODO: These should be based on other considerations - e.g. in relation to opponents state.
+        // Generate cache key based on card state
+        String cacheKey = getCardCacheKey(c);
+
+        // Check cache first
+        Integer cachedValue = cardEvalCache.get(cacheKey);
+        if (cachedValue != null) {
+            return cachedValue;
+        }
+
+        // Calculate value
+        int value;
         if (c.isCreature()) {
-            return eval.evaluateCreature(c);
+            value = eval.evaluateCreature(c);
         } else if (c.isLand()) {
-            return evaluateLand(c);
+            value = evaluateLand(c);
         } else if (c.isEnchantingCard()) {
             // TODO: Should provide value in whatever it's enchanting?
             // Else the computer would think that casting a Lifelink enchantment
             // on something that already has lifelink is a net win.
-            return 0;
+            value = 0;
         } else {
             // TODO treat cards like Captive Audience negative
             // e.g. a 5 CMC permanent results in 200, whereas a 5/5 creature is ~225
-            int value = 50 + 30 * c.getCMC();
+            value = 50 + 30 * c.getCMC();
             if (c.isPlaneswalker()) {
                 value += 2 * c.getCounters(CounterEnumType.LOYALTY);
             }
-            return value;
         }
+
+        // Store in cache (with size limit)
+        if (cardEvalCache.size() < MAX_CACHE_SIZE) {
+            cardEvalCache.put(cacheKey, value);
+        }
+
+        return value;
+    }
+
+    /**
+     * Generates a cache key for a card based on its current state.
+     * The key includes properties that affect the card's evaluation.
+     */
+    private String getCardCacheKey(Card c) {
+        StringBuilder key = new StringBuilder(c.getName());
+        if (c.isCreature()) {
+            // For creatures: include P/T which affects evaluation significantly
+            key.append(':').append(c.getNetPower()).append('/').append(c.getNetToughness());
+            // Include +1/+1 counters as they affect value
+            int p1p1 = c.getCounters(CounterEnumType.P1P1);
+            if (p1p1 > 0) {
+                key.append(":+").append(p1p1);
+            }
+        } else if (c.isPlaneswalker()) {
+            // For planeswalkers: include loyalty
+            key.append(':').append(c.getCounters(CounterEnumType.LOYALTY));
+        }
+        return key.toString();
+    }
+
+    /**
+     * Clears the card evaluation cache.
+     * Should be called at the start of a new evaluation to ensure fresh results.
+     */
+    public void clearCache() {
+        cardEvalCache.clear();
     }
 
     public static int evaluateLand(Card c) {

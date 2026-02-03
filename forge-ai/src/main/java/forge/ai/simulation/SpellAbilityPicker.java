@@ -31,6 +31,9 @@ public class SpellAbilityPicker {
     private Plan plan;
     private int numSimulations;
 
+    // Move orderer for alpha-beta pruning efficiency
+    private static final MoveOrderer moveOrderer = new MoveOrderer();
+
     public SpellAbilityPicker(Game game, Player player) {
         this.game = game;
         this.player = player;
@@ -170,13 +173,29 @@ public class SpellAbilityPicker {
 
         SpellAbility bestSa = null;
         Score bestSaValue = origGameScore;
+        int bestSaIndex = -1;
         print("Evaluating... (orig score = " + origGameScore +  ")");
-        for (int i = 0; i < candidateSAs.size(); i++) {
-            Score value = evaluateSa(controller, phase, candidateSAs, i);
+
+        // Use move orderer to evaluate candidates in a better order for pruning
+        List<Integer> orderedIndices = moveOrderer.orderMoves(candidateSAs, controller.getDepth());
+
+        for (int idx : orderedIndices) {
+            Score value = evaluateSa(controller, phase, candidateSAs, idx);
             if (value.value > bestSaValue.value) {
                 bestSaValue = value;
-                bestSa = candidateSAs.get(i);
+                bestSa = candidateSAs.get(idx);
+                bestSaIndex = idx;
+
+                // Record this as a killer move since it improved our score
+                if (bestSa != null) {
+                    moveOrderer.recordKillerMove(bestSa, controller.getDepth());
+                }
             }
+        }
+
+        // Update history heuristic for the best move
+        if (bestSa != null && bestSaIndex >= 0) {
+            moveOrderer.updateHistory(bestSa, controller.getDepth());
         }
 
         // To make the AI hold-off on playing creatures in MAIN1 if they give no other benefits,

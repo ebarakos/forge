@@ -95,6 +95,14 @@ public class SimulationController {
         return scoreStack.size() - 1;
     }
 
+    /**
+     * Gets the current recursion depth (public accessor for move ordering).
+     * @return the current depth in the search tree
+     */
+    public int getDepth() {
+        return getRecursionDepth();
+    }
+
     public boolean shouldRecurse() {
         // Don't recurse if we've already found a winning move
         if (bestScore.value == Integer.MAX_VALUE) {
