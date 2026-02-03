@@ -102,6 +102,12 @@ public class GameStateEvaluator {
             bonus += comboStateBonus;
         }
 
+        // Additional archetype synergy detection
+        bonus += evaluateGraveyardSynergy(aiPlayer);
+        bonus += evaluateSacrificeSynergy(aiPlayer);
+        bonus += evaluateCounterSynergy(aiPlayer);
+        bonus += evaluateTribalSynergy(aiPlayer);
+
         return bonus;
     }
 
@@ -125,16 +131,211 @@ public class GameStateEvaluator {
         int count = 0;
         for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
             String name = c.getName().toLowerCase();
-            // Common mana doublers
+            // Common mana doublers and mana multipliers
             if (name.contains("mana reflection") ||
                 name.contains("vorinclex") ||
                 name.contains("nyxbloom") ||
                 name.contains("mirari's wake") ||
-                name.contains("zendikar resurgent")) {
+                name.contains("zendikar resurgent") ||
+                // Additional mana doublers/multipliers
+                name.contains("caged sun") ||
+                name.contains("gauntlet of power") ||
+                name.contains("mana flare") ||
+                name.contains("dictate of karametra") ||
+                name.contains("heartbeat of spring") ||
+                name.contains("regal behemoth") ||
+                name.contains("sasaya") ||
+                // Virtual mana doublers (untap effects)
+                name.contains("wilderness reclamation") ||
+                name.contains("seedborn muse") ||
+                name.contains("prophet of kruphix") ||
+                name.contains("sword of feast and famine") ||
+                name.contains("bear umbra") ||
+                name.contains("nature's will") ||
+                name.contains("patron of the orochi")) {
                 count++;
             }
         }
         return count;
+    }
+
+    /**
+     * Evaluates graveyard synergy for reanimator/dredge strategies.
+     * Provides bonus for having high-value creatures in graveyard.
+     */
+    private int evaluateGraveyardSynergy(Player player) {
+        if (comboStateBonus == 0) {
+            return 0;
+        }
+        int bonus = 0;
+        int creatureCount = 0;
+        int totalCMC = 0;
+
+        for (Card c : player.getCardsIn(ZoneType.Graveyard)) {
+            if (c.isCreature()) {
+                creatureCount++;
+                totalCMC += c.getCMC();
+            }
+        }
+
+        // Bonus for having high-CMC creatures in graveyard (reanimator targets)
+        if (creatureCount >= 2 && totalCMC >= 10) {
+            bonus += comboStateBonus / 4;
+        }
+
+        // Check for graveyard size (dredge, flashback synergy)
+        int graveyardSize = player.getCardsIn(ZoneType.Graveyard).size();
+        if (graveyardSize >= 10) {
+            bonus += comboStateBonus / 8;
+        }
+        if (graveyardSize >= 15) {
+            bonus += comboStateBonus / 8;
+        }
+
+        return bonus;
+    }
+
+    /**
+     * Evaluates sacrifice synergy for aristocrats strategies.
+     * Detects sacrifice outlets combined with death triggers.
+     */
+    private int evaluateSacrificeSynergy(Player player) {
+        if (comboStateBonus == 0) {
+            return 0;
+        }
+        int bonus = 0;
+        int sacrificeOutlets = 0;
+        int deathTriggers = 0;
+
+        for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+            String name = c.getName().toLowerCase();
+            String text = c.getText().toLowerCase();
+
+            // Sacrifice outlets - free sac outlets are most valuable
+            if (name.contains("viscera seer") ||
+                name.contains("carrion feeder") ||
+                name.contains("yahenni") ||
+                name.contains("woe strider") ||
+                name.contains("phyrexian altar") ||
+                name.contains("ashnod's altar") ||
+                name.contains("goblin bombardment") ||
+                name.contains("altar of dementia") ||
+                name.contains("blasting station")) {
+                sacrificeOutlets++;
+            } else if (text.contains("sacrifice a creature") || text.contains("sacrifice another")) {
+                sacrificeOutlets++;
+            }
+
+            // Death triggers / Blood Artist effects
+            if (name.contains("blood artist") ||
+                name.contains("zulaport cutthroat") ||
+                name.contains("cruel celebrant") ||
+                name.contains("bastion of remembrance") ||
+                name.contains("judith") ||
+                name.contains("mayhem devil") ||
+                name.contains("vindictive vampire") ||
+                name.contains("falkenrath noble") ||
+                name.contains("syr konrad")) {
+                deathTriggers += 2; // Worth extra
+            } else if (text.contains("when") && (text.contains("dies") || text.contains("put into a graveyard from the battlefield"))) {
+                if (c.isCreature() || c.isEnchantment()) {
+                    deathTriggers++;
+                }
+            }
+        }
+
+        // Synergy bonus when both sacrifice outlet and payoff present
+        if (sacrificeOutlets >= 1 && deathTriggers >= 1) {
+            bonus += comboStateBonus / 4;
+        }
+        if (sacrificeOutlets >= 2 && deathTriggers >= 2) {
+            bonus += comboStateBonus / 2;
+        }
+
+        return bonus;
+    }
+
+    /**
+     * Evaluates +1/+1 counter synergy potential.
+     * Detects counter doublers and creatures with counters.
+     */
+    private int evaluateCounterSynergy(Player player) {
+        if (comboStateBonus == 0) {
+            return 0;
+        }
+        int bonus = 0;
+        int creaturesWithCounters = 0;
+        int counterSynergyCards = 0;
+
+        for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isCreature() && c.getCounters(CounterEnumType.P1P1) > 0) {
+                creaturesWithCounters++;
+            }
+
+            String name = c.getName().toLowerCase();
+            if (name.contains("hardened scales") ||
+                name.contains("winding constrictor") ||
+                name.contains("branching evolution") ||
+                name.contains("doubling season") ||
+                name.contains("corpsejack menace") ||
+                name.contains("vorinclex, monstrous") ||
+                name.contains("cathars' crusade") ||
+                name.contains("ozolith") ||
+                name.contains("conclave mentor") ||
+                name.contains("rishkar") ||
+                c.hasKeyword(Keyword.MODULAR) ||
+                c.hasKeyword(Keyword.EVOLVE)) {
+                counterSynergyCards++;
+            }
+        }
+
+        if (creaturesWithCounters >= 3 && counterSynergyCards >= 1) {
+            bonus += comboStateBonus / 4;
+        }
+        if (creaturesWithCounters >= 5 && counterSynergyCards >= 2) {
+            bonus += comboStateBonus / 4;
+        }
+
+        return bonus;
+    }
+
+    /**
+     * Evaluates tribal synergy for common creature types.
+     * Provides bonus for concentrated tribal boards.
+     */
+    private int evaluateTribalSynergy(Player player) {
+        if (comboStateBonus == 0) {
+            return 0;
+        }
+        int bonus = 0;
+
+        // Count creatures by type
+        java.util.Map<String, Integer> typeCounts = new java.util.HashMap<>();
+        String[] relevantTribes = {"Elf", "Goblin", "Zombie", "Vampire", "Merfolk",
+                                   "Soldier", "Wizard", "Dragon", "Human", "Cleric",
+                                   "Knight", "Elemental", "Spirit", "Angel", "Demon"};
+
+        for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isCreature()) {
+                for (String tribe : relevantTribes) {
+                    if (c.getType().hasCreatureType(tribe)) {
+                        typeCounts.merge(tribe, 1, Integer::sum);
+                    }
+                }
+            }
+        }
+
+        // Bonus for tribal concentration
+        for (int count : typeCounts.values()) {
+            if (count >= 4) {
+                bonus += comboStateBonus / 8;
+            }
+            if (count >= 6) {
+                bonus += comboStateBonus / 4;
+            }
+        }
+
+        return bonus;
     }
 
     private static void debugPrint(String s) {

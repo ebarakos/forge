@@ -1,0 +1,156 @@
+# Ascended AI Profile - Elevated beyond Enhanced
+# Maximum strength competitive play with advanced combo and synergy detection
+# This profile builds on Enhanced with deeper simulation, improved archetype awareness,
+# and better strategic decision-making
+
+# ==========================================
+# Ascended Simulation Settings
+# ==========================================
+# Maximum recursion depth for simulation (default is 3)
+SIMULATION_MAX_DEPTH=6
+# Maximum time in milliseconds per decision (increased from 5000)
+SIMULATION_TIME_LIMIT_MS=8000
+# Enable detection of infinite loops during simulation
+LOOP_DETECTION_ENABLED=true
+# Enable transposition table for caching evaluated positions
+USE_TRANSPOSITION_TABLE=true
+# Enable iterative deepening search
+USE_ITERATIVE_DEEPENING=true
+# Higher bonus score for detecting combo-ready states (increased from 100)
+COMBO_STATE_BONUS=150
+
+# ==========================================
+# Strategic Behavior Settings
+# ==========================================
+# The amount of cards at which to stop considering mulligan
+MULLIGAN_THRESHOLD=5
+
+# Strategic planning for Main Phase 2
+PREDICT_SPELLS_FOR_MAIN2=true
+# Higher chance to reserve mana for Main Phase 2 plays
+RESERVE_MANA_FOR_MAIN2_CHANCE=90
+# Always hold land drops until Main 2 if unused
+HOLD_LAND_DROP_FOR_MAIN2_IF_UNUSED=100
+HOLD_LAND_DROP_ONLY_IF_HAVE_OTHER_PERMS=true
+
+# ==========================================
+# Combat Evaluation - Calculated Aggression
+# ==========================================
+# Not overly aggressive - evaluate trades carefully
+PLAY_AGGRO=false
+# Slightly higher chance to attack into trades when favorable
+CHANCE_TO_ATTACK_INTO_TRADE=40
+RANDOMLY_ATKTRADE_ONLY_ON_LOWER_LIFE_PRESSURE=true
+ATTACK_INTO_TRADE_WHEN_TAPPED_OUT=false
+CHANCE_TO_ATKTRADE_WHEN_OPP_HAS_MANA=25
+TRY_TO_AVOID_ATTACKING_INTO_CERTAIN_BLOCK=true
+
+# Smart blocking trades
+ENABLE_RANDOM_FAVORABLE_TRADES_ON_BLOCK=true
+RANDOMLY_TRADE_EVEN_WHEN_HAVE_LESS_CREATS=false
+MAX_DIFF_IN_CREATURE_COUNT_TO_TRADE=1
+ALSO_TRADE_WHEN_HAVE_A_REPLACEMENT_CREAT=true
+MIN_CHANCE_TO_RANDOMLY_TRADE_ON_BLOCK=50
+MAX_CHANCE_TO_RANDOMLY_TRADE_ON_BLOCK=85
+
+# Combat tricks - hold for maximum effect
+TRY_TO_HOLD_COMBAT_TRICKS_UNTIL_BLOCK=true
+CHANCE_TO_HOLD_COMBAT_TRICKS_UNTIL_BLOCK=80
+
+# ==========================================
+# Spell Countering - Very Reactive
+# ==========================================
+MIN_SPELL_CMC_TO_COUNTER=1
+CHANCE_TO_COUNTER_CMC_1=60
+CHANCE_TO_COUNTER_CMC_2=85
+CHANCE_TO_COUNTER_CMC_3=100
+ALWAYS_COUNTER_OTHER_COUNTERSPELLS=true
+ALWAYS_COUNTER_DAMAGE_SPELLS=true
+ALWAYS_COUNTER_CMC_0_MANA_MAKING_PERMS=true
+ALWAYS_COUNTER_REMOVAL_SPELLS=true
+ALWAYS_COUNTER_PUMP_SPELLS=true
+ALWAYS_COUNTER_AURAS=true
+
+# ==========================================
+# Danger Assessment - Balanced
+# ==========================================
+# If AI would drop to this amount of life, defend more actively
+AI_IN_DANGER_THRESHOLD=5
+AI_IN_DANGER_MAX_THRESHOLD=7
+
+# ==========================================
+# Removal and Destruction Priorities
+# ==========================================
+ACTIVELY_DESTROY_ARTS_AND_NONAURA_ENCHS=true
+ACTIVELY_DESTROY_IMMEDIATELY_UNBLOCKABLE=true
+DESTROY_IMMEDIATELY_UNBLOCKABLE_THRESHOLD=3
+AVOID_TARGETING_CREATS_THAT_WILL_DIE=true
+DONT_EVAL_KILLSPELLS_ON_STACK_WITH_PERMISSION=true
+CHANCE_TO_CHAIN_TWO_DAMAGE_SPELLS=100
+
+# ==========================================
+# Token and Resource Management
+# ==========================================
+TOKEN_GENERATION_ABILITY_CHANCE=90
+TOKEN_GENERATION_ALWAYS_IF_FROM_PLANESWALKER=true
+TOKEN_GENERATION_ALWAYS_IF_OPP_ATTACKS=true
+
+# ==========================================
+# Planeswalker Protection - High Priority
+# ==========================================
+CHANCE_TO_TRADE_TO_SAVE_PLANESWALKER=85
+CHANCE_TO_TRADE_DOWN_TO_SAVE_PLANESWALKER=30
+THRESHOLD_TOKEN_CHUMP_TO_SAVE_PLANESWALKER=130
+THRESHOLD_NONTOKEN_CHUMP_TO_SAVE_PLANESWALKER=115
+CHUMP_TO_SAVE_PLANESWALKER_ONLY_ON_LETHAL=false
+
+# ==========================================
+# Scry Logic - Optimize Card Selection
+# ==========================================
+SCRY_NUM_LANDS_TO_STILL_NEED_MORE=4
+SCRY_NUM_LANDS_TO_NOT_NEED_MORE=7
+SCRY_NUM_CREATURES_TO_NOT_NEED_SUBPAR_ONES=4
+SCRY_EVALTHR_CREATCOUNT_TO_SCRY_AWAY_LOWCMC=3
+SCRY_EVALTHR_TO_SCRY_AWAY_LOWCMC_CREATURE=160
+SCRY_EVALTHR_CMC_THRESHOLD=3
+SCRY_IMMEDIATELY_UNCASTABLE_TO_BOTTOM=true
+SCRY_IMMEDIATELY_UNCASTABLE_CMC_DIFF=2
+
+# ==========================================
+# Flash Creatures - Maximum Value
+# ==========================================
+FLASH_ENABLE_ADVANCED_LOGIC=true
+FLASH_CHANCE_TO_OBEY_AMBUSHAI=100
+FLASH_CHANCE_TO_CAST_DUE_TO_ETB_EFFECTS=100
+FLASH_CHANCE_TO_CAST_FOR_ETB_BEFORE_MAIN1=10
+FLASH_CHANCE_TO_RESPOND_TO_STACK_WITH_ETB=30
+FLASH_CHANCE_TO_CAST_AS_VALUABLE_BLOCKER=100
+FLASH_USE_BUFF_AURAS_AS_COMBAT_TRICKS=true
+FLASH_BUFF_AURA_CHANCE_TO_CAST_EARLY=3
+FLASH_BUFF_AURA_CHANCE_CAST_AT_EOT=15
+FLASH_BUFF_AURA_CHANCE_TO_RESPOND_TO_STACK=100
+
+# ==========================================
+# Equipment Management
+# ==========================================
+MOVE_EQUIPMENT_TO_BETTER_CREATURES=from_useless_only
+MOVE_EQUIPMENT_CREATURE_EVAL_THRESHOLD=70
+PRIORITIZE_MOVE_EQUIPMENT_IF_USELESS=true
+
+# ==========================================
+# Sideboarding - Active
+# ==========================================
+SIDEBOARDING_ENABLE=true
+SIDEBOARDING_CHANCE_PER_CARD=70
+SIDEBOARDING_CHANCE_ON_WIN=15
+SIDEBOARDING_IN_LIMITED_FORMATS=true
+SIDEBOARDING_SHARED_TYPE_ONLY=false
+SIDEBOARDING_PLANESWALKER_EQ_CREATURE=true
+
+# ==========================================
+# Planechase (if applicable)
+# ==========================================
+DEFAULT_MAX_PLANAR_DIE_ROLLS_PER_TURN=1
+DEFAULT_MIN_TURN_TO_ROLL_PLANAR_DIE=3
+DEFAULT_PLANAR_DIE_ROLL_CHANCE=50
+PLANAR_DIE_ROLL_HESITATION_CHANCE=10
