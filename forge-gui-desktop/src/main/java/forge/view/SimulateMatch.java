@@ -1,6 +1,8 @@
 package forge.view;
 
 import java.io.File;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -38,6 +40,47 @@ import forge.util.WordUtil;
 import forge.util.storage.IStorage;
 
 public class SimulateMatch {
+    // Null output stream to suppress debug prints during quiet mode
+    private static final PrintStream NULL_PRINT_STREAM = new PrintStream(new OutputStream() {
+        @Override public void write(int b) { }
+        @Override public void write(byte[] b) { }
+        @Override public void write(byte[] b, int off, int len) { }
+    });
+
+    // Store original stdout/stderr for restoration
+    private static final PrintStream ORIGINAL_OUT = System.out;
+    private static final PrintStream ORIGINAL_ERR = System.err;
+
+    /**
+     * Configuration for a player in parallel simulation.
+     * Stores the original deck and player info so fresh RegisteredPlayer objects
+     * can be created for each parallel game (avoiding thread-safety issues).
+     */
+    private static class PlayerConfig {
+        final Deck deck;
+        final String name;
+        final String aiProfile;
+        final GameType gameType;
+
+        PlayerConfig(Deck deck, String name, String aiProfile, GameType gameType) {
+            this.deck = deck;
+            this.name = name;
+            this.aiProfile = aiProfile;
+            this.gameType = gameType;
+        }
+
+        RegisteredPlayer createRegisteredPlayer() {
+            RegisteredPlayer rp;
+            if (gameType.equals(GameType.Commander)) {
+                rp = RegisteredPlayer.forCommander((Deck) deck.copyTo(deck.getName()));
+            } else {
+                rp = new RegisteredPlayer((Deck) deck.copyTo(deck.getName()));
+            }
+            rp.setPlayer(GamePlayerUtil.createAiPlayer(name, aiProfile));
+            return rp;
+        }
+    }
+
     public static void simulate(String[] args) {
         FModel.initialize(null, null);
 
@@ -83,7 +126,10 @@ public class SimulateMatch {
             matchSize = Integer.parseInt(params.get("m").get(0));
         }
 
-        boolean outputGamelog = !params.containsKey("q");
+        // Quiet mode: suppress game logs if -q flag OR -j flag is passed
+        // Full game logging only in sequential mode without -q
+        boolean quietMode = params.containsKey("q") || params.containsKey("j");
+        boolean outputGamelog = !quietMode;
 
         GameType type = GameType.Constructed;
         if (params.containsKey("f")) {
@@ -113,6 +159,7 @@ public class SimulateMatch {
         }
 
         List<RegisteredPlayer> pp = new ArrayList<>();
+        List<PlayerConfig> playerConfigs = new ArrayList<>();
         StringBuilder sb = new StringBuilder();
 
         int i = 1;
@@ -130,14 +177,18 @@ public class SimulateMatch {
                 String name = TextUtil.concatNoSpace("Ai(", String.valueOf(i), ")-", d.getName());
                 sb.append(name);
 
-                RegisteredPlayer rp;
+                String profile = aiProfiles.getOrDefault(i - 1, "");
 
+                // Store config for parallel execution (creates fresh players per game)
+                playerConfigs.add(new PlayerConfig(d, name, profile, type));
+
+                // Also create RegisteredPlayer for sequential execution
+                RegisteredPlayer rp;
                 if (type.equals(GameType.Commander)) {
                     rp = RegisteredPlayer.forCommander(d);
                 } else {
                     rp = new RegisteredPlayer(d);
                 }
-                String profile = aiProfiles.getOrDefault(i - 1, "");
                 rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
                 pp.add(rp);
                 i++;
@@ -171,24 +222,42 @@ public class SimulateMatch {
 
         System.out.println(sb.toString());
 
-        if (matchSize != 0) {
-            // Match mode - must be sequential (games depend on each other)
-            Match mc = new Match(rules, pp, "Test");
-            int iGame = 0;
-            while (!mc.isMatchOver()) {
-                // play games until the match ends
-                simulateSingleMatch(mc, iGame, outputGamelog, useSnapshot);
-                iGame++;
+        // Suppress output early for quiet mode to catch any debug prints during game setup
+        if (quietMode) {
+            System.setOut(NULL_PRINT_STREAM);
+            System.setErr(NULL_PRINT_STREAM);
+        }
+
+        try {
+            if (matchSize != 0) {
+                // Match mode - must be sequential (games depend on each other)
+                Match mc = new Match(rules, pp, "Test");
+                int iGame = 0;
+                while (!mc.isMatchOver()) {
+                    // play games until the match ends
+                    simulateSingleMatch(mc, iGame, outputGamelog, useSnapshot);
+                    iGame++;
+                }
+            } else if (numThreads > 1 && nGames > 1) {
+                // Parallel batch mode - run independent games in parallel
+                // Note: simulateParallel handles its own suppression
+                if (quietMode) {
+                    // Restore before parallel (it will re-suppress)
+                    System.setOut(ORIGINAL_OUT);
+                    System.setErr(ORIGINAL_ERR);
+                }
+                simulateParallel(rules, playerConfigs, nGames, numThreads, outputGamelog, useSnapshot);
+            } else {
+                // Sequential batch mode
+                Match mc = new Match(rules, pp, "Test");
+                for (int iGame = 0; iGame < nGames; iGame++) {
+                    simulateSingleMatch(mc, iGame, outputGamelog, useSnapshot);
+                }
             }
-        } else if (numThreads > 1 && nGames > 1) {
-            // Parallel batch mode - run independent games in parallel
-            simulateParallel(rules, pp, nGames, numThreads, outputGamelog, useSnapshot);
-        } else {
-            // Sequential batch mode
-            Match mc = new Match(rules, pp, "Test");
-            for (int iGame = 0; iGame < nGames; iGame++) {
-                simulateSingleMatch(mc, iGame, outputGamelog, useSnapshot);
-            }
+        } finally {
+            // Always restore stdout/stderr
+            System.setOut(ORIGINAL_OUT);
+            System.setErr(ORIGINAL_ERR);
         }
 
         System.out.flush();
@@ -198,7 +267,7 @@ public class SimulateMatch {
      * Runs multiple independent games in parallel using a thread pool.
      * Each game is completely independent, so this provides near-linear speedup.
      */
-    private static void simulateParallel(GameRules rules, List<RegisteredPlayer> players,
+    private static void simulateParallel(GameRules rules, List<PlayerConfig> playerConfigs,
                                          int nGames, int numThreads, boolean outputGamelog, boolean useSnapshot) {
         final ExecutorService executor = Executors.newFixedThreadPool(numThreads);
         final AtomicInteger wins1 = new AtomicInteger(0);
@@ -207,41 +276,42 @@ public class SimulateMatch {
         final AtomicInteger completed = new AtomicInteger(0);
         final long startTime = System.currentTimeMillis();
 
+        // Suppress both stdout and stderr for all threads to avoid ALL debug print pollution
+        // Use ORIGINAL_OUT directly for intentional output (progress, summary)
+        System.setOut(NULL_PRINT_STREAM);
+        System.setErr(NULL_PRINT_STREAM);
+
         List<Future<?>> futures = new ArrayList<>();
 
         for (int iGame = 0; iGame < nGames; iGame++) {
             final int gameNum = iGame;
             futures.add(executor.submit(() -> {
                 try {
-                    // Create a fresh match for each game to ensure thread safety
-                    Match mc = new Match(rules, players, "Test-" + gameNum);
-                    GameResult result = simulateSingleMatchQuiet(mc, gameNum, useSnapshot);
+                    // Create fresh RegisteredPlayer objects for each game to ensure thread safety
+                    List<RegisteredPlayer> freshPlayers = new ArrayList<>();
+                    for (PlayerConfig config : playerConfigs) {
+                        freshPlayers.add(config.createRegisteredPlayer());
+                    }
+                    Match mc = new Match(rules, freshPlayers, "Test-" + gameNum);
+                    GameResult result = simulateSingleMatchQuietNoSuppress(mc, gameNum, useSnapshot);
 
-                    synchronized (System.out) {
+                    synchronized (ORIGINAL_OUT) {
                         if (result.isDraw) {
                             draws.incrementAndGet();
-                            if (outputGamelog) {
-                                System.out.printf("Game %d: Draw (%d ms)%n", gameNum + 1, result.timeMs);
-                            }
                         } else if (result.winnerIndex == 0) {
                             wins1.incrementAndGet();
-                            if (outputGamelog) {
-                                System.out.printf("Game %d: %s wins (%d ms)%n", gameNum + 1, result.winnerName, result.timeMs);
-                            }
                         } else {
                             wins2.incrementAndGet();
-                            if (outputGamelog) {
-                                System.out.printf("Game %d: %s wins (%d ms)%n", gameNum + 1, result.winnerName, result.timeMs);
-                            }
                         }
                         int done = completed.incrementAndGet();
+                        // Only show progress every 10 games or at completion
                         if (done % 10 == 0 || done == nGames) {
-                            System.out.printf("Progress: %d/%d games completed%n", done, nGames);
+                            ORIGINAL_OUT.printf("Progress: %d/%d games completed%n", done, nGames);
                         }
                     }
                 } catch (Exception e) {
-                    synchronized (System.out) {
-                        System.out.printf("Game %d: Error - %s%n", gameNum + 1, e.getMessage());
+                    synchronized (ORIGINAL_OUT) {
+                        ORIGINAL_OUT.printf("Game %d: Error - %s%n", gameNum + 1, e.getMessage());
                         completed.incrementAndGet();
                     }
                 }
@@ -258,6 +328,11 @@ public class SimulateMatch {
         }
 
         executor.shutdown();
+
+        // Restore stdout and stderr before printing summary
+        System.setOut(ORIGINAL_OUT);
+        System.setErr(ORIGINAL_ERR);
+
         long totalTime = System.currentTimeMillis() - startTime;
 
         // Print summary
@@ -283,8 +358,51 @@ public class SimulateMatch {
 
     /**
      * Simulates a single game without outputting the game log (for parallel execution).
+     * Suppresses all stdout during game execution to avoid debug print pollution.
      */
     private static GameResult simulateSingleMatchQuiet(final Match mc, int iGame, boolean useSnapshot) {
+        final GameResult result = new GameResult();
+        final long startTime = System.currentTimeMillis();
+
+        final Game g1 = mc.createGame();
+        g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
+
+        // Suppress stdout during game execution to avoid debug prints
+        System.setOut(NULL_PRINT_STREAM);
+        try {
+            TimeLimitedCodeBlock.runWithTimeout(() -> {
+                mc.startGame(g1);
+            }, mc.getRules().getSimTimeout(), TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            // Timeout - treat as draw
+        } catch (Exception | StackOverflowError e) {
+            // Error - treat as draw
+        } finally {
+            // Always restore stdout
+            System.setOut(ORIGINAL_OUT);
+            if (!g1.isGameOver()) {
+                g1.setGameOver(GameEndReason.Draw);
+            }
+        }
+
+        result.timeMs = System.currentTimeMillis() - startTime;
+        result.isDraw = g1.getOutcome().isDraw();
+
+        if (!result.isDraw) {
+            result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
+            // Determine winner index (0 or 1)
+            result.winnerIndex = g1.getOutcome().getWinningLobbyPlayer().getName().contains("(1)") ? 0 : 1;
+        }
+
+        return result;
+    }
+
+    /**
+     * Simulates a single game without outputting the game log (for parallel execution).
+     * Does NOT suppress stdout - caller is responsible for suppression.
+     * Used when parent method already handles stdout suppression for all threads.
+     */
+    private static GameResult simulateSingleMatchQuietNoSuppress(final Match mc, int iGame, boolean useSnapshot) {
         final GameResult result = new GameResult();
         final long startTime = System.currentTimeMillis();
 
@@ -329,9 +447,9 @@ public class SimulateMatch {
         System.out.println("\tP - Amount of players per match (used only with Tournaments, defaults to 2)");
         System.out.println("\tF - format of games, defaults to constructed");
         System.out.println("\tc - Clock flag. Set the maximum time in seconds before calling the match a draw, defaults to 120.");
-        System.out.println("\tq - Quiet flag. Output just the game result, not the entire game log.");
+        System.out.println("\tq - Quiet flag. Suppress all game logs, only show game results.");
         System.out.println("\ts - Snapshot flag. Enable experimental snapshot restore for faster AI simulation (2-3x speedup).");
-        System.out.println("\tj - Jobs/threads flag. Number of parallel threads for batch simulation (4-16x speedup). Only works with -n, not -m.");
+        System.out.println("\tj - Jobs/threads flag. Number of parallel threads for batch simulation. Implies quiet mode (no game logs).");
         System.out.println("\tP1, P2, ... - AI profile for player 1, 2, etc. (Default, Cautious, Reckless, Experimental, Enhanced, Ascended, AlwaysPass)");
     }
 
@@ -346,16 +464,18 @@ public class SimulateMatch {
         final Game g1 = mc.createGame();
         // Enable experimental snapshot restore for faster AI simulation
         g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
+
         // will run match in the same thread
+        // Note: stdout/stderr suppression is handled by caller in quiet mode
         try {
             TimeLimitedCodeBlock.runWithTimeout(() -> {
                 mc.startGame(g1);
                 sw.stop();
             }, mc.getRules().getSimTimeout(), TimeUnit.SECONDS);
         } catch (TimeoutException e) {
-            System.out.println("Stopping slow match as draw");
+            ORIGINAL_OUT.println("Stopping slow match as draw");
         } catch (Exception | StackOverflowError e) {
-            e.printStackTrace();
+            ORIGINAL_ERR.println("Game error: " + e.getMessage());
         } finally {
             if (sw.isStarted()) {
                 sw.stop();
@@ -365,22 +485,20 @@ public class SimulateMatch {
             }
         }
 
-        List<GameLogEntry> log;
         if (outputGamelog) {
-            log = g1.getGameLog().getLogEntries(null);
-        } else {
-            log = g1.getGameLog().getLogEntries(GameLogEntryType.MATCH_RESULTS);
-        }
-        Collections.reverse(log);
-        for (GameLogEntry l : log) {
-            System.out.println(l);
+            // Verbose mode: show all game log entries (only when NOT in quiet mode)
+            List<GameLogEntry> log = g1.getGameLog().getLogEntries(null);
+            Collections.reverse(log);
+            for (GameLogEntry l : log) {
+                ORIGINAL_OUT.println(l);
+            }
         }
 
-        // If both players life totals to 0 in a single turn, the game should end in a draw
+        // Always show game result (brief summary) - use ORIGINAL_OUT to bypass any suppression
         if (g1.getOutcome().isDraw()) {
-            System.out.printf("\nGame Result: Game %d ended in a Draw! Took %d ms.%n", 1 + iGame, sw.getTime());
+            ORIGINAL_OUT.printf("Game %d: Draw (%d ms)%n", 1 + iGame, sw.getTime());
         } else {
-            System.out.printf("\nGame Result: Game %d ended in %d ms. %s has won!\n%n", 1 + iGame, sw.getTime(), g1.getOutcome().getWinningLobbyPlayer().getName());
+            ORIGINAL_OUT.printf("Game %d: %s wins (%d ms)%n", 1 + iGame, g1.getOutcome().getWinningLobbyPlayer().getName(), sw.getTime());
         }
     }
 

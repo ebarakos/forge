@@ -214,7 +214,7 @@ public class GameStateEvaluator {
 
         for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
             String name = c.getName().toLowerCase();
-            String text = c.getText().toLowerCase();
+            String text = c.getOracleText().toLowerCase();
 
             // Sacrifice outlets - free sac outlets are most valuable
             if (name.contains("viscera seer") ||
