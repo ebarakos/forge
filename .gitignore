@@ -95,3 +95,6 @@ forge-gui/tools/PerSetTrackingResults
 __pycache__
 *.pyc
 user/
+
+# Claude Code - keep project memory, ignore user-specific settings
+.claude/settings.local.json
