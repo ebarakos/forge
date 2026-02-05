@@ -150,9 +150,19 @@ public class SimulateMatch {
             rules.setGamesPerMatch(matchSize);
         }
 
+        // Custom base directory for relative deck paths
+        String customDeckBaseDir = null;
+        if (params.containsKey("B")) {
+            customDeckBaseDir = params.get("B").get(0);
+            File dir = new File(customDeckBaseDir);
+            if (!dir.isDirectory()) {
+                System.out.println("Warning: Base deck directory not found - " + customDeckBaseDir);
+            }
+        }
+
         if (params.containsKey("t")) {
             boolean useSnapshot = params.containsKey("s");
-            simulateTournament(params, rules, outputGamelog, aiProfiles, useSnapshot);
+            simulateTournament(params, rules, outputGamelog, aiProfiles, useSnapshot, customDeckBaseDir);
             System.out.flush();
             return;
         }
@@ -165,7 +175,7 @@ public class SimulateMatch {
 
         if (params.containsKey("d")) {
             for (String deck : params.get("d")) {
-                Deck d = deckFromCommandLineParameter(deck, type);
+                Deck d = deckFromCommandLineParameter(deck, type, customDeckBaseDir);
                 if (d == null) {
                     System.out.println(TextUtil.concatNoSpace("Could not load deck - ", deck, ", match cannot start"));
                     return;
@@ -435,11 +445,13 @@ public class SimulateMatch {
     }
 
     private static void argumentHelp() {
-        System.out.println("Syntax: forge.exe sim -d <deck1[.dck]> ... <deckX[.dck]> -D [D] -n [N] -m [M] -t [T] -p [P] -f [F] -q -s -j [J]");
+        System.out.println("Syntax: forge.exe sim -d <deck1[.dck]> ... <deckX[.dck]> -D [D] -B [B] -n [N] -m [M] -t [T] -p [P] -f [F] -q -s -j [J]");
         System.out.println("\tsim - stands for simulation mode");
         System.out.println("\tdeck1 (or deck2,...,X) - constructed deck name or filename (has to be quoted when contains multiple words)");
         System.out.println("\tdeck is treated as file if it ends with a dot followed by three numbers or letters");
-        System.out.println("\tD - absolute directory to load decks from");
+        System.out.println("\tAbsolute paths (e.g., /path/to/deck.dck) are used directly without prepending base directory");
+        System.out.println("\tD - absolute directory to load ALL decks from (batch mode for tournaments)");
+        System.out.println("\tB - Base directory for relative deck paths (overrides default constructed/commander dirs)");
         System.out.println("\tN - number of games, defaults to 1 (Ignores match setting)");
         System.out.println("\tM - Play full match of X games, typically 1,3,5 games. (Optional, overrides N)");
         System.out.println("\tT - Type of tournament to run with all provided decks (Bracket, RoundRobin, Swiss)");
@@ -501,7 +513,7 @@ public class SimulateMatch {
         }
     }
 
-    private static void simulateTournament(Map<String, List<String>> params, GameRules rules, boolean outputGamelog, Map<Integer, String> aiProfiles, boolean useSnapshot) {
+    private static void simulateTournament(Map<String, List<String>> params, GameRules rules, boolean outputGamelog, Map<Integer, String> aiProfiles, boolean useSnapshot, String customDeckBaseDir) {
         String tournament = params.get("t").get(0);
         AbstractTournament tourney = null;
         int matchPlayers = params.containsKey("p") ? Integer.parseInt(params.get("p").get(0)) : 2;
@@ -511,7 +523,7 @@ public class SimulateMatch {
         int numPlayers = 0;
         if (params.containsKey("d")) {
             for (String deck : params.get("d")) {
-                Deck d = deckFromCommandLineParameter(deck, rules.getGameType());
+                Deck d = deckFromCommandLineParameter(deck, rules.getGameType(), customDeckBaseDir);
                 if (d == null) {
                     System.out.println(TextUtil.concatNoSpace("Could not load deck - ", deck, ", match cannot start"));
                     return;
@@ -634,15 +646,26 @@ public class SimulateMatch {
         return null;
     }
 
-    private static Deck deckFromCommandLineParameter(String deckname, GameType type) {
+    private static Deck deckFromCommandLineParameter(String deckname, GameType type, String customBaseDir) {
         int dotpos = deckname.lastIndexOf('.');
         if (dotpos > 0 && dotpos == deckname.length() - 4) {
-            String baseDir = type.equals(GameType.Commander) ?
-                    ForgeConstants.DECK_COMMANDER_DIR : ForgeConstants.DECK_CONSTRUCTED_DIR;
+            File f = new File(deckname);
 
-            File f = new File(baseDir + deckname);
+            // If not an absolute path, prepend the appropriate base directory
+            if (!f.isAbsolute()) {
+                String baseDir;
+                if (customBaseDir != null && !customBaseDir.isEmpty()) {
+                    baseDir = customBaseDir.endsWith(File.separator) ? customBaseDir : customBaseDir + File.separator;
+                } else {
+                    baseDir = type.equals(GameType.Commander) ?
+                            ForgeConstants.DECK_COMMANDER_DIR : ForgeConstants.DECK_CONSTRUCTED_DIR;
+                }
+                f = new File(baseDir + deckname);
+            }
+
             if (!f.exists()) {
-                System.out.println("No deck found in " + baseDir);
+                System.out.println("No deck found at " + f.getAbsolutePath());
+                return null;
             }
 
             return DeckSerializer.fromFile(f);
