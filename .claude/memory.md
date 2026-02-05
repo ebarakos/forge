@@ -51,3 +51,20 @@ This file tracks major changes, architectural decisions, and milestones for the 
   3. **Unified quiet behavior**: `-q` flag OR `-j` flag triggers quiet mode. Full game logs only shown in sequential mode without either flag.
   4. **Compilation fix**: Changed `getText()` to `getOracleText()` in `GameStateEvaluator.java:217`.
 - **Why**: Parallel simulations were producing incorrect win rates due to thread races on shared deck objects. Debug prints from 30+ files polluted output even with `-q` flag. Users needed clean output for automated testing.
+
+## [2026-02-05] Fix Sim Mode Deck Path Resolution
+- **Type**: Bugfix
+- **Description**: Fixed `deckFromCommandLineParameter()` in `SimulateMatch.java` to properly handle absolute paths. Previously, the method always prepended `baseDir` to deck names, breaking absolute paths (e.g., `-d /full/path/deck.dck` became `/decks/constructed//full/path/deck.dck`). Changes:
+  1. Check if path is absolute using `File.isAbsolute()` - if so, use directly without modification
+  2. Added new `-B` flag to specify custom base directory for relative deck paths
+  3. Updated `simulateTournament()` to accept and pass through custom base dir
+  4. Improved error message to show full resolved path when deck not found
+- **Why**: Users couldn't load decks from arbitrary locations using absolute paths. The bug was introduced in commit 73787fb126 (2016) when subfolder support was added. New `-B` flag allows per-session deck folder configuration without modifying profile properties.
+
+## [2026-02-05] Clean Up Documentation for Minimal Branch
+- **Type**: Refactor
+- **Description**: Removed and updated markdown files to reflect the stripped-down minimal branch (desktop-only, no mobile/Android/iOS):
+  - **Deleted**: `docs/Adventure/` (20 files), Android/iOS dev docs, Network play docs, Steam Deck guide, Docker setup, and other irrelevant docs
+  - **Rewrote**: `README.md` (focused on CLI simulation), `CONTRIBUTING.md` (5 modules only), `docs/Home.md`, `docs/_sidebar.md`
+  - **Updated**: `docs/User-Guide.md`, `docs/Frequently-Asked-Questions.md` (removed Quest/Adventure references), `docs/AI.md` (added new CLI flags and AI profiles), `.github/ISSUE_TEMPLATE/bug_report.md` (removed smartphone section)
+- **Why**: Documentation referenced modules and features (Android, iOS, Adventure mode, Network play) that don't exist in this minimal branch. Cleaned docs now accurately reflect the included modules: forge-core, forge-game, forge-gui, forge-gui-desktop, forge-ai.

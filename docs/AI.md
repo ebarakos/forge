@@ -1,62 +1,71 @@
-# About Forge's Artificial Intelligence
-The AI is *not* "trained". It uses basic rules and can be easy to overcome knowing its weaknesses.
+# Forge AI
 
-The AI is:
-- Best with Aggro and midrange decks
-- Poor to Ok in control decks
-- Pretty bad for most combo decks
+The AI uses heuristic-based decision making (not machine learning). It works best with aggro and midrange decks, is okay with control, and struggles with complex combos.
 
-The logic is mostly based on heuristics and split between effect APIs and all other ingame decisions. Sometimes there is hardcoded logic for single cards but that's usually not a healthy approach though it can be more justifiable for highly iconic cards.  
-Defining general concepts of smart play can help improve the win rate much easier, e.g. the AI will always attack with creatures that it has temporarily gained control of until end of turn in order not to miss the opportunity and thus waste the control effect.
+## AI Profiles
 
-If you want to train a model for the AI, please do. We would love to see something like that implemented in Forge.
+Located in `forge-gui/res/ai/`:
 
-# AI Matches from Command Line
-The AI can battle itself in the command line, allowing the tests to be performed on headless servers or on computers that have poor graphic performance, and when you just don't need to see the match. This can be useful if you want to script testing of decks, test a large tournament, or just bash 100's of games out to see how well a deck performs.
+| Profile | Description |
+|---------|-------------|
+| **Default** | Standard behavior |
+| **Cautious** | Conservative play style |
+| **Reckless** | Aggressive play style |
+| **Enhanced** | Deeper simulation (depth 6), transposition tables, loop detection |
+| **Ascended** | Maximum depth (6), longer time limits (8s), combo/synergy detection |
+| **AlwaysPass** | Testing profile that passes priority |
 
-Please understand, the AI is still the AI, and it's limitations exist even against itself. Games can lag and become almost unbearably long when the AI has a lot to think about, and you can't see what's on the table for it to play against. It's best if you set up the tournament and walk away, you can analyze logs later, results are printed at the end.
+## CLI Simulation
 
-## Syntax
-`sim -d <deck1[.dck]> ... <deckX[.dck]> -D [path] -n [N] -f [F] -t [T] -p [P] -q`
+Run AI vs AI matches from the command line:
 
-- `sim` - "Simulation Mode" forces Forge to not start the GUI and automatically runs the AI matches in command line. Enables all other switches for simulation mode.
-- `-d <deck1[.dck]> ... <deckX[.dck]>` - Space separated list of deck files, in `-f` game type path. (For example; If `-f` is set to Commander, decks from `<userdata>/decks/commander/` will be searched. If `-f` is not set then default is `<userdata>/decks/constructed/`.) Names must use quote marks when they contain spaces.
-  - `deck1.dck` - Literal deck file name, when the value has ".dck" extension.
-  - `deck` - A meta deck name of a deck file.
-- `-D [path]` - [path] is absolute directory path to load decks from. (Overrides path for `-d`.)
-- `-n [N]` - [N] number of games, just flat test the AI multiple times. Default is 1.
-- `-m [M]` - [M] number of matches, best of [M] matches. (Overrides -n) Recommended 1, 3, or 5. Default is 1.
-- `-f [F]` - Runs [F] format of game. Default is "constructed"
-  - `Commander`
-  - `Oathbreaker`
-  - `TinyLeaders`
-  - `Brawl`
-  - `MomirBasic`
-  - `Vanguard`
-  - `MoJhoSto`
-- `-t [T]` - for Tournament Mode, [T] for type of tournament.
-  - `Bracket` - See wikipedia for [Bracket Tournament](https://en.wikipedia.org/wiki/Bracket_(tournament))
-  - `RoundRobin` - See wikipedia for [Round Robin Tournaments](https://en.wikipedia.org/wiki/Round-robin_tournament)
-  - `Swiss` - See wikipedia for [Swiss Pairing Tournaments](https://en.wikipedia.org/wiki/Swiss-system_tournament)
-- `-p [P]` - [P] number of players paired, only used in tournament mode. Default is 2.
-- `-q` - Quiet Mode, only prints the result not the entire log.
-- `-c [S]` - Clock flag, maximum time of [S] seconds before calling the match a draw. Default is 120.
+```bash
+java -cp forge-gui-desktop.jar forge.view.SimulateMatch \
+  -d deck1.dck deck2.dck -n 100
+```
 
-## Examples
-In Windows, if you use the EXE file as described below, the simulation runs in the background and output is sent to the forge log file only. If you want to have output to the console, please use the `java -jar` evocation of forge.
+### Flags
 
-To simulate a basic three games of two decks (deck1 and deck2 must be meta deck names of decks in `<userdata>\decks\constructed\`):
-- Windows/Linux/MacOS: `java -jar forge.jar sim -d deck1 deck2 -n 3`
-- Windows: `.\forge.exe sim -d deck1 deck2 -n 3`
+| Flag | Description |
+|------|-------------|
+| `-d <deck1> <deck2>` | Deck files to use |
+| `-n <N>` | Number of games (default: 1) |
+| `-m <M>` | Best of M matches (overrides -n) |
+| `-f <format>` | Game format: constructed, Commander, Oathbreaker, etc. |
+| `-t <type>` | Tournament: Bracket, RoundRobin, Swiss |
+| `-p <N>` | Players per match in tournament mode |
+| `-q` | Quiet mode (suppress game logs) |
+| `-c <S>` | Clock limit in seconds (default: 120) |
+| `-s` | Enable snapshot restore for faster games |
+| `-j <N>` | Parallel execution with N threads |
+| `-P1 <profile>` | AI profile for player 1 |
+| `-P2 <profile>` | AI profile for player 2 |
+| `-B <dir>` | Base directory for relative deck paths |
 
-To simulate a single 3-player Commander game (deck1, deck2, and deck3 must be meta deck names of decks in `<userdata>\decks\commander\`):
-- Windows/Linux/MacOS: `java -jar forge.jar sim -d deck1 deck2 deck3 -f commander`
-- Windows: `.\forge.exe sim -d deck1 deck2 deck3 -f commander`
+### Examples
 
-To simulate a swiss tournament; best of three, all decks in a directory, 3 player pairings:
-- Windows/Linux/MacOS: `java -jar forge.jar sim -D /path/to/DecksFolder/ -m 3 -t Swiss -p 3`
-- Windows: `.\forge.exe sim -D C:\DecksFolder\ -m 3 -t Swiss -p 3`
+Basic 100-game test:
+```bash
+java -cp forge.jar forge.view.SimulateMatch -d deck1.dck deck2.dck -n 100
+```
 
-***
+Fast parallel simulation with Ascended AI:
+```bash
+java -cp forge.jar forge.view.SimulateMatch \
+  -d deck1.dck deck2.dck -n 100 -s -j 8 -P1 Ascended -q
+```
 
-Each game ends with an announcement of the winner, and the current status of the match. 
+Swiss tournament:
+```bash
+java -cp forge.jar forge.view.SimulateMatch \
+  -D /path/to/decks/ -m 3 -t Swiss -p 2
+```
+
+## Synergy Detection (Ascended Profile)
+
+The Ascended profile includes detection for:
+- **Graveyard synergy** - Reanimator, dredge strategies
+- **Sacrifice synergy** - Aristocrats patterns
+- **+1/+1 counter synergy** - Counter-based strategies
+- **Tribal synergy** - 15 creature types recognized
+- **Mana doublers** - 17 cards including virtual doublers (Seedborn Muse, Wilderness Reclamation)
