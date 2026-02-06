@@ -3,16 +3,22 @@
 ## Requirements
 
 - Java JDK 17 or later
-- Maven
 - Git
 - Java IDE (IntelliJ recommended)
+
+Maven is bundled via the Maven Wrapper (`./mvnw`) — no separate install needed.
 
 ## Quick Setup
 
 1. Fork and clone the repository
-2. Build with Maven:
+2. Build and run:
    ```bash
-   mvn -U -B clean install -P windows-linux
+   ./run.sh              # smart build + run sim mode
+   ./run.sh --gui        # smart build + run GUI
+   ```
+   Or build manually:
+   ```bash
+   ./mvnw install -DskipTests -T 1C
    ```
 
 ## Project Structure

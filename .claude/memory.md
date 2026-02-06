@@ -20,6 +20,21 @@ This file tracks major changes, architectural decisions, and milestones for the 
 
 ---
 
+## Build & Run
+
+- **Build and run sim mode**: `./run.sh`
+- **Run with arguments**: `./run.sh -d deck1.dck deck2.dck -n 100 -j 8`
+- **Run GUI**: `./run.sh --gui`
+- **Force clean build**: `./run.sh --clean`
+- **Build without running**: `./run.sh --build-only`
+- **Run without building**: `./run.sh --run-only`
+- Uses Maven Wrapper (`./mvnw`) — no need for `~/maven-3.9.6/bin/mvn`
+- Smart change detection: skips build if no `.java` or `pom.xml` files changed
+- Incremental builds by default (no `clean`), parallel module builds (`-T 1C`)
+- Fat JAR: `forge-gui-desktop/target/forge-gui-desktop-*-jar-with-dependencies.jar`
+
+---
+
 ## Key Files Reference
 
 ### AI Profiles
@@ -75,3 +90,8 @@ This file tracks major changes, architectural decisions, and milestones for the 
   1. **JSON output corruption**: `simulateSingleMatchWithResult` printed plain-text game results to stdout even in `--json` mode, corrupting JSON for downstream parsers (e.g. `jq`). Fixed by routing per-game status to stderr in JSON mode and suppressing `System.out` during game execution when `--json` is active.
   2. **Fragile winner detection**: Winner index was determined via `contains("(1)")` string matching, which broke with deck names containing "(1)" and only worked for 2-player games. Replaced with `determineWinnerIndex()` that compares against `Match.getPlayers()` registered player references.
 - **Why**: Manual arg parsing was error-prone and didn't support `--help`/`--version`. The `--json` flag enables scripted analysis of simulation results. Winner detection needed to be robust for multi-player and arbitrary deck names.
+
+## [2026-02-06] Add Smart Build Script and Maven Wrapper
+- **Type**: Feature
+- **Description**: Created `run.sh` at project root — a smart build-and-run script that replaces the manual `~/maven-3.9.6/bin/mvn clean install -DskipTests && java ... sim` workflow. Features: (1) change detection via `.last_build_timestamp` marker — skips build entirely when no `.java` or `pom.xml` files changed, (2) incremental builds by default (no `clean`), (3) parallel module builds (`-T 1C`), (4) flags: `--clean`, `--build-only`, `--run-only`, `--gui`. Installed Maven Wrapper (`./mvnw`) embedding Maven 3.9.6 in the project. Updated `.gitignore`, `.claudeignore`, `README.md`, and `CONTRIBUTING.md`.
+- **Why**: Full `clean install` took ~90s and was triggered accidentally via up-arrow+Enter even when nothing changed. Non-standard Maven location (`~/maven-3.9.6/`) confused AI agents. Now `./run.sh` skips builds instantly when unchanged, incremental builds take ~20s, and `./mvnw` works on any machine with Java 17.

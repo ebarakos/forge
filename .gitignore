@@ -96,5 +96,8 @@ __pycache__
 *.pyc
 user/
 
+# Build script marker (local state)
+.last_build_timestamp
+
 # Claude Code - keep project memory, ignore user-specific settings
 .claude/settings.local.json

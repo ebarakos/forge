@@ -13,37 +13,54 @@ A stripped-down version of [Forge](https://github.com/Card-Forge/forge) containi
 ## Requirements
 
 - Java 17 or later
-- Maven
+- Maven is bundled via the Maven Wrapper (`./mvnw`) — no separate install needed
 
-## Building
+## Quick Start
 
 ```bash
-mvn -U -B clean install -P windows-linux
+./run.sh                    # smart build + run sim mode
+./run.sh --gui              # smart build + run GUI
+./run.sh --clean            # force clean rebuild + run sim
+./run.sh --build-only       # build without running
+./run.sh --run-only         # run existing JAR without building
 ```
 
-## Running
+The `run.sh` script automatically detects source changes and skips the build when nothing has changed. When a build is needed, it uses incremental compilation (no `clean` unless `--clean` is passed) with parallel module builds.
 
-### Desktop GUI
+Any extra arguments are passed through to the application:
 ```bash
-java -jar forge-gui-desktop/target/forge-gui-desktop-*-SNAPSHOT.jar
+./run.sh -d deck1.dck -d deck2.dck -n 100 -j 8 -q
 ```
 
-### CLI Simulation
+## Manual Building
+
+```bash
+./mvnw install -DskipTests -T 1C         # incremental build (fast)
+./mvnw clean install -DskipTests -T 1C   # clean build (from scratch)
+```
+
+## CLI Simulation
+
 Run AI vs AI matches from the command line:
 ```bash
-java -cp forge-gui-desktop/target/forge-gui-desktop-*-SNAPSHOT.jar forge.view.SimulateMatch \
-  -d deck1.dck deck2.dck -n 100
+./run.sh -d deck1.dck -d deck2.dck -n 100
 ```
 
 **Simulation flags:**
-- `-d <deck1> <deck2>` - Deck files to use
+- `-d <deck>` - Deck file or name (repeat for each player)
 - `-n <count>` - Number of games to simulate
 - `-s` - Enable snapshot restore for faster games
 - `-j <threads>` - Parallel execution threads
 - `-q` - Quiet mode (suppress game logs)
+- `--json` - Output results as JSON
 - `-P1 <profile>` - AI profile for player 1 (Default, Enhanced, Ascended, etc.)
 - `-P2 <profile>` - AI profile for player 2
 - `-B <dir>` - Base directory for relative deck paths
+
+### Desktop GUI
+```bash
+./run.sh --gui
+```
 
 ## AI Profiles
 

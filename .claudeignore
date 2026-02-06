@@ -5,8 +5,8 @@
 target/
 */target/
 
-# Maven wrapper
-.mvn/
+# Maven wrapper binary
+.mvn/wrapper/
 
 # Large asset collections (200+ MB total)
 forge-gui/res/cardsfolder/
