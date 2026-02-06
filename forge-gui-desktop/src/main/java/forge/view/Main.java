@@ -19,11 +19,13 @@ package forge.view;
 
 import forge.GuiDesktop;
 import forge.Singletons;
+import forge.cli.ExitCode;
+import forge.cli.ForgeCli;
 import forge.error.ExceptionHandler;
 import forge.gui.GuiBase;
-import forge.gui.card.CardReaderExperiments;
 import forge.util.BuildInfo;
 import io.sentry.Sentry;
+import picocli.CommandLine;
 
 /**
  * Main class for Forge's swing application view.
@@ -33,6 +35,7 @@ public final class Main {
      * Main entry point for Forge
      */
     public static void main(final String[] args) {
+        // Initialize Sentry for error tracking
         Sentry.init(options -> {
             options.setEnableExternalConfiguration(true);
             options.setRelease(BuildInfo.getVersionString());
@@ -47,49 +50,67 @@ public final class Main {
         // HACK - temporary solution to "Comparison method violates it's general contract!" crash
         System.setProperty("java.util.Arrays.useLegacyMergeSort", "true");
 
-        //Turn off the Java 2D system's use of Direct3D to improve rendering speed (particularly when Full Screen)
+        // Turn off the Java 2D system's use of Direct3D to improve rendering speed
         System.setProperty("sun.java2d.d3d", "false");
 
-        //Turn on OpenGl acceleration to improve performance
-        //System.setProperty("sun.java2d.opengl", "True");
-
-        //setup GUI interface
+        // Setup GUI interface (needed for both GUI and CLI modes)
         GuiBase.setInterface(new GuiDesktop());
 
-        //install our error handler
+        // Install our error handler
         ExceptionHandler.registerErrorHandling();
 
-        // Start splash screen first, then data models, then controller.
+        // No arguments = launch GUI
         if (args.length == 0) {
-            Singletons.initializeOnce(true);
-
-            // Controller can now step in and take over.
-            Singletons.getControl().initialize();
+            launchGui();
             return;
         }
 
-        // command line startup here
-        String mode = args[0].toLowerCase();
+        // CLI mode - use picocli for parsing
+        int exitCode = new CommandLine(new ForgeCli())
+            .setExecutionExceptionHandler(new ExecutionExceptionHandler())
+            .setParameterExceptionHandler(new ParameterExceptionHandler())
+            .execute(args);
 
-        switch (mode) {
-            case "sim":
-                SimulateMatch.simulate(args);
-                break;
+        System.exit(exitCode);
+    }
 
-            case "parse":
-                CardReaderExperiments.parseAllCards(args);
-                break;
+    /**
+     * Launch the graphical user interface.
+     */
+    private static void launchGui() {
+        Singletons.initializeOnce(true);
+        // Controller can now step in and take over.
+        Singletons.getControl().initialize();
+    }
 
-            case "server":
-                System.out.println("Dedicated server mode.\nNot implemented.");
-                break;
-
-            default:
-                System.out.println("Unknown mode.\nKnown mode is 'sim', 'parse' ");
-                break;
+    /**
+     * Handle execution exceptions (runtime errors during command execution).
+     */
+    private static class ExecutionExceptionHandler implements CommandLine.IExecutionExceptionHandler {
+        @Override
+        public int handleExecutionException(Exception ex, CommandLine cmd,
+                CommandLine.ParseResult parseResult) {
+            System.err.println("Error: " + ex.getMessage());
+            // Show stack trace if debug mode is enabled
+            if (System.getProperty("forge.debug") != null) {
+                ex.printStackTrace(System.err);
+            }
+            return ExitCode.RUNTIME_ERROR;
         }
+    }
 
-        System.exit(0);
+    /**
+     * Handle parameter/parsing exceptions (invalid arguments).
+     */
+    private static class ParameterExceptionHandler implements CommandLine.IParameterExceptionHandler {
+        @Override
+        public int handleParseException(CommandLine.ParameterException ex, String[] args) {
+            CommandLine cmd = ex.getCommandLine();
+            System.err.println("Error: " + ex.getMessage());
+            System.err.println();
+            cmd.usage(System.err);
+            return ExitCode.ARGS_ERROR;
+        }
     }
 
     @SuppressWarnings("deprecation")
@@ -102,7 +123,7 @@ public final class Main {
         }
     }
 
-    // disallow instantiation
+    // Disallow instantiation
     private Main() {
     }
 }

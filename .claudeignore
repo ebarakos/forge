@@ -1,6 +1,12 @@
+# Git internals (1GB+ - git commands via Bash still work)
+.git/
+
 # Build outputs (regenerated on build)
 target/
 */target/
+
+# Maven wrapper
+.mvn/
 
 # Large asset collections (200+ MB total)
 forge-gui/res/cardsfolder/
@@ -36,3 +42,15 @@ docs/
 # CI/CD (optional)
 .github/workflows/
 .github/ISSUE_TEMPLATE/
+
+# Binary images (21MB - unreadable as text)
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.gif
+**/*.svg
+**/*.ico
+
+# Build/release configs
+forge-gui/release-files/
+forge-gui-desktop/filters/

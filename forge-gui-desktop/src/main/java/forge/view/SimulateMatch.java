@@ -13,7 +13,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.lang3.time.StopWatch;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+
 import forge.LobbyPlayer;
+import forge.cli.ExitCode;
+import forge.cli.SimCommand;
+import forge.cli.json.SimulationResult;
 import forge.deck.Deck;
 import forge.deck.DeckGroup;
 import forge.deck.io.DeckSerializer;
@@ -33,6 +39,7 @@ import forge.gamemodes.tournament.system.TournamentSwiss;
 import forge.localinstance.properties.ForgeConstants;
 import forge.model.FModel;
 import forge.player.GamePlayerUtil;
+import forge.util.BuildInfo;
 import forge.util.Lang;
 import forge.util.TextUtil;
 import forge.util.WordUtil;
@@ -80,6 +87,653 @@ public class SimulateMatch {
         }
     }
 
+    /**
+     * Simple result holder for parallel game execution.
+     */
+    private static class GameResult {
+        boolean isDraw;
+        int winnerIndex;
+        String winnerName;
+        long timeMs;
+        int turns;
+        Game game; // For JSON output with full logs
+    }
+
+    /**
+     * New entry point for simulation using picocli SimCommand.
+     * All diagnostic output goes to stderr, only results to stdout.
+     *
+     * @param cmd The parsed SimCommand with all options
+     * @return Exit code (0 = success, non-zero = error)
+     */
+    public static int simulate(SimCommand cmd) {
+        // Redirect initialization output to stderr
+        System.setOut(ORIGINAL_ERR);
+
+        try {
+            FModel.initialize(null, null);
+        } finally {
+            System.setOut(ORIGINAL_OUT);
+        }
+
+        ORIGINAL_ERR.println("Simulation mode");
+
+        // Validate that we have decks
+        if (cmd.getDecks().isEmpty() && cmd.getDeckDirectory() == null) {
+            ORIGINAL_ERR.println("Error: No decks specified. Use -d/--deck or -D/--deck-directory");
+            return ExitCode.ARGS_ERROR;
+        }
+
+        int nGames = cmd.getNumGames();
+        Integer matchSize = cmd.getMatchSize();
+
+        // Quiet mode: suppress game logs if -q flag OR -j flag is passed
+        boolean quietMode = cmd.isQuiet() || cmd.getNumJobs() != null;
+        boolean outputGamelog = !quietMode && !cmd.isJsonOutput();
+
+        GameType type;
+        try {
+            type = GameType.valueOf(WordUtil.capitalize(cmd.getFormat()));
+        } catch (IllegalArgumentException e) {
+            ORIGINAL_ERR.println("Error: Invalid format '" + cmd.getFormat() + "'");
+            return ExitCode.ARGS_ERROR;
+        }
+
+        GameRules rules = new GameRules(type);
+        rules.setAppliedVariants(EnumSet.of(type));
+
+        // Parse per-player AI profiles
+        Map<Integer, String> aiProfiles = new HashMap<>();
+        for (int p = 0; p < 8; p++) {
+            String profile = cmd.getPlayerProfile(p);
+            if (profile != null) {
+                aiProfiles.put(p, profile.trim());
+            }
+        }
+
+        if (matchSize != null && matchSize > 0) {
+            rules.setGamesPerMatch(matchSize);
+        }
+
+        rules.setSimTimeout(cmd.getTimeout());
+
+        // Custom base directory for relative deck paths
+        String customDeckBaseDir = null;
+        if (cmd.getBaseDir() != null) {
+            customDeckBaseDir = cmd.getBaseDir().getAbsolutePath();
+            if (!cmd.getBaseDir().isDirectory()) {
+                ORIGINAL_ERR.println("Warning: Base deck directory not found - " + customDeckBaseDir);
+            }
+        }
+
+        // Tournament mode
+        if (cmd.getTournamentType() != null) {
+            boolean useSnapshot = cmd.isUseSnapshot();
+            simulateTournamentFromCmd(cmd, rules, outputGamelog, aiProfiles, useSnapshot, customDeckBaseDir);
+            System.out.flush();
+            return ExitCode.SUCCESS;
+        }
+
+        // Build player configurations
+        List<RegisteredPlayer> pp = new ArrayList<>();
+        List<PlayerConfig> playerConfigs = new ArrayList<>();
+        StringBuilder sb = new StringBuilder();
+        List<String> deckNames = new ArrayList<>();
+
+        int i = 1;
+        for (String deck : cmd.getDecks()) {
+            Deck d = deckFromCommandLineParameter(deck, type, customDeckBaseDir);
+            if (d == null) {
+                ORIGINAL_ERR.println("Error: Could not load deck - " + deck);
+                return ExitCode.DECK_ERROR;
+            }
+            if (i > 1) {
+                sb.append(" vs ");
+            }
+            String name = TextUtil.concatNoSpace("Ai(", String.valueOf(i), ")-", d.getName());
+            sb.append(name);
+            deckNames.add(d.getName());
+
+            String profile = aiProfiles.getOrDefault(i - 1, "");
+
+            // Store config for parallel execution
+            playerConfigs.add(new PlayerConfig(d, name, profile, type));
+
+            // Also create RegisteredPlayer for sequential execution
+            RegisteredPlayer rp;
+            if (type.equals(GameType.Commander)) {
+                rp = RegisteredPlayer.forCommander(d);
+            } else {
+                rp = new RegisteredPlayer(d);
+            }
+            rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
+            pp.add(rp);
+            i++;
+        }
+
+        if (pp.size() < 2) {
+            ORIGINAL_ERR.println("Error: Need at least 2 decks for simulation");
+            return ExitCode.ARGS_ERROR;
+        }
+
+        boolean useSnapshot = cmd.isUseSnapshot();
+
+        // Number of parallel threads
+        int numThreads = 1;
+        if (cmd.getNumJobs() != null) {
+            numThreads = cmd.getNumJobs();
+            if (numThreads < 1) numThreads = 1;
+            if (numThreads > Runtime.getRuntime().availableProcessors() * 2) {
+                numThreads = Runtime.getRuntime().availableProcessors() * 2;
+            }
+        }
+
+        sb.append(" - ").append(Lang.nounWithNumeral(nGames, "game")).append(" of ").append(type);
+        if (useSnapshot) {
+            sb.append(" (snapshot restore enabled)");
+        }
+        if (numThreads > 1) {
+            sb.append(" (").append(numThreads).append(" parallel threads)");
+        }
+
+        ORIGINAL_ERR.println(sb.toString());
+
+        // Prepare JSON result if needed
+        SimulationResult jsonResult = null;
+        if (cmd.isJsonOutput()) {
+            jsonResult = new SimulationResult();
+            jsonResult.version = BuildInfo.getVersionString();
+            jsonResult.config = new SimulationResult.SimulationConfig();
+            jsonResult.config.decks = deckNames;
+            jsonResult.config.format = type.name();
+            jsonResult.config.gamesRequested = nGames;
+            jsonResult.config.matchSize = matchSize;
+            jsonResult.config.timeoutSeconds = cmd.getTimeout();
+            jsonResult.config.snapshotEnabled = useSnapshot;
+            jsonResult.config.parallelJobs = cmd.getNumJobs();
+            jsonResult.config.aiProfiles = new ArrayList<>();
+            for (int p = 0; p < pp.size(); p++) {
+                jsonResult.config.aiProfiles.add(aiProfiles.getOrDefault(p, "Default"));
+            }
+        }
+
+        // Suppress stdout during game execution:
+        // - quiet mode: suppress all output
+        // - json mode: suppress to prevent debug prints from corrupting JSON on stdout
+        if (quietMode || cmd.isJsonOutput()) {
+            System.setOut(NULL_PRINT_STREAM);
+            System.setErr(NULL_PRINT_STREAM);
+        }
+
+        List<GameResult> allResults = new ArrayList<>();
+        long totalStartTime = System.currentTimeMillis();
+
+        try {
+            if (matchSize != null && matchSize > 0) {
+                // Match mode - must be sequential
+                Match mc = new Match(rules, pp, "Test");
+                int iGame = 0;
+                while (!mc.isMatchOver()) {
+                    GameResult result = simulateSingleMatchWithResult(mc, iGame, outputGamelog, useSnapshot, cmd.isJsonOutput(), cmd.isJsonOutput());
+                    allResults.add(result);
+                    iGame++;
+                }
+            } else if (numThreads > 1 && nGames > 1) {
+                // Parallel batch mode — restore streams since simulateParallelWithResults
+                // manages its own suppression
+                if (quietMode || cmd.isJsonOutput()) {
+                    System.setOut(ORIGINAL_OUT);
+                    System.setErr(ORIGINAL_ERR);
+                }
+                allResults = simulateParallelWithResults(rules, playerConfigs, nGames, numThreads, outputGamelog, useSnapshot, cmd.isJsonOutput());
+            } else {
+                // Sequential batch mode
+                Match mc = new Match(rules, pp, "Test");
+                for (int iGame = 0; iGame < nGames; iGame++) {
+                    GameResult result = simulateSingleMatchWithResult(mc, iGame, outputGamelog, useSnapshot, cmd.isJsonOutput(), cmd.isJsonOutput());
+                    allResults.add(result);
+                }
+            }
+        } finally {
+            System.setOut(ORIGINAL_OUT);
+            System.setErr(ORIGINAL_ERR);
+        }
+
+        long totalTime = System.currentTimeMillis() - totalStartTime;
+
+        // Output results
+        if (cmd.isJsonOutput()) {
+            outputJsonResult(jsonResult, allResults, playerConfigs, totalTime);
+        } else if (numThreads > 1) {
+            // Summary already printed by parallel method
+        }
+
+        System.out.flush();
+        return ExitCode.SUCCESS;
+    }
+
+    /**
+     * Determines the winner index by comparing against the match's registered players.
+     * Returns -1 if no match found.
+     */
+    private static int determineWinnerIndex(Game game, Match mc) {
+        LobbyPlayer winningLobby = game.getOutcome().getWinningLobbyPlayer();
+        List<RegisteredPlayer> players = mc.getPlayers();
+        for (int idx = 0; idx < players.size(); idx++) {
+            if (players.get(idx).getPlayer().equals(winningLobby)) {
+                return idx;
+            }
+        }
+        // Fallback: match by name
+        String winnerName = winningLobby.getName();
+        for (int idx = 0; idx < players.size(); idx++) {
+            if (players.get(idx).getPlayer().getName().equals(winnerName)) {
+                return idx;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Simulates a single game and returns a GameResult with full data.
+     * @param jsonMode when true, per-game status goes to stderr to keep stdout clean for JSON
+     */
+    private static GameResult simulateSingleMatchWithResult(final Match mc, int iGame, boolean outputGamelog, boolean useSnapshot, boolean collectLog, boolean jsonMode) {
+        final GameResult result = new GameResult();
+        final StopWatch sw = new StopWatch();
+        sw.start();
+
+        final Game g1 = mc.createGame();
+        g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
+
+        try {
+            TimeLimitedCodeBlock.runWithTimeout(() -> {
+                mc.startGame(g1);
+                sw.stop();
+            }, mc.getRules().getSimTimeout(), TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            ORIGINAL_ERR.println("Stopping slow match as draw");
+        } catch (Exception | StackOverflowError e) {
+            ORIGINAL_ERR.println("Game error: " + e.getMessage());
+        } finally {
+            if (sw.isStarted()) {
+                sw.stop();
+            }
+            if (!g1.isGameOver()) {
+                g1.setGameOver(GameEndReason.Draw);
+            }
+        }
+
+        result.timeMs = sw.getTime();
+        result.isDraw = g1.getOutcome().isDraw();
+        result.turns = g1.getPhaseHandler().getTurn();
+
+        if (!result.isDraw) {
+            result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
+            result.winnerIndex = determineWinnerIndex(g1, mc);
+        }
+
+        // Store game reference for JSON log extraction
+        if (collectLog) {
+            result.game = g1;
+        }
+
+        if (outputGamelog) {
+            List<GameLogEntry> log = g1.getGameLog().getLogEntries(null);
+            Collections.reverse(log);
+            for (GameLogEntry l : log) {
+                ORIGINAL_OUT.println(l);
+            }
+        }
+
+        // Show game result — to stderr in JSON mode to keep stdout clean for JSON
+        PrintStream resultStream = jsonMode ? ORIGINAL_ERR : ORIGINAL_OUT;
+        if (result.isDraw) {
+            resultStream.printf("Game %d: Draw (%d ms)%n", 1 + iGame, result.timeMs);
+        } else {
+            resultStream.printf("Game %d: %s wins (%d ms)%n", 1 + iGame, result.winnerName, result.timeMs);
+        }
+
+        return result;
+    }
+
+    /**
+     * Runs multiple independent games in parallel and returns all results.
+     */
+    private static List<GameResult> simulateParallelWithResults(GameRules rules, List<PlayerConfig> playerConfigs,
+                                         int nGames, int numThreads, boolean outputGamelog, boolean useSnapshot, boolean collectLog) {
+        final ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+        final AtomicInteger wins1 = new AtomicInteger(0);
+        final AtomicInteger wins2 = new AtomicInteger(0);
+        final AtomicInteger draws = new AtomicInteger(0);
+        final AtomicInteger completed = new AtomicInteger(0);
+        final long startTime = System.currentTimeMillis();
+        final List<GameResult> allResults = Collections.synchronizedList(new ArrayList<>());
+
+        System.setOut(NULL_PRINT_STREAM);
+        System.setErr(NULL_PRINT_STREAM);
+
+        List<Future<?>> futures = new ArrayList<>();
+
+        for (int iGame = 0; iGame < nGames; iGame++) {
+            final int gameNum = iGame;
+            futures.add(executor.submit(() -> {
+                try {
+                    List<RegisteredPlayer> freshPlayers = new ArrayList<>();
+                    for (PlayerConfig config : playerConfigs) {
+                        freshPlayers.add(config.createRegisteredPlayer());
+                    }
+                    Match mc = new Match(rules, freshPlayers, "Test-" + gameNum);
+                    GameResult result = simulateSingleMatchQuietNoSuppress(mc, gameNum, useSnapshot, collectLog);
+                    allResults.add(result);
+
+                    synchronized (ORIGINAL_OUT) {
+                        if (result.isDraw) {
+                            draws.incrementAndGet();
+                        } else if (result.winnerIndex == 0) {
+                            wins1.incrementAndGet();
+                        } else {
+                            wins2.incrementAndGet();
+                        }
+                        int done = completed.incrementAndGet();
+                        if (done % 10 == 0 || done == nGames) {
+                            ORIGINAL_ERR.printf("Progress: %d/%d games completed%n", done, nGames);
+                        }
+                    }
+                } catch (Exception e) {
+                    synchronized (ORIGINAL_OUT) {
+                        ORIGINAL_ERR.printf("Game %d: Error - %s%n", gameNum + 1, e.getMessage());
+                        completed.incrementAndGet();
+                    }
+                }
+            }));
+        }
+
+        for (Future<?> future : futures) {
+            try {
+                future.get();
+            } catch (Exception e) {
+                // Already handled in the task
+            }
+        }
+
+        executor.shutdown();
+
+        System.setOut(ORIGINAL_OUT);
+        System.setErr(ORIGINAL_ERR);
+
+        long totalTime = System.currentTimeMillis() - startTime;
+
+        // Print summary — to stderr in JSON mode to keep stdout clean
+        PrintStream summaryStream = collectLog ? ORIGINAL_ERR : System.out;
+        summaryStream.println();
+        summaryStream.println("=== Simulation Summary ===");
+        summaryStream.printf("Total games: %d%n", nGames);
+        summaryStream.printf("Player 1 wins: %d (%.1f%%)%n", wins1.get(), 100.0 * wins1.get() / nGames);
+        summaryStream.printf("Player 2 wins: %d (%.1f%%)%n", wins2.get(), 100.0 * wins2.get() / nGames);
+        summaryStream.printf("Draws: %d (%.1f%%)%n", draws.get(), 100.0 * draws.get() / nGames);
+        summaryStream.printf("Total time: %d ms (%.1f ms/game avg, %.1f games/sec)%n",
+                totalTime, (double) totalTime / nGames, 1000.0 * nGames / totalTime);
+
+        return allResults;
+    }
+
+    /**
+     * Simulates a single game without outputting the game log (for parallel execution).
+     * Does NOT suppress stdout - caller is responsible for suppression.
+     */
+    private static GameResult simulateSingleMatchQuietNoSuppress(final Match mc, int iGame, boolean useSnapshot, boolean collectLog) {
+        final GameResult result = new GameResult();
+        final long startTime = System.currentTimeMillis();
+
+        final Game g1 = mc.createGame();
+        g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
+
+        try {
+            TimeLimitedCodeBlock.runWithTimeout(() -> {
+                mc.startGame(g1);
+            }, mc.getRules().getSimTimeout(), TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            // Timeout - treat as draw
+        } catch (Exception | StackOverflowError e) {
+            // Error - treat as draw
+        } finally {
+            if (!g1.isGameOver()) {
+                g1.setGameOver(GameEndReason.Draw);
+            }
+        }
+
+        result.timeMs = System.currentTimeMillis() - startTime;
+        result.isDraw = g1.getOutcome().isDraw();
+        result.turns = g1.getPhaseHandler().getTurn();
+
+        if (!result.isDraw) {
+            result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
+            result.winnerIndex = determineWinnerIndex(g1, mc);
+        }
+
+        if (collectLog) {
+            result.game = g1;
+        }
+
+        return result;
+    }
+
+    /**
+     * Outputs simulation results in JSON format.
+     */
+    private static void outputJsonResult(SimulationResult jsonResult, List<GameResult> results,
+                                         List<PlayerConfig> playerConfigs, long totalTime) {
+        // Build summary
+        jsonResult.summary = new SimulationResult.SimulationSummary();
+        jsonResult.summary.totalGames = results.size();
+        jsonResult.summary.completedGames = results.size();
+        jsonResult.summary.totalTimeMs = totalTime;
+        jsonResult.summary.averageGameTimeMs = results.isEmpty() ? 0 : (double) totalTime / results.size();
+        jsonResult.summary.gamesPerSecond = results.isEmpty() ? 0 : 1000.0 * results.size() / totalTime;
+
+        // Count wins per player
+        int[] wins = new int[playerConfigs.size()];
+        int drawCount = 0;
+        for (GameResult r : results) {
+            if (r.isDraw) {
+                drawCount++;
+            } else if (r.winnerIndex >= 0 && r.winnerIndex < wins.length) {
+                wins[r.winnerIndex]++;
+            }
+        }
+        jsonResult.summary.draws = drawCount;
+
+        // Build player summaries
+        for (int p = 0; p < playerConfigs.size(); p++) {
+            SimulationResult.PlayerSummary ps = new SimulationResult.PlayerSummary();
+            ps.playerIndex = p;
+            ps.name = playerConfigs.get(p).name;
+            ps.deck = playerConfigs.get(p).deck.getName();
+            ps.aiProfile = playerConfigs.get(p).aiProfile.isEmpty() ? "Default" : playerConfigs.get(p).aiProfile;
+            ps.wins = wins[p];
+            ps.losses = results.size() - wins[p] - drawCount;
+            ps.winRate = results.isEmpty() ? 0 : 100.0 * wins[p] / results.size();
+            jsonResult.summary.players.add(ps);
+        }
+
+        // Build individual game results
+        int gameNum = 1;
+        for (GameResult r : results) {
+            SimulationResult.GameResult gr = new SimulationResult.GameResult();
+            gr.gameNumber = gameNum++;
+            gr.isDraw = r.isDraw;
+            gr.winner = r.winnerName;
+            gr.winnerIndex = r.isDraw ? null : r.winnerIndex;
+            gr.durationMs = r.timeMs;
+            gr.turns = r.turns;
+            gr.endReason = r.game != null && r.game.getOutcome() != null ?
+                          r.game.getOutcome().getWinCondition().toString() : "Unknown";
+
+            // Add full game log if game reference is available
+            if (r.game != null) {
+                gr.log = new ArrayList<>();
+                List<GameLogEntry> logEntries = r.game.getGameLog().getLogEntries(null);
+                for (GameLogEntry entry : logEntries) {
+                    SimulationResult.GameLogEntry jsonEntry = new SimulationResult.GameLogEntry();
+                    jsonEntry.type = entry.type.name();
+                    jsonEntry.message = entry.message;
+                    gr.log.add(jsonEntry);
+                }
+            }
+
+            jsonResult.games.add(gr);
+        }
+
+        // Output JSON to stdout
+        Gson gson = new GsonBuilder()
+            .setPrettyPrinting()
+            .serializeNulls()
+            .create();
+        ORIGINAL_OUT.println(gson.toJson(jsonResult));
+    }
+
+    /**
+     * Tournament simulation from SimCommand.
+     */
+    private static void simulateTournamentFromCmd(SimCommand cmd, GameRules rules, boolean outputGamelog,
+                                                   Map<Integer, String> aiProfiles, boolean useSnapshot,
+                                                   String customDeckBaseDir) {
+        String tournament = cmd.getTournamentType();
+        AbstractTournament tourney = null;
+        int matchPlayers = cmd.getPlayersPerMatch();
+
+        DeckGroup deckGroup = new DeckGroup("SimulatedTournament");
+        List<TournamentPlayer> players = new ArrayList<>();
+        int numPlayers = 0;
+
+        for (String deck : cmd.getDecks()) {
+            Deck d = deckFromCommandLineParameter(deck, rules.getGameType(), customDeckBaseDir);
+            if (d == null) {
+                ORIGINAL_ERR.println("Error: Could not load deck - " + deck);
+                return;
+            }
+
+            deckGroup.addAiDeck(d);
+            String profile = aiProfiles.getOrDefault(numPlayers, "");
+            players.add(new TournamentPlayer(GamePlayerUtil.createAiPlayer(d.getName(), profile), numPlayers));
+            numPlayers++;
+        }
+
+        if (cmd.getDeckDirectory() != null) {
+            File folder = cmd.getDeckDirectory();
+            if (!folder.isDirectory()) {
+                ORIGINAL_ERR.println("Error: Directory not found - " + folder.getAbsolutePath());
+            } else {
+                for (File deck : folder.listFiles((dir, name) -> name.endsWith(".dck"))) {
+                    Deck d = DeckSerializer.fromFile(deck);
+                    if (d == null) {
+                        ORIGINAL_ERR.println("Error: Could not load deck - " + deck.getName());
+                        return;
+                    }
+                    deckGroup.addAiDeck(d);
+                    String profile = aiProfiles.getOrDefault(numPlayers, "");
+                    players.add(new TournamentPlayer(GamePlayerUtil.createAiPlayer(d.getName(), profile), numPlayers));
+                    numPlayers++;
+                }
+            }
+        }
+
+        if (numPlayers == 0) {
+            ORIGINAL_ERR.println("Error: No decks/players found.");
+            return;
+        }
+
+        if ("bracket".equalsIgnoreCase(tournament)) {
+            tourney = new TournamentBracket(players, matchPlayers);
+        } else if ("roundrobin".equalsIgnoreCase(tournament)) {
+            tourney = new TournamentRoundRobin(players, matchPlayers);
+        } else if ("swiss".equalsIgnoreCase(tournament)) {
+            tourney = new TournamentSwiss(players, matchPlayers);
+        }
+
+        if (tourney == null) {
+            ORIGINAL_ERR.println("Error: Invalid tournament type - " + tournament);
+            return;
+        }
+
+        tourney.initializeTournament();
+
+        String lastWinner = "";
+        int curRound = 0;
+        ORIGINAL_OUT.println(TextUtil.concatNoSpace("Starting a ", tournament, " tournament with ",
+                String.valueOf(numPlayers), " players over ",
+                String.valueOf(tourney.getTotalRounds()), " rounds"));
+
+        while (!tourney.isTournamentOver()) {
+            if (tourney.getActiveRound() != curRound) {
+                if (curRound != 0) {
+                    ORIGINAL_OUT.println(TextUtil.concatNoSpace("End Round - ", String.valueOf(curRound)));
+                }
+                curRound = tourney.getActiveRound();
+                ORIGINAL_OUT.println();
+                ORIGINAL_OUT.println(TextUtil.concatNoSpace("Round ", String.valueOf(curRound), " Pairings:"));
+
+                for (TournamentPairing pairing : tourney.getActivePairings()) {
+                    ORIGINAL_OUT.println(pairing.outputHeader());
+                }
+                ORIGINAL_OUT.println();
+            }
+
+            TournamentPairing pairing = tourney.getNextPairing();
+            List<RegisteredPlayer> regPlayers = AbstractTournament.registerTournamentPlayers(pairing, deckGroup);
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("Round ").append(tourney.getActiveRound()).append(" - ");
+            sb.append(pairing.outputHeader());
+            ORIGINAL_OUT.println(sb.toString());
+
+            if (!pairing.isBye()) {
+                Match mc = new Match(rules, regPlayers, "TourneyMatch");
+
+                int exceptions = 0;
+                int iGame = 0;
+                while (!mc.isMatchOver()) {
+                    try {
+                        simulateSingleMatch(mc, iGame, outputGamelog, useSnapshot);
+                        iGame++;
+                    } catch (Exception e) {
+                        exceptions++;
+                        ORIGINAL_ERR.println(e.toString());
+                        if (exceptions > 5) {
+                            ORIGINAL_ERR.println("Exceeded number of exceptions thrown. Abandoning match...");
+                            break;
+                        } else {
+                            ORIGINAL_ERR.println("Game threw exception. Abandoning game and continuing...");
+                        }
+                    }
+                }
+                LobbyPlayer winner = mc.getWinner().getPlayer();
+                for (TournamentPlayer tp : pairing.getPairedPlayers()) {
+                    if (winner.equals(tp.getPlayer())) {
+                        pairing.setWinner(tp);
+                        lastWinner = winner.getName();
+                        ORIGINAL_OUT.println(TextUtil.concatNoSpace("Match Winner - ", lastWinner, "!"));
+                        ORIGINAL_OUT.println();
+                        break;
+                    }
+                }
+            }
+
+            tourney.reportMatchCompletion(pairing);
+        }
+        tourney.outputTournamentResults();
+    }
+
+    // =====================================================================
+    // LEGACY METHODS - Kept for backward compatibility
+    // =====================================================================
+
+    /**
+     * @deprecated Use {@link #simulate(SimCommand)} instead.
+     * This method is kept for backward compatibility with existing code.
+     */
+    @Deprecated
     public static void simulate(String[] args) {
         FModel.initialize(null, null);
 
@@ -93,7 +747,6 @@ public class SimulateMatch {
         List<String> options = null;
 
         for (int i = 1; i < args.length; i++) {
-            // "sim" is in the 0th slot
             final String a = args[i];
 
             if (a.charAt(0) == '-') {
@@ -115,18 +768,14 @@ public class SimulateMatch {
 
         int nGames = 1;
         if (params.containsKey("n")) {
-            // Number of games should only be a single string
             nGames = Integer.parseInt(params.get("n").get(0));
         }
 
         int matchSize = 0;
         if (params.containsKey("m")) {
-            // Match size ("best of X games")
             matchSize = Integer.parseInt(params.get("m").get(0));
         }
 
-        // Quiet mode: suppress game logs if -q flag OR -j flag is passed
-        // Full game logging only in sequential mode without -q
         boolean quietMode = params.containsKey("q") || params.containsKey("j");
         boolean outputGamelog = !quietMode;
 
@@ -138,7 +787,6 @@ public class SimulateMatch {
         GameRules rules = new GameRules(type);
         rules.setAppliedVariants(EnumSet.of(type));
 
-        // Parse per-player AI profiles (-P1 Profile1 -P2 Profile2 etc.)
         Map<Integer, String> aiProfiles = new HashMap<>();
         for (int p = 1; p <= 8; p++) {
             if (params.containsKey("P" + p)) {
@@ -150,7 +798,6 @@ public class SimulateMatch {
             rules.setGamesPerMatch(matchSize);
         }
 
-        // Custom base directory for relative deck paths
         String customDeckBaseDir = null;
         if (params.containsKey("B")) {
             customDeckBaseDir = params.get("B").get(0);
@@ -188,10 +835,8 @@ public class SimulateMatch {
 
                 String profile = aiProfiles.getOrDefault(i - 1, "");
 
-                // Store config for parallel execution (creates fresh players per game)
                 playerConfigs.add(new PlayerConfig(d, name, profile, type));
 
-                // Also create RegisteredPlayer for sequential execution
                 RegisteredPlayer rp;
                 if (type.equals(GameType.Commander)) {
                     rp = RegisteredPlayer.forCommander(d);
@@ -208,10 +853,8 @@ public class SimulateMatch {
             rules.setSimTimeout(Integer.parseInt(params.get("c").get(0)));
         }
 
-        // Enable experimental snapshot restore for faster simulation (2-3x speedup)
         boolean useSnapshot = params.containsKey("s");
 
-        // Number of parallel threads for batch simulation
         int numThreads = 1;
         if (params.containsKey("j")) {
             numThreads = Integer.parseInt(params.get("j").get(0));
@@ -231,7 +874,6 @@ public class SimulateMatch {
 
         System.out.println(sb.toString());
 
-        // Suppress output early for quiet mode to catch any debug prints during game setup
         if (quietMode) {
             System.setOut(NULL_PRINT_STREAM);
             System.setErr(NULL_PRINT_STREAM);
@@ -239,32 +881,25 @@ public class SimulateMatch {
 
         try {
             if (matchSize != 0) {
-                // Match mode - must be sequential (games depend on each other)
                 Match mc = new Match(rules, pp, "Test");
                 int iGame = 0;
                 while (!mc.isMatchOver()) {
-                    // play games until the match ends
                     simulateSingleMatch(mc, iGame, outputGamelog, useSnapshot);
                     iGame++;
                 }
             } else if (numThreads > 1 && nGames > 1) {
-                // Parallel batch mode - run independent games in parallel
-                // Note: simulateParallel handles its own suppression
                 if (quietMode) {
-                    // Restore before parallel (it will re-suppress)
                     System.setOut(ORIGINAL_OUT);
                     System.setErr(ORIGINAL_ERR);
                 }
                 simulateParallel(rules, playerConfigs, nGames, numThreads, outputGamelog, useSnapshot);
             } else {
-                // Sequential batch mode
                 Match mc = new Match(rules, pp, "Test");
                 for (int iGame = 0; iGame < nGames; iGame++) {
                     simulateSingleMatch(mc, iGame, outputGamelog, useSnapshot);
                 }
             }
         } finally {
-            // Always restore stdout/stderr
             System.setOut(ORIGINAL_OUT);
             System.setErr(ORIGINAL_ERR);
         }
@@ -272,10 +907,6 @@ public class SimulateMatch {
         System.out.flush();
     }
 
-    /**
-     * Runs multiple independent games in parallel using a thread pool.
-     * Each game is completely independent, so this provides near-linear speedup.
-     */
     private static void simulateParallel(GameRules rules, List<PlayerConfig> playerConfigs,
                                          int nGames, int numThreads, boolean outputGamelog, boolean useSnapshot) {
         final ExecutorService executor = Executors.newFixedThreadPool(numThreads);
@@ -285,8 +916,6 @@ public class SimulateMatch {
         final AtomicInteger completed = new AtomicInteger(0);
         final long startTime = System.currentTimeMillis();
 
-        // Suppress both stdout and stderr for all threads to avoid ALL debug print pollution
-        // Use ORIGINAL_OUT directly for intentional output (progress, summary)
         System.setOut(NULL_PRINT_STREAM);
         System.setErr(NULL_PRINT_STREAM);
 
@@ -296,13 +925,12 @@ public class SimulateMatch {
             final int gameNum = iGame;
             futures.add(executor.submit(() -> {
                 try {
-                    // Create fresh RegisteredPlayer objects for each game to ensure thread safety
                     List<RegisteredPlayer> freshPlayers = new ArrayList<>();
                     for (PlayerConfig config : playerConfigs) {
                         freshPlayers.add(config.createRegisteredPlayer());
                     }
                     Match mc = new Match(rules, freshPlayers, "Test-" + gameNum);
-                    GameResult result = simulateSingleMatchQuietNoSuppress(mc, gameNum, useSnapshot);
+                    GameResult result = simulateSingleMatchQuietNoSuppress(mc, gameNum, useSnapshot, false);
 
                     synchronized (ORIGINAL_OUT) {
                         if (result.isDraw) {
@@ -313,7 +941,6 @@ public class SimulateMatch {
                             wins2.incrementAndGet();
                         }
                         int done = completed.incrementAndGet();
-                        // Only show progress every 10 games or at completion
                         if (done % 10 == 0 || done == nGames) {
                             ORIGINAL_OUT.printf("Progress: %d/%d games completed%n", done, nGames);
                         }
@@ -327,24 +954,21 @@ public class SimulateMatch {
             }));
         }
 
-        // Wait for all games to complete
         for (Future<?> future : futures) {
             try {
                 future.get();
             } catch (Exception e) {
-                // Already handled in the task
+                // Already handled
             }
         }
 
         executor.shutdown();
 
-        // Restore stdout and stderr before printing summary
         System.setOut(ORIGINAL_OUT);
         System.setErr(ORIGINAL_ERR);
 
         long totalTime = System.currentTimeMillis() - startTime;
 
-        // Print summary
         System.out.println();
         System.out.println("=== Simulation Summary ===");
         System.out.printf("Total games: %d%n", nGames);
@@ -353,95 +977,6 @@ public class SimulateMatch {
         System.out.printf("Draws: %d (%.1f%%)%n", draws.get(), 100.0 * draws.get() / nGames);
         System.out.printf("Total time: %d ms (%.1f ms/game avg, %.1f games/sec)%n",
                 totalTime, (double) totalTime / nGames, 1000.0 * nGames / totalTime);
-    }
-
-    /**
-     * Simple result holder for parallel game execution.
-     */
-    private static class GameResult {
-        boolean isDraw;
-        int winnerIndex;
-        String winnerName;
-        long timeMs;
-    }
-
-    /**
-     * Simulates a single game without outputting the game log (for parallel execution).
-     * Suppresses all stdout during game execution to avoid debug print pollution.
-     */
-    private static GameResult simulateSingleMatchQuiet(final Match mc, int iGame, boolean useSnapshot) {
-        final GameResult result = new GameResult();
-        final long startTime = System.currentTimeMillis();
-
-        final Game g1 = mc.createGame();
-        g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
-
-        // Suppress stdout during game execution to avoid debug prints
-        System.setOut(NULL_PRINT_STREAM);
-        try {
-            TimeLimitedCodeBlock.runWithTimeout(() -> {
-                mc.startGame(g1);
-            }, mc.getRules().getSimTimeout(), TimeUnit.SECONDS);
-        } catch (TimeoutException e) {
-            // Timeout - treat as draw
-        } catch (Exception | StackOverflowError e) {
-            // Error - treat as draw
-        } finally {
-            // Always restore stdout
-            System.setOut(ORIGINAL_OUT);
-            if (!g1.isGameOver()) {
-                g1.setGameOver(GameEndReason.Draw);
-            }
-        }
-
-        result.timeMs = System.currentTimeMillis() - startTime;
-        result.isDraw = g1.getOutcome().isDraw();
-
-        if (!result.isDraw) {
-            result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
-            // Determine winner index (0 or 1)
-            result.winnerIndex = g1.getOutcome().getWinningLobbyPlayer().getName().contains("(1)") ? 0 : 1;
-        }
-
-        return result;
-    }
-
-    /**
-     * Simulates a single game without outputting the game log (for parallel execution).
-     * Does NOT suppress stdout - caller is responsible for suppression.
-     * Used when parent method already handles stdout suppression for all threads.
-     */
-    private static GameResult simulateSingleMatchQuietNoSuppress(final Match mc, int iGame, boolean useSnapshot) {
-        final GameResult result = new GameResult();
-        final long startTime = System.currentTimeMillis();
-
-        final Game g1 = mc.createGame();
-        g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
-
-        try {
-            TimeLimitedCodeBlock.runWithTimeout(() -> {
-                mc.startGame(g1);
-            }, mc.getRules().getSimTimeout(), TimeUnit.SECONDS);
-        } catch (TimeoutException e) {
-            // Timeout - treat as draw
-        } catch (Exception | StackOverflowError e) {
-            // Error - treat as draw
-        } finally {
-            if (!g1.isGameOver()) {
-                g1.setGameOver(GameEndReason.Draw);
-            }
-        }
-
-        result.timeMs = System.currentTimeMillis() - startTime;
-        result.isDraw = g1.getOutcome().isDraw();
-
-        if (!result.isDraw) {
-            result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
-            // Determine winner index (0 or 1)
-            result.winnerIndex = g1.getOutcome().getWinningLobbyPlayer().getName().contains("(1)") ? 0 : 1;
-        }
-
-        return result;
     }
 
     private static void argumentHelp() {
@@ -473,11 +1008,8 @@ public class SimulateMatch {
         sw.start();
 
         final Game g1 = mc.createGame();
-        // Enable experimental snapshot restore for faster AI simulation
         g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
 
-        // will run match in the same thread
-        // Note: stdout/stderr suppression is handled by caller in quiet mode
         try {
             TimeLimitedCodeBlock.runWithTimeout(() -> {
                 mc.startGame(g1);
@@ -497,7 +1029,6 @@ public class SimulateMatch {
         }
 
         if (outputGamelog) {
-            // Verbose mode: show all game log entries (only when NOT in quiet mode)
             List<GameLogEntry> log = g1.getGameLog().getLogEntries(null);
             Collections.reverse(log);
             for (GameLogEntry l : log) {
@@ -505,7 +1036,6 @@ public class SimulateMatch {
             }
         }
 
-        // Always show game result (brief summary) - use ORIGINAL_OUT to bypass any suppression
         if (g1.getOutcome().isDraw()) {
             ORIGINAL_OUT.printf("Game %d: Draw (%d ms)%n", 1 + iGame, sw.getTime());
         } else {
@@ -537,7 +1067,6 @@ public class SimulateMatch {
         }
 
         if (params.containsKey("D")) {
-            // Direc
             String foldName = params.get("D").get(0);
             File folder = new File(foldName);
             if (!folder.isDirectory()) {
@@ -609,7 +1138,6 @@ public class SimulateMatch {
                 int exceptions = 0;
                 int iGame = 0;
                 while (!mc.isMatchOver()) {
-                    // play games until the match ends
                     try {
                         simulateSingleMatch(mc, iGame, outputGamelog, useSnapshot);
                         iGame++;
@@ -651,7 +1179,6 @@ public class SimulateMatch {
         if (dotpos > 0 && dotpos == deckname.length() - 4) {
             File f = new File(deckname);
 
-            // If not an absolute path, prepend the appropriate base directory
             if (!f.isAbsolute()) {
                 String baseDir;
                 if (customBaseDir != null && !customBaseDir.isEmpty()) {
@@ -673,7 +1200,6 @@ public class SimulateMatch {
 
         IStorage<Deck> deckStore = null;
 
-        // Add other game types here...
         if (type.equals(GameType.Commander)) {
             deckStore = FModel.getDecks().getCommander();
         } else {

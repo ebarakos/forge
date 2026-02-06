@@ -68,3 +68,10 @@ This file tracks major changes, architectural decisions, and milestones for the 
   - **Rewrote**: `README.md` (focused on CLI simulation), `CONTRIBUTING.md` (5 modules only), `docs/Home.md`, `docs/_sidebar.md`
   - **Updated**: `docs/User-Guide.md`, `docs/Frequently-Asked-Questions.md` (removed Quest/Adventure references), `docs/AI.md` (added new CLI flags and AI profiles), `.github/ISSUE_TEMPLATE/bug_report.md` (removed smartphone section)
 - **Why**: Documentation referenced modules and features (Android, iOS, Adventure mode, Network play) that don't exist in this minimal branch. Cleaned docs now accurately reflect the included modules: forge-core, forge-game, forge-gui, forge-gui-desktop, forge-ai.
+
+## [2026-02-06] Migrate CLI to Picocli + Fix Critical Bugs
+- **Type**: Feature / Bugfix
+- **Description**: Migrated CLI from manual arg parsing to picocli framework. Added new `forge.cli` package with `ForgeCli` (root command), `SimCommand`, `ParseCommand`, `ServerCommand`, `ExitCode`, and `SimulationResult` JSON model. Added `--json` flag for structured output and `--version`/`--help` via picocli. Fixed two critical bugs found during review:
+  1. **JSON output corruption**: `simulateSingleMatchWithResult` printed plain-text game results to stdout even in `--json` mode, corrupting JSON for downstream parsers (e.g. `jq`). Fixed by routing per-game status to stderr in JSON mode and suppressing `System.out` during game execution when `--json` is active.
+  2. **Fragile winner detection**: Winner index was determined via `contains("(1)")` string matching, which broke with deck names containing "(1)" and only worked for 2-player games. Replaced with `determineWinnerIndex()` that compares against `Match.getPlayers()` registered player references.
+- **Why**: Manual arg parsing was error-prone and didn't support `--help`/`--version`. The `--json` flag enables scripted analysis of simulation results. Winner detection needed to be robust for multi-player and arbitrary deck names.
