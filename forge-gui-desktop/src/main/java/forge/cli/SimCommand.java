@@ -103,9 +103,15 @@ public class SimCommand implements Callable<Integer> {
 
     @Option(
         names = {"-s", "--snapshot"},
-        description = "Enable experimental snapshot restore for faster AI simulation (2-3x speedup)."
+        description = "Enable snapshot restore for faster AI simulation (enabled by default in sim mode)."
     )
     private boolean useSnapshot;
+
+    @Option(
+        names = {"--no-snapshot"},
+        description = "Disable snapshot restore (overrides default)."
+    )
+    private boolean noSnapshot;
 
     // === Output Options ===
 
@@ -222,7 +228,11 @@ public class SimCommand implements Callable<Integer> {
     }
 
     public boolean isUseSnapshot() {
-        return useSnapshot;
+        // Snapshot is enabled by default in sim mode; --no-snapshot disables it
+        if (noSnapshot) {
+            return false;
+        }
+        return true; // default on, -s flag is now a no-op (kept for backward compat)
     }
 
     public boolean isQuiet() {

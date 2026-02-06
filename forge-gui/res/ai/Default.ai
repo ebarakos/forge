@@ -325,3 +325,7 @@ SIDEBOARDING_CHANCE_ON_WIN=0
 SIDEBOARDING_SHARED_TYPE_ONLY=false
 # Allow replacing a creature with a planeswalker and vice versa when sideboarding if the previous option is disabled
 SIDEBOARDING_PLANESWALKER_EQ_CREATURE=false
+# Enable transposition table for caching evaluated positions (improves simulation speed)
+USE_TRANSPOSITION_TABLE=true
+# Enable loop detection to prevent infinite game states
+LOOP_DETECTION_ENABLED=true

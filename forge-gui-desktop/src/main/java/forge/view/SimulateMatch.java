@@ -229,14 +229,14 @@ public class SimulateMatch {
         }
 
         sb.append(" - ").append(Lang.nounWithNumeral(nGames, "game")).append(" of ").append(type);
-        if (useSnapshot) {
-            sb.append(" (snapshot restore enabled)");
+        if (!useSnapshot) {
+            sb.append(" (snapshot restore DISABLED)");
         }
         if (numThreads > 1) {
             sb.append(" (").append(numThreads).append(" parallel threads)");
         }
 
-        ORIGINAL_ERR.println(sb.toString());
+        ORIGINAL_ERR.println(sb);
 
         // Prepare JSON result if needed
         SimulationResult jsonResult = null;

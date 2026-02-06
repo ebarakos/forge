@@ -31,8 +31,13 @@ public class SpellAbilityPicker {
     private Plan plan;
     private int numSimulations;
 
+    // Reused evaluator instance to reduce GC pressure (cleared per decision)
+    private final GameStateEvaluator evaluator = new GameStateEvaluator();
+
     // Move orderer for alpha-beta pruning efficiency
-    private static final MoveOrderer moveOrderer = new MoveOrderer();
+    // ThreadLocal to avoid shared mutable state across parallel simulation threads
+    private static final ThreadLocal<MoveOrderer> moveOrderer =
+            ThreadLocal.withInitial(MoveOrderer::new);
 
     public SpellAbilityPicker(Game game, Player player) {
         this.game = game;
@@ -91,7 +96,7 @@ public class SpellAbilityPicker {
             return null;
         }
 
-        GameStateEvaluator evaluator = new GameStateEvaluator();
+        evaluator.clearCache();
         evaluator.setComboStateBonusFromProfile(player);
         Score origGameScore = evaluator.getScoreForGameState(game, player);
         List<SpellAbility> candidateSAs = getCandidateSpellsAndAbilities();
@@ -177,7 +182,7 @@ public class SpellAbilityPicker {
         print("Evaluating... (orig score = " + origGameScore +  ")");
 
         // Use move orderer to evaluate candidates in a better order for pruning
-        List<Integer> orderedIndices = moveOrderer.orderMoves(candidateSAs, controller.getDepth());
+        List<Integer> orderedIndices = moveOrderer.get().orderMoves(candidateSAs, controller.getDepth());
 
         for (int idx : orderedIndices) {
             Score value = evaluateSa(controller, phase, candidateSAs, idx);
@@ -188,14 +193,14 @@ public class SpellAbilityPicker {
 
                 // Record this as a killer move since it improved our score
                 if (bestSa != null) {
-                    moveOrderer.recordKillerMove(bestSa, controller.getDepth());
+                    moveOrderer.get().recordKillerMove(bestSa, controller.getDepth());
                 }
             }
         }
 
         // Update history heuristic for the best move
         if (bestSa != null && bestSaIndex >= 0) {
-            moveOrderer.updateHistory(bestSa, controller.getDepth());
+            moveOrderer.get().updateHistory(bestSa, controller.getDepth());
         }
 
         // To make the AI hold-off on playing creatures in MAIN1 if they give no other benefits,

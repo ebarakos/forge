@@ -43,8 +43,8 @@ public class GameCopier {
     };
 
     private Game origGame;
-    private BiMap<Player, Player> playerMap = HashBiMap.create();
-    private BiMap<Card, Card> cardMap = HashBiMap.create();
+    private BiMap<Player, Player> playerMap = HashBiMap.create(4);
+    private BiMap<Card, Card> cardMap = HashBiMap.create(150);
     private CopiedGameObjectMap gameObjectMap;
     private GameSnapshot snapshot = null;
 
