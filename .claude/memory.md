@@ -96,6 +96,19 @@ This file tracks major changes, architectural decisions, and milestones for the 
 - **Description**: Created `run.sh` at project root — a smart build-and-run script that replaces the manual `~/maven-3.9.6/bin/mvn clean install -DskipTests && java ... sim` workflow. Features: (1) change detection via `.last_build_timestamp` marker — skips build entirely when no `.java` or `pom.xml` files changed, (2) incremental builds by default (no `clean`), (3) parallel module builds (`-T 1C`), (4) flags: `--clean`, `--build-only`, `--run-only`, `--gui`. Installed Maven Wrapper (`./mvnw`) embedding Maven 3.9.6 in the project. Updated `.gitignore`, `.claudeignore`, `README.md`, and `CONTRIBUTING.md`.
 - **Why**: Full `clean install` took ~90s and was triggered accidentally via up-arrow+Enter even when nothing changed. Non-standard Maven location (`~/maven-3.9.6/`) confused AI agents. Now `./run.sh` skips builds instantly when unchanged, incremental builds take ~20s, and `./mvnw` works on any machine with Java 17.
 
+## [2026-02-06] Phase 1 Performance Quick Wins
+- **Type**: Feature
+- **Description**: Enabled existing but disabled infrastructure in `forge-ai` for simulation speed gains: (1) Snapshot restore enabled by default in sim mode, (2) Transposition table enabled for Default AI profile, (3) Fixed MoveOrderer thread safety with ThreadLocal, (4) Reuse GameStateEvaluator instances instead of recreating per call, (5) Pre-sized collections in GameCopier/MoveOrderer/SpellAbilityPicker.
+- **Why**: 2-5x speedup for AI-vs-AI simulations with no quality regression. These were all existing features that were disabled or had bugs preventing safe use.
+
+## [2026-02-06] Phase 2.1 Improved Mulligan Logic (Deck-Curve-Aware)
+- **Type**: Feature
+- **Description**: Rewrote mulligan hand scoring and card selection to be deck-aware. Changes across 3 files:
+  1. `AiDeckStatistics.java`: Added `deckSize` field and `idealLandsInHand(handSize)` method — computes ideal land count proportional to deck's land ratio (burn deck with 20/60 lands → 2 lands in 7-card hand; control with 26/60 → 3).
+  2. `ComputerUtil.scoreHand()`: Replaced hardcoded `handSize/2` ideal land count with deck-proportional calculation. Added color matching (rejects hands where >50% of spells have unmet color requirements). Added turn 1-3 castability scoring.
+  3. `PlayerControllerAi.tuckCardsViaMulligan()`: Uses deck-proportional land count. Prefers bottoming color-redundant lands and color-mismatched spells before falling back to generic scry/worst-card logic.
+- **Why**: Old mulligan used `handSize/2` as ideal land count regardless of deck archetype. No color analysis meant AI kept 3 Mountains + all Blue spells. No castability analysis beyond simple CMC check. These are the biggest source of game-to-game randomness in simulation results.
+
 ## [2026-02-06] Fix GUI Deck Loading + Consolidate Deck Files
 - **Type**: Bugfix
 - **Description**: Fixed GUI showing 0 constructed decks. Root cause: `GuiDesktop.getAssetsDir()` was changed from `"../forge-gui/"` to `"forge-gui/"` in commit `db522468cf` (strip non-desktop modules). This moved where `forge.profile.properties` is expected (`PROFILE_FILE = ASSETS_DIR + "forge.profile.properties"`). The profile at the project root was no longer found, so deck paths fell back to `~/.forge/decks/constructed/` (empty). Fix: copied `forge.profile.properties` to `forge-gui/forge.profile.properties`. Also consolidated all deck files into single canonical location `user/decks/constructed/`, removed duplicates from `~/.forge/decks/` and `user/decks/` (parent). Fixed 4-copy rule violations: Burn.dck (6 Searing Blaze → replaced SB copies with Flame Rift), Spy Combo.dck (7 Faerie Macabre → replaced SB copies with Weather the Storm).

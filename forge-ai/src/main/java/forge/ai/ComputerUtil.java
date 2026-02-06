@@ -2050,12 +2050,11 @@ public class ComputerUtil {
         return false;
     }
 
+    /**
+     * Scores a hand for mulligan decisions. Returns > 0 to keep, <= 0 to mulligan.
+     * Uses deck statistics for curve-aware land count, color matching, and castability.
+     */
     public static int scoreHand(CardCollectionView handList, Player ai, int cardsToReturn) {
-        // TODO Improve hand scoring in relation to cards to return.
-        // If final hand size is 5, score a hand based on what that 5 would be.
-        // Or if this is really really fast, determine what the 5 would be based on scoring
-        // All of the possibilities
-
         final AiController aic = ((PlayerControllerAi)ai.getController()).getAi();
         int currentHandSize = handList.size();
         int finalHandSize = currentHandSize - cardsToReturn;
@@ -2065,64 +2064,128 @@ public class ComputerUtil {
             return finalHandSize;
         }
 
+        // Get deck statistics for curve-aware decisions
+        AiDeckStatistics stats = AiDeckStatistics.fromPlayer(ai);
+
         CardCollectionView library = ai.getCardsIn(ZoneType.Library);
-        int landsInDeck = CardLists.count(library, CardPredicates.LANDS);
+        int landsInDeck = stats.numLands;
 
         // no land deck, can't do anything better
         if (landsInDeck == 0) {
             return finalHandSize;
         }
 
+        // Separate mana sources (lands + 0-cost artifacts) from spells
         final CardCollectionView lands = CardLists.filter(handList, c -> c.getManaCost().getCMC() <= 0 && !c.hasSVar("NeedsToPlay")
                 && (c.isLand() || c.isArtifact()));
+        final CardCollectionView spells = CardLists.filter(handList, c ->
+                !c.isLand() && !(c.isArtifact() && c.getManaCost().getCMC() <= 0));
 
         final int handSize = handList.size();
         final int landSize = lands.size();
-        int score = handList.size();
-        //adjust score for Living End decks
-        final CardCollectionView livingEnd = CardLists.filter(handList, c -> "Living End".equalsIgnoreCase(c.getName()));
-        if (livingEnd.size() > 0)
-            score = -(livingEnd.size() * 10);
 
-        if (handSize/2 == landSize || handSize/2 == landSize +1) {
-            score += 10;
+        // Special case: Living End decks
+        final CardCollectionView livingEnd = CardLists.filter(handList, c -> "Living End".equalsIgnoreCase(c.getName()));
+        if (livingEnd.size() > 0) {
+            return -(livingEnd.size() * 10);
         }
 
-        final CardCollectionView castables = CardLists.filter(handList, c -> c.getManaCost().getCMC() <= 0 || c.getManaCost().getCMC() <= landSize);
-
-        score += castables.size() * 2;
-
-        // Improve score for perceived mana efficiency of the hand
-
+        // === HARD REJECTIONS (edge cases) ===
         // if at mulligan threshold, and we have any lands accept the hand
         if (handSize == aic.getIntProperty(AiProps.MULLIGAN_THRESHOLD) && landSize > 0) {
-            return score;
+            return handSize;
         }
 
-        // otherwise, reject bad hands or return score
         if (landSize < 2) {
-            // BAD Hands, 0 or 1 lands
-            if (landsInDeck == 0 || library.size()/landsInDeck > 6) {
-                // Heavy spell deck it's ok
-                return handSize;
+            // 0 or 1 lands - reject unless it's a heavy-spell deck
+            if (landsInDeck == 0 || (library.size() > 0 && library.size() / landsInDeck > 6)) {
+                return handSize; // Heavy spell deck it's ok
             }
             return 0;
         } else if (landSize == handSize) {
-            if (library.size()/landsInDeck < 2) {
-                // Heavy land deck/Momir Basic it's ok
-                return handSize;
+            if (library.size() > 0 && library.size() / landsInDeck < 2) {
+                return handSize; // Heavy land deck/Momir Basic it's ok
             }
             return 0;
-        } else if (handSize >= 7 && landSize >= handSize-1) {
+        } else if (handSize >= 7 && landSize >= handSize - 1) {
             // BAD Hands - Mana flooding
-
-            if (library.size()/landsInDeck < 2) {
-                // Heavy land deck/Momir Basic it's ok
-                return handSize;
+            if (library.size() > 0 && library.size() / landsInDeck < 2) {
+                return handSize; // Heavy land deck it's ok
             }
             return 0;
         }
-        return score;
+
+        // === SCORING (hand passed hard rejections) ===
+        int score = 0;
+
+        // --- Land count score (deck-proportional) ---
+        int idealLands = stats.idealLandsInHand(handSize);
+        int landDeviation = Math.abs(landSize - idealLands);
+
+        if (landDeviation == 0) {
+            score += 12; // Perfect land count
+        } else if (landDeviation == 1) {
+            score += 6;  // Acceptable
+        } else {
+            score -= landDeviation * 4; // Increasingly bad
+        }
+
+        // --- Castability score (can we play spells in turns 1-3?) ---
+        int castableT1 = 0, castableT2 = 0, castableT3 = 0;
+        for (Card c : spells) {
+            int cmc = c.getManaCost().getCMC();
+            if (cmc <= landSize) castableT1++;
+            if (cmc <= landSize + 1) castableT2++;
+            if (cmc <= landSize + 2) castableT3++;
+        }
+
+        score += castableT1 * 3;
+        score += (castableT2 - castableT1) * 2;
+        score += (castableT3 - castableT2);
+
+        // Penalize having NO plays in the first 2 turns
+        if (castableT2 == 0 && spells.size() > 0) {
+            score -= 5;
+        }
+
+        // --- Color matching score ---
+        // Determine which colors our lands can produce
+        boolean[] colorsAvailable = new boolean[5]; // WUBRG
+        for (Card land : lands) {
+            for (SpellAbility ma : land.getManaAbilities()) {
+                for (int i = 0; i < MagicColor.WUBRG.length; i++) {
+                    if (ma.canProduce(MagicColor.toShortString(MagicColor.WUBRG[i]))) {
+                        colorsAvailable[i] = true;
+                    }
+                }
+            }
+        }
+
+        // Check if spells' color requirements are met by available lands
+        int colorMismatches = 0;
+        int spellsChecked = 0;
+        for (Card c : spells) {
+            int[] pips = c.getManaCost().getColorShardCounts();
+            for (int i = 0; i < 5; i++) {
+                if (pips[i] > 0 && !colorsAvailable[i]) {
+                    colorMismatches++;
+                    break;
+                }
+            }
+            spellsChecked++;
+        }
+
+        if (spellsChecked > 0) {
+            float mismatchRatio = (float) colorMismatches / spellsChecked;
+            if (mismatchRatio > 0.5f) {
+                // More than half the spells can't be cast - reject hand
+                return 0;
+            }
+            score -= colorMismatches * 3;
+        }
+
+        // Ensure a keepable hand returns > 0
+        return Math.max(score, 1);
     }
 
     // Computer mulligans if there are no cards with converted mana cost of 0 in its hand

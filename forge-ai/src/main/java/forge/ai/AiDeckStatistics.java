@@ -26,13 +26,29 @@ public class AiDeckStatistics {
     public int[] maxPips = null;
     // public int[] numSources = new int[6];
     public int numLands = 0;
-    public AiDeckStatistics(float averageCMC, float stddevCMC, int maxCost, int maxColoredCost, int[] maxPips, int numLands) {
+    public int deckSize = 0;
+    public AiDeckStatistics(float averageCMC, float stddevCMC, int maxCost, int maxColoredCost, int[] maxPips, int numLands, int deckSize) {
         this.averageCMC = averageCMC;
         this.stddevCMC = stddevCMC;
         this.maxCost = maxCost;
         this.maxColoredCost = maxColoredCost;
         this.maxPips = maxPips;
         this.numLands = numLands;
+        this.deckSize = deckSize;
+    }
+
+    /**
+     * Computes the ideal number of lands in a hand of the given size,
+     * based on the deck's land ratio.
+     * For a 60-card deck with 24 lands, a 7-card hand wants ~2.8 → 3 lands.
+     * For a 60-card burn deck with 20 lands, a 7-card hand wants ~2.3 → 2 lands.
+     */
+    public int idealLandsInHand(int handSize) {
+        if (deckSize == 0) return handSize / 2;
+        float deckLandRatio = (float) numLands / deckSize;
+        int ideal = Math.round(deckLandRatio * handSize);
+        // Clamp: at least 1 land, at most handSize - 1
+        return Math.max(1, Math.min(ideal, handSize - 1));
     }
 
     public static AiDeckStatistics fromCards(Iterable<Card> cards) {
@@ -79,7 +95,8 @@ public class AiDeckStatistics {
                 maxCost,
                 maxColoredCost,
                 maxPips,
-                numLands
+                numLands,
+                numLands + totalCount
                 );
     }
 

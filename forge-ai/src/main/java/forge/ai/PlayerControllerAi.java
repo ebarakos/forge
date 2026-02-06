@@ -782,10 +782,10 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(final Player mulliganingPlayer, int cardsToReturn) {
-        // TODO This is better than it was before, but still suboptimal (but fast).
-        // Maybe score a bunch of hands based on projected hand size and return the "duds"
         CardCollection hand = new CardCollection(player.getCardsIn(ZoneType.Hand));
-        int numLandsDesired = (mulliganingPlayer.getStartingHandSize() - cardsToReturn) / 2;
+        AiDeckStatistics stats = AiDeckStatistics.fromPlayer(player);
+        int finalHandSize = mulliganingPlayer.getStartingHandSize() - cardsToReturn;
+        int numLandsDesired = stats.idealLandsInHand(finalHandSize);
 
         CardCollection toReturn = new CardCollection();
         for (int i = 0; i < cardsToReturn; i++) {
@@ -796,6 +796,12 @@ public class PlayerControllerAi extends PlayerController {
 
             // If we're flooding with lands, get rid of the worst land we have
             if (numLandsInHand > 0 && numLandsInHand > numLandsDesired) {
+                // Prefer bottoming lands that don't produce colors we need
+                CardCollection expendable = findColorRedundantLands(landsInHand, hand, toReturn);
+                if (!expendable.isEmpty()) {
+                    toReturn.add(expendable.getFirst());
+                    continue;
+                }
                 CardCollection producingLands = CardLists.filter(landsInHand, CardPredicates.LANDS_PRODUCING_MANA);
                 CardCollection nonProducingLands = CardLists.filter(landsInHand, CardPredicates.LANDS_PRODUCING_MANA.negate());
                 Card worstLand = nonProducingLands.isEmpty() ? ComputerUtilCard.getWorstLand(producingLands)
@@ -804,26 +810,109 @@ public class PlayerControllerAi extends PlayerController {
                 continue;
             }
 
-            // See if we'd scry something to the bottom in this situation. If we want to, probably get rid of it.
+            // Bottom spells whose color requirements aren't met by our lands
+            CardCollection uncastable = new CardCollection();
+            for (Card c : hand) {
+                if (c.isLand() || toReturn.contains(c)) continue;
+                int[] pips = c.getManaCost().getColorShardCounts();
+                boolean colorMismatch = false;
+                for (int ci = 0; ci < 5; ci++) {
+                    if (pips[ci] > 0 && !handLandsProduceColor(landsInHand, ci)) {
+                        colorMismatch = true;
+                        break;
+                    }
+                }
+                if (colorMismatch) {
+                    uncastable.add(c);
+                }
+            }
+            if (!uncastable.isEmpty()) {
+                CardLists.sortByCmcDesc(uncastable);
+                toReturn.add(uncastable.getFirst());
+                continue;
+            }
+
+            // See if we'd scry something to the bottom in this situation.
             CardCollection scryBottom = new CardCollection();
             for (Card c : hand) {
-                // Lands are evaluated separately above, factoring in the number of cards to be returned to the library
                 if (!c.isLand() && !toReturn.contains(c) && !willPutCardOnTop(c)) {
                     scryBottom.add(c);
                 }
             }
             if (!scryBottom.isEmpty()) {
                 CardLists.sortByCmcDesc(scryBottom);
-                toReturn.add(scryBottom.getFirst()); // assume the max CMC one is worse since we're not guaranteed to have lands for it
+                toReturn.add(scryBottom.getFirst());
                 continue;
             }
 
-            // If we don't want to scry anything to the bottom, remove the worst card that we have in order to satisfy
-            // the requirement
+            // Otherwise remove the worst card
             toReturn.add(ComputerUtilCard.getWorstAI(hand));
         }
 
         return CardCollection.getView(toReturn);
+    }
+
+    /** Check if any land in the collection can produce the given color index (WUBRG = 0-4). */
+    private boolean handLandsProduceColor(CardCollection lands, int colorIndex) {
+        String colorStr = MagicColor.toShortString(MagicColor.WUBRG[colorIndex]);
+        for (Card land : lands) {
+            for (SpellAbility ma : land.getManaAbilities()) {
+                if (ma.canProduce(colorStr)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Find lands that produce only colors already covered by other lands in hand. */
+    private CardCollection findColorRedundantLands(CardCollection landsInHand, CardCollection hand, CardCollection toReturn) {
+        // Determine which colors the spells in hand need
+        boolean[] colorsNeeded = new boolean[5];
+        for (Card c : hand) {
+            if (c.isLand() || toReturn.contains(c)) continue;
+            int[] pips = c.getManaCost().getColorShardCounts();
+            for (int i = 0; i < 5; i++) {
+                if (pips[i] > 0) colorsNeeded[i] = true;
+            }
+        }
+
+        CardCollection redundant = new CardCollection();
+        for (Card land : landsInHand) {
+            if (toReturn.contains(land)) continue;
+            // Check if removing this land would leave all needed colors still covered
+            boolean canRemove = true;
+            for (int i = 0; i < 5; i++) {
+                if (!colorsNeeded[i]) continue;
+                String colorStr = MagicColor.toShortString(MagicColor.WUBRG[i]);
+                // Is this land the only source for this color?
+                boolean otherSourceExists = false;
+                for (Card other : landsInHand) {
+                    if (other == land || toReturn.contains(other)) continue;
+                    for (SpellAbility ma : other.getManaAbilities()) {
+                        if (ma.canProduce(colorStr)) {
+                            otherSourceExists = true;
+                            break;
+                        }
+                    }
+                    if (otherSourceExists) break;
+                }
+                if (!otherSourceExists) {
+                    // Check if this land even produces this color
+                    for (SpellAbility ma : land.getManaAbilities()) {
+                        if (ma.canProduce(colorStr)) {
+                            canRemove = false;
+                            break;
+                        }
+                    }
+                }
+                if (!canRemove) break;
+            }
+            if (canRemove) {
+                redundant.add(land);
+            }
+        }
+        return redundant;
     }
 
     @Override
