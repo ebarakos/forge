@@ -5,7 +5,9 @@ import picocli.CommandLine.Option;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 
 /**
@@ -127,62 +129,51 @@ public class SimCommand implements Callable<Integer> {
     )
     private boolean jsonOutput;
 
+    @Option(
+        names = {"--csv"},
+        description = "Output per-game results in CSV format to stdout."
+    )
+    private boolean csvOutput;
+
     // === AI Profile Options ===
 
     @Option(
-        names = {"-P1", "--player1-profile"},
-        description = "AI profile for player 1. Options: Default, Cautious, Reckless, Experimental, Enhanced, Ascended, Simulation, MCTS, AlwaysPass",
-        paramLabel = "PROFILE"
+        names = {"-P", "--profile"},
+        description = "AI profile assignment as N:PROFILE (e.g. 1:Simulation 2:Default). Can be repeated.",
+        paramLabel = "N:PROFILE"
     )
+    private List<String> profileAssignments = new ArrayList<>();
+
+    @Option(
+        names = {"--list-profiles"},
+        description = "List available AI profiles and exit."
+    )
+    private boolean listProfiles;
+
+    // Legacy per-player profile flags (kept for backward compatibility)
+
+    @Option(names = {"-P1", "--player1-profile"}, description = "AI profile for player 1 (legacy, prefer -P 1:PROFILE).", paramLabel = "PROFILE", hidden = true)
     private String player1Profile;
 
-    @Option(
-        names = {"-P2", "--player2-profile"},
-        description = "AI profile for player 2.",
-        paramLabel = "PROFILE"
-    )
+    @Option(names = {"-P2", "--player2-profile"}, description = "AI profile for player 2 (legacy).", paramLabel = "PROFILE", hidden = true)
     private String player2Profile;
 
-    @Option(
-        names = {"-P3", "--player3-profile"},
-        description = "AI profile for player 3.",
-        paramLabel = "PROFILE"
-    )
+    @Option(names = {"-P3", "--player3-profile"}, description = "AI profile for player 3 (legacy).", paramLabel = "PROFILE", hidden = true)
     private String player3Profile;
 
-    @Option(
-        names = {"-P4", "--player4-profile"},
-        description = "AI profile for player 4.",
-        paramLabel = "PROFILE"
-    )
+    @Option(names = {"-P4", "--player4-profile"}, description = "AI profile for player 4 (legacy).", paramLabel = "PROFILE", hidden = true)
     private String player4Profile;
 
-    @Option(
-        names = {"-P5", "--player5-profile"},
-        description = "AI profile for player 5.",
-        paramLabel = "PROFILE"
-    )
+    @Option(names = {"-P5", "--player5-profile"}, description = "AI profile for player 5 (legacy).", paramLabel = "PROFILE", hidden = true)
     private String player5Profile;
 
-    @Option(
-        names = {"-P6", "--player6-profile"},
-        description = "AI profile for player 6.",
-        paramLabel = "PROFILE"
-    )
+    @Option(names = {"-P6", "--player6-profile"}, description = "AI profile for player 6 (legacy).", paramLabel = "PROFILE", hidden = true)
     private String player6Profile;
 
-    @Option(
-        names = {"-P7", "--player7-profile"},
-        description = "AI profile for player 7.",
-        paramLabel = "PROFILE"
-    )
+    @Option(names = {"-P7", "--player7-profile"}, description = "AI profile for player 7 (legacy).", paramLabel = "PROFILE", hidden = true)
     private String player7Profile;
 
-    @Option(
-        names = {"-P8", "--player8-profile"},
-        description = "AI profile for player 8.",
-        paramLabel = "PROFILE"
-    )
+    @Option(names = {"-P8", "--player8-profile"}, description = "AI profile for player 8 (legacy).", paramLabel = "PROFILE", hidden = true)
     private String player8Profile;
 
     // === Getters ===
@@ -243,12 +234,29 @@ public class SimCommand implements Callable<Integer> {
         return jsonOutput;
     }
 
+    public boolean isCsvOutput() {
+        return csvOutput;
+    }
+
+    public boolean isListProfiles() {
+        return listProfiles;
+    }
+
     /**
      * Get the AI profile for a specific player (0-indexed).
+     * New -P N:PROFILE syntax takes precedence over legacy -P1..-P8 flags.
+     *
      * @param playerIndex 0-based player index
      * @return AI profile string or null if not set
      */
     public String getPlayerProfile(int playerIndex) {
+        // Check new -P syntax first (takes precedence)
+        Map<Integer, String> parsed = parseProfileAssignments();
+        if (parsed.containsKey(playerIndex)) {
+            return parsed.get(playerIndex);
+        }
+
+        // Fall back to legacy -P1..-P8 flags
         switch (playerIndex) {
             case 0: return player1Profile;
             case 1: return player2Profile;
@@ -262,8 +270,34 @@ public class SimCommand implements Callable<Integer> {
         }
     }
 
+    /**
+     * Parse -P N:PROFILE assignments into a map of 0-indexed player to profile.
+     */
+    private Map<Integer, String> parseProfileAssignments() {
+        Map<Integer, String> result = new HashMap<>();
+        for (String assignment : profileAssignments) {
+            int colonIdx = assignment.indexOf(':');
+            if (colonIdx > 0 && colonIdx < assignment.length() - 1) {
+                try {
+                    int playerNum = Integer.parseInt(assignment.substring(0, colonIdx));
+                    String profile = assignment.substring(colonIdx + 1);
+                    result.put(playerNum - 1, profile); // Convert 1-indexed to 0-indexed
+                } catch (NumberFormatException e) {
+                    System.err.println("Warning: Invalid profile assignment '" + assignment + "' (expected N:PROFILE)");
+                }
+            } else {
+                System.err.println("Warning: Invalid profile assignment '" + assignment + "' (expected N:PROFILE, e.g. 1:Simulation)");
+            }
+        }
+        return result;
+    }
+
     @Override
     public Integer call() {
+        // Handle --list-profiles
+        if (listProfiles) {
+            return forge.view.SimulateMatch.listProfiles();
+        }
         // Delegate to SimulateMatch with the new interface
         return forge.view.SimulateMatch.simulate(this);
     }

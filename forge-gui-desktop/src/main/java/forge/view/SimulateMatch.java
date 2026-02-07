@@ -18,8 +18,10 @@ import com.google.gson.GsonBuilder;
 
 import forge.LobbyPlayer;
 import forge.cli.ExitCode;
+import forge.cli.ProgressBar;
 import forge.cli.SimCommand;
 import forge.cli.json.SimulationResult;
+import forge.cli.stats.WilsonInterval;
 import forge.deck.Deck;
 import forge.deck.DeckGroup;
 import forge.deck.io.DeckSerializer;
@@ -106,6 +108,28 @@ public class SimulateMatch {
      * @param cmd The parsed SimCommand with all options
      * @return Exit code (0 = success, non-zero = error)
      */
+    public static int listProfiles() {
+        File aiDir = new File(ForgeConstants.AI_PROFILE_DIR);
+        ORIGINAL_OUT.println("Available AI profiles:");
+        ORIGINAL_OUT.println();
+        if (aiDir.isDirectory()) {
+            File[] profiles = aiDir.listFiles((dir, name) -> name.endsWith(".ai"));
+            if (profiles != null) {
+                Arrays.sort(profiles);
+                for (File f : profiles) {
+                    String name = f.getName().replace(".ai", "");
+                    ORIGINAL_OUT.printf("  %-16s  (%s)%n", name, f.getAbsolutePath());
+                }
+            }
+        } else {
+            ORIGINAL_ERR.println("Warning: AI profile directory not found at " + aiDir.getAbsolutePath());
+        }
+        ORIGINAL_OUT.println();
+        ORIGINAL_OUT.println("Usage: -P 1:Simulation -P 2:Default");
+        ORIGINAL_OUT.println("  or:  -P1 Simulation -P2 Default  (legacy syntax)");
+        return ExitCode.SUCCESS;
+    }
+
     public static int simulate(SimCommand cmd) {
         // Redirect initialization output to stderr
         System.setOut(ORIGINAL_ERR);
@@ -129,7 +153,8 @@ public class SimulateMatch {
 
         // Quiet mode: suppress game logs if -q flag OR -j flag is passed
         boolean quietMode = cmd.isQuiet() || cmd.getNumJobs() != null;
-        boolean outputGamelog = !quietMode && !cmd.isJsonOutput();
+        boolean structuredOutput = cmd.isJsonOutput() || cmd.isCsvOutput();
+        boolean outputGamelog = !quietMode && !structuredOutput;
 
         GameType type;
         try {
@@ -259,8 +284,8 @@ public class SimulateMatch {
 
         // Suppress stdout during game execution:
         // - quiet mode: suppress all output
-        // - json mode: suppress to prevent debug prints from corrupting JSON on stdout
-        if (quietMode || cmd.isJsonOutput()) {
+        // - json/csv mode: suppress to prevent debug prints from corrupting structured output
+        if (quietMode || structuredOutput) {
             System.setOut(NULL_PRINT_STREAM);
             System.setErr(NULL_PRINT_STREAM);
         }
@@ -274,23 +299,23 @@ public class SimulateMatch {
                 Match mc = new Match(rules, pp, "Test");
                 int iGame = 0;
                 while (!mc.isMatchOver()) {
-                    GameResult result = simulateSingleMatchWithResult(mc, iGame, outputGamelog, useSnapshot, cmd.isJsonOutput(), cmd.isJsonOutput());
+                    GameResult result = simulateSingleMatchWithResult(mc, iGame, outputGamelog, useSnapshot, structuredOutput, structuredOutput);
                     allResults.add(result);
                     iGame++;
                 }
             } else if (numThreads > 1 && nGames > 1) {
                 // Parallel batch mode — restore streams since simulateParallelWithResults
                 // manages its own suppression
-                if (quietMode || cmd.isJsonOutput()) {
+                if (quietMode || structuredOutput) {
                     System.setOut(ORIGINAL_OUT);
                     System.setErr(ORIGINAL_ERR);
                 }
-                allResults = simulateParallelWithResults(rules, playerConfigs, nGames, numThreads, outputGamelog, useSnapshot, cmd.isJsonOutput());
+                allResults = simulateParallelWithResults(rules, playerConfigs, nGames, numThreads, outputGamelog, useSnapshot, structuredOutput);
             } else {
                 // Sequential batch mode
                 Match mc = new Match(rules, pp, "Test");
                 for (int iGame = 0; iGame < nGames; iGame++) {
-                    GameResult result = simulateSingleMatchWithResult(mc, iGame, outputGamelog, useSnapshot, cmd.isJsonOutput(), cmd.isJsonOutput());
+                    GameResult result = simulateSingleMatchWithResult(mc, iGame, outputGamelog, useSnapshot, structuredOutput, structuredOutput);
                     allResults.add(result);
                 }
             }
@@ -304,6 +329,8 @@ public class SimulateMatch {
         // Output results
         if (cmd.isJsonOutput()) {
             outputJsonResult(jsonResult, allResults, playerConfigs, totalTime);
+        } else if (cmd.isCsvOutput()) {
+            outputCsvResult(allResults, playerConfigs, totalTime);
         } else if (numThreads > 1) {
             // Summary already printed by parallel method
         }
@@ -409,6 +436,7 @@ public class SimulateMatch {
         final AtomicInteger completed = new AtomicInteger(0);
         final long startTime = System.currentTimeMillis();
         final List<GameResult> allResults = Collections.synchronizedList(new ArrayList<>());
+        final ProgressBar progress = new ProgressBar(ORIGINAL_ERR, nGames);
 
         System.setOut(NULL_PRINT_STREAM);
         System.setErr(NULL_PRINT_STREAM);
@@ -427,24 +455,18 @@ public class SimulateMatch {
                     GameResult result = simulateSingleMatchQuietNoSuppress(mc, gameNum, useSnapshot, collectLog);
                     allResults.add(result);
 
-                    synchronized (ORIGINAL_OUT) {
-                        if (result.isDraw) {
-                            draws.incrementAndGet();
-                        } else if (result.winnerIndex == 0) {
-                            wins1.incrementAndGet();
-                        } else {
-                            wins2.incrementAndGet();
-                        }
-                        int done = completed.incrementAndGet();
-                        if (done % 10 == 0 || done == nGames) {
-                            ORIGINAL_ERR.printf("Progress: %d/%d games completed%n", done, nGames);
-                        }
+                    if (result.isDraw) {
+                        draws.incrementAndGet();
+                    } else if (result.winnerIndex == 0) {
+                        wins1.incrementAndGet();
+                    } else {
+                        wins2.incrementAndGet();
                     }
+                    completed.incrementAndGet();
+                    progress.update(completed.get());
                 } catch (Exception e) {
-                    synchronized (ORIGINAL_OUT) {
-                        ORIGINAL_ERR.printf("Game %d: Error - %s%n", gameNum + 1, e.getMessage());
-                        completed.incrementAndGet();
-                    }
+                    completed.incrementAndGet();
+                    progress.update(completed.get());
                 }
             }));
         }
@@ -458,6 +480,7 @@ public class SimulateMatch {
         }
 
         executor.shutdown();
+        progress.finish();
 
         System.setOut(ORIGINAL_OUT);
         System.setErr(ORIGINAL_ERR);
@@ -466,11 +489,14 @@ public class SimulateMatch {
 
         // Print summary — to stderr in JSON mode to keep stdout clean
         PrintStream summaryStream = collectLog ? ORIGINAL_ERR : System.out;
-        summaryStream.println();
         summaryStream.println("=== Simulation Summary ===");
         summaryStream.printf("Total games: %d%n", nGames);
-        summaryStream.printf("Player 1 wins: %d (%.1f%%)%n", wins1.get(), 100.0 * wins1.get() / nGames);
-        summaryStream.printf("Player 2 wins: %d (%.1f%%)%n", wins2.get(), 100.0 * wins2.get() / nGames);
+        double[] ci1 = WilsonInterval.calculate95(wins1.get(), nGames);
+        double[] ci2 = WilsonInterval.calculate95(wins2.get(), nGames);
+        summaryStream.printf("Player 1 wins: %d (%s)%n", wins1.get(),
+                WilsonInterval.format(100.0 * wins1.get() / nGames, ci1));
+        summaryStream.printf("Player 2 wins: %d (%s)%n", wins2.get(),
+                WilsonInterval.format(100.0 * wins2.get() / nGames, ci2));
         summaryStream.printf("Draws: %d (%.1f%%)%n", draws.get(), 100.0 * draws.get() / nGames);
         summaryStream.printf("Total time: %d ms (%.1f ms/game avg, %.1f games/sec)%n",
                 totalTime, (double) totalTime / nGames, 1000.0 * nGames / totalTime);
@@ -554,6 +580,9 @@ public class SimulateMatch {
             ps.wins = wins[p];
             ps.losses = results.size() - wins[p] - drawCount;
             ps.winRate = results.isEmpty() ? 0 : 100.0 * wins[p] / results.size();
+            double[] ci = WilsonInterval.calculate95(wins[p], results.size());
+            ps.winRateCiLower = ci[0];
+            ps.winRateCiUpper = ci[1];
             jsonResult.summary.players.add(ps);
         }
 
@@ -591,6 +620,61 @@ public class SimulateMatch {
             .serializeNulls()
             .create();
         ORIGINAL_OUT.println(gson.toJson(jsonResult));
+    }
+
+    /**
+     * Outputs simulation results in CSV format.
+     * Header row + one row per game, plus a summary section.
+     */
+    private static void outputCsvResult(List<GameResult> results, List<PlayerConfig> playerConfigs, long totalTime) {
+        // Per-game rows
+        ORIGINAL_OUT.println("game,winner,winner_index,is_draw,turns,duration_ms");
+        int gameNum = 1;
+        for (GameResult r : results) {
+            ORIGINAL_OUT.printf("%d,%s,%s,%s,%d,%d%n",
+                    gameNum++,
+                    r.isDraw ? "" : csvEscape(r.winnerName),
+                    r.isDraw ? "" : String.valueOf(r.winnerIndex),
+                    r.isDraw,
+                    r.turns,
+                    r.timeMs);
+        }
+
+        // Summary section (separated by blank line)
+        ORIGINAL_OUT.println();
+        ORIGINAL_OUT.println("player_index,deck,ai_profile,wins,losses,win_rate,ci_lower_95,ci_upper_95");
+        int[] wins = new int[playerConfigs.size()];
+        int drawCount = 0;
+        for (GameResult r : results) {
+            if (r.isDraw) {
+                drawCount++;
+            } else if (r.winnerIndex >= 0 && r.winnerIndex < wins.length) {
+                wins[r.winnerIndex]++;
+            }
+        }
+        for (int p = 0; p < playerConfigs.size(); p++) {
+            double winRate = results.isEmpty() ? 0 : 100.0 * wins[p] / results.size();
+            double[] ci = WilsonInterval.calculate95(wins[p], results.size());
+            ORIGINAL_OUT.printf("%d,%s,%s,%d,%d,%.1f,%.1f,%.1f%n",
+                    p,
+                    csvEscape(playerConfigs.get(p).deck.getName()),
+                    csvEscape(playerConfigs.get(p).aiProfile.isEmpty() ? "Default" : playerConfigs.get(p).aiProfile),
+                    wins[p],
+                    results.size() - wins[p] - drawCount,
+                    winRate,
+                    ci[0], ci[1]);
+        }
+    }
+
+    /**
+     * Escapes a value for CSV output (wraps in quotes if it contains commas or quotes).
+     */
+    private static String csvEscape(String value) {
+        if (value == null) return "";
+        if (value.contains(",") || value.contains("\"") || value.contains("\n")) {
+            return "\"" + value.replace("\"", "\"\"") + "\"";
+        }
+        return value;
     }
 
     /**
@@ -723,6 +807,79 @@ public class SimulateMatch {
             tourney.reportMatchCompletion(pairing);
         }
         tourney.outputTournamentResults();
+
+        // Output matchup matrix for round-robin tournaments
+        if ("roundrobin".equalsIgnoreCase(tournament)) {
+            outputMatchupMatrix(tourney, players);
+        }
+    }
+
+    /**
+     * Outputs a pairwise matchup matrix showing win rates between all deck pairs.
+     */
+    private static void outputMatchupMatrix(AbstractTournament tourney, List<TournamentPlayer> players) {
+        int n = players.size();
+        // wins[i][j] = number of times player i beat player j
+        int[][] wins = new int[n][n];
+        int[][] games = new int[n][n];
+
+        for (TournamentPairing pairing : tourney.getCompletedPairings()) {
+            if (pairing.isBye() || pairing.getWinner() == null) continue;
+
+            List<TournamentPlayer> paired = pairing.getPairedPlayers();
+            if (paired.size() != 2) continue;
+
+            int idx0 = paired.get(0).getIndex();
+            int idx1 = paired.get(1).getIndex();
+            int winnerIdx = pairing.getWinner().getIndex();
+
+            games[idx0][idx1]++;
+            games[idx1][idx0]++;
+            if (winnerIdx == idx0) {
+                wins[idx0][idx1]++;
+            } else {
+                wins[idx1][idx0]++;
+            }
+        }
+
+        // Determine column width based on longest deck name
+        int nameWidth = 4;
+        String[] names = new String[n];
+        for (int i = 0; i < n; i++) {
+            names[i] = players.get(i).getPlayer().getName();
+            nameWidth = Math.max(nameWidth, names[i].length());
+        }
+        nameWidth = Math.min(nameWidth, 20);
+
+        ORIGINAL_OUT.println();
+        ORIGINAL_OUT.println("=== Matchup Matrix (row win % vs column) ===");
+
+        // Header row
+        StringBuilder header = new StringBuilder();
+        header.append(String.format("%-" + nameWidth + "s", ""));
+        for (int j = 0; j < n; j++) {
+            String shortName = names[j].length() > 8 ? names[j].substring(0, 8) : names[j];
+            header.append(String.format("  %8s", shortName));
+        }
+        ORIGINAL_OUT.println(header);
+
+        // Data rows
+        for (int i = 0; i < n; i++) {
+            StringBuilder row = new StringBuilder();
+            String rowName = names[i].length() > nameWidth ? names[i].substring(0, nameWidth) : names[i];
+            row.append(String.format("%-" + nameWidth + "s", rowName));
+            for (int j = 0; j < n; j++) {
+                if (i == j) {
+                    row.append(String.format("  %8s", "---"));
+                } else if (games[i][j] == 0) {
+                    row.append(String.format("  %8s", "n/a"));
+                } else {
+                    double rate = 100.0 * wins[i][j] / games[i][j];
+                    row.append(String.format("  %7.1f%%", rate));
+                }
+            }
+            ORIGINAL_OUT.println(row);
+        }
     }
 
     // =====================================================================
@@ -915,6 +1072,7 @@ public class SimulateMatch {
         final AtomicInteger draws = new AtomicInteger(0);
         final AtomicInteger completed = new AtomicInteger(0);
         final long startTime = System.currentTimeMillis();
+        final ProgressBar progress = new ProgressBar(ORIGINAL_ERR, nGames);
 
         System.setOut(NULL_PRINT_STREAM);
         System.setErr(NULL_PRINT_STREAM);
@@ -932,24 +1090,18 @@ public class SimulateMatch {
                     Match mc = new Match(rules, freshPlayers, "Test-" + gameNum);
                     GameResult result = simulateSingleMatchQuietNoSuppress(mc, gameNum, useSnapshot, false);
 
-                    synchronized (ORIGINAL_OUT) {
-                        if (result.isDraw) {
-                            draws.incrementAndGet();
-                        } else if (result.winnerIndex == 0) {
-                            wins1.incrementAndGet();
-                        } else {
-                            wins2.incrementAndGet();
-                        }
-                        int done = completed.incrementAndGet();
-                        if (done % 10 == 0 || done == nGames) {
-                            ORIGINAL_OUT.printf("Progress: %d/%d games completed%n", done, nGames);
-                        }
+                    if (result.isDraw) {
+                        draws.incrementAndGet();
+                    } else if (result.winnerIndex == 0) {
+                        wins1.incrementAndGet();
+                    } else {
+                        wins2.incrementAndGet();
                     }
+                    completed.incrementAndGet();
+                    progress.update(completed.get());
                 } catch (Exception e) {
-                    synchronized (ORIGINAL_OUT) {
-                        ORIGINAL_OUT.printf("Game %d: Error - %s%n", gameNum + 1, e.getMessage());
-                        completed.incrementAndGet();
-                    }
+                    completed.incrementAndGet();
+                    progress.update(completed.get());
                 }
             }));
         }
@@ -963,17 +1115,21 @@ public class SimulateMatch {
         }
 
         executor.shutdown();
+        progress.finish();
 
         System.setOut(ORIGINAL_OUT);
         System.setErr(ORIGINAL_ERR);
 
         long totalTime = System.currentTimeMillis() - startTime;
 
-        System.out.println();
         System.out.println("=== Simulation Summary ===");
         System.out.printf("Total games: %d%n", nGames);
-        System.out.printf("Player 1 wins: %d (%.1f%%)%n", wins1.get(), 100.0 * wins1.get() / nGames);
-        System.out.printf("Player 2 wins: %d (%.1f%%)%n", wins2.get(), 100.0 * wins2.get() / nGames);
+        double[] ci1 = WilsonInterval.calculate95(wins1.get(), nGames);
+        double[] ci2 = WilsonInterval.calculate95(wins2.get(), nGames);
+        System.out.printf("Player 1 wins: %d (%s)%n", wins1.get(),
+                WilsonInterval.format(100.0 * wins1.get() / nGames, ci1));
+        System.out.printf("Player 2 wins: %d (%s)%n", wins2.get(),
+                WilsonInterval.format(100.0 * wins2.get() / nGames, ci2));
         System.out.printf("Draws: %d (%.1f%%)%n", draws.get(), 100.0 * draws.get() / nGames);
         System.out.printf("Total time: %d ms (%.1f ms/game avg, %.1f games/sec)%n",
                 totalTime, (double) totalTime / nGames, 1000.0 * nGames / totalTime);
@@ -1177,9 +1333,13 @@ public class SimulateMatch {
     private static Deck deckFromCommandLineParameter(String deckname, GameType type, String customBaseDir) {
         int dotpos = deckname.lastIndexOf('.');
         if (dotpos > 0 && dotpos == deckname.length() - 4) {
+            // Looks like a file path
+            List<String> pathsTried = new ArrayList<>();
             File f = new File(deckname);
 
-            if (!f.isAbsolute()) {
+            if (f.isAbsolute()) {
+                pathsTried.add(f.getAbsolutePath());
+            } else {
                 String baseDir;
                 if (customBaseDir != null && !customBaseDir.isEmpty()) {
                     baseDir = customBaseDir.endsWith(File.separator) ? customBaseDir : customBaseDir + File.separator;
@@ -1188,25 +1348,119 @@ public class SimulateMatch {
                             ForgeConstants.DECK_COMMANDER_DIR : ForgeConstants.DECK_CONSTRUCTED_DIR;
                 }
                 f = new File(baseDir + deckname);
+                pathsTried.add(f.getAbsolutePath());
+
+                // Also try current working directory
+                if (!f.exists()) {
+                    File cwdFile = new File(System.getProperty("user.dir"), deckname);
+                    pathsTried.add(cwdFile.getAbsolutePath());
+                    if (cwdFile.exists()) {
+                        return DeckSerializer.fromFile(cwdFile);
+                    }
+                }
             }
 
             if (!f.exists()) {
-                System.out.println("No deck found at " + f.getAbsolutePath());
+                ORIGINAL_ERR.println("Error: Deck file not found - " + deckname);
+                ORIGINAL_ERR.println("  Paths tried:");
+                for (String path : pathsTried) {
+                    ORIGINAL_ERR.println("    - " + path);
+                }
+                // Suggest .dck files in the directory
+                File parentDir = f.getParentFile();
+                if (parentDir != null && parentDir.isDirectory()) {
+                    File[] dckFiles = parentDir.listFiles((dir, name) -> name.endsWith(".dck"));
+                    if (dckFiles != null && dckFiles.length > 0) {
+                        List<String> suggestions = findSimilarNames(deckname, dckFiles);
+                        if (!suggestions.isEmpty()) {
+                            ORIGINAL_ERR.println("  Did you mean:");
+                            for (String s : suggestions) {
+                                ORIGINAL_ERR.println("    - " + s);
+                            }
+                        }
+                    }
+                }
                 return null;
             }
 
             return DeckSerializer.fromFile(f);
         }
 
-        IStorage<Deck> deckStore = null;
-
+        // Name-based lookup
+        IStorage<Deck> deckStore;
         if (type.equals(GameType.Commander)) {
             deckStore = FModel.getDecks().getCommander();
         } else {
             deckStore = FModel.getDecks().getConstructed();
         }
 
-        return deckStore.get(deckname);
+        Deck d = deckStore.get(deckname);
+        if (d == null) {
+            ORIGINAL_ERR.println("Error: Deck not found by name - " + deckname);
+            // Suggest similar deck names
+            Collection<String> allNames = deckStore.getItemNames();
+            List<String> suggestions = findSimilarDeckNames(deckname, allNames);
+            if (!suggestions.isEmpty()) {
+                ORIGINAL_ERR.println("  Did you mean:");
+                for (String s : suggestions) {
+                    ORIGINAL_ERR.println("    - " + s);
+                }
+            }
+            ORIGINAL_ERR.println("  Tip: Use a .dck file path for decks not in the store, or -B to set a base directory");
+        }
+        return d;
+    }
+
+    /**
+     * Find similar file names using case-insensitive substring matching.
+     */
+    private static List<String> findSimilarNames(String target, File[] files) {
+        String baseName = new File(target).getName().toLowerCase();
+        // Strip extension for comparison
+        String nameNoExt = baseName.contains(".") ? baseName.substring(0, baseName.lastIndexOf('.')) : baseName;
+
+        List<String> matches = new ArrayList<>();
+        for (File f : files) {
+            String fn = f.getName().toLowerCase();
+            String fnNoExt = fn.contains(".") ? fn.substring(0, fn.lastIndexOf('.')) : fn;
+            if (fnNoExt.contains(nameNoExt) || nameNoExt.contains(fnNoExt) || editDistance(nameNoExt, fnNoExt) <= 3) {
+                matches.add(f.getName());
+                if (matches.size() >= 5) break;
+            }
+        }
+        return matches;
+    }
+
+    /**
+     * Find similar deck names from the deck store.
+     */
+    private static List<String> findSimilarDeckNames(String target, Collection<String> allNames) {
+        String lowerTarget = target.toLowerCase();
+        List<String> matches = new ArrayList<>();
+        for (String name : allNames) {
+            String lowerName = name.toLowerCase();
+            if (lowerName.contains(lowerTarget) || lowerTarget.contains(lowerName) || editDistance(lowerTarget, lowerName) <= 3) {
+                matches.add(name);
+                if (matches.size() >= 5) break;
+            }
+        }
+        return matches;
+    }
+
+    /**
+     * Simple Levenshtein edit distance for fuzzy matching.
+     */
+    private static int editDistance(String a, String b) {
+        int[][] dp = new int[a.length() + 1][b.length() + 1];
+        for (int i = 0; i <= a.length(); i++) dp[i][0] = i;
+        for (int j = 0; j <= b.length(); j++) dp[0][j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                dp[i][j] = Math.min(Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1), dp[i - 1][j - 1] + cost);
+            }
+        }
+        return dp[a.length()][b.length()];
     }
 
 }

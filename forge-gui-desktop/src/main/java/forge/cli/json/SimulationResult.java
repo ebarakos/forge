@@ -63,6 +63,10 @@ public class SimulationResult {
         public int wins;
         public int losses;
         public double winRate;
+        /** Wilson score 95% confidence interval lower bound (percentage) */
+        public Double winRateCiLower;
+        /** Wilson score 95% confidence interval upper bound (percentage) */
+        public Double winRateCiUpper;
     }
 
     /**
