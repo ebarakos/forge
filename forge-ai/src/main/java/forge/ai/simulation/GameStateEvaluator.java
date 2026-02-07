@@ -7,6 +7,7 @@ import forge.ai.CreatureEvaluator;
 import forge.card.mana.ManaAtom;
 import forge.game.Game;
 import forge.game.card.Card;
+import forge.game.card.CardCollection;
 import forge.game.card.CounterEnumType;
 import forge.game.cost.CostSacrifice;
 import forge.game.keyword.Keyword;
@@ -537,20 +538,20 @@ public class GameStateEvaluator {
     }
 
     public int evalCard(Game game, Player aiPlayer, Card c) {
-        // Generate cache key based on card state
-        String cacheKey = getCardCacheKey(c);
+        // Creatures use context-aware evaluation (depends on board state, not cacheable)
+        if (c.isCreature()) {
+            return eval.evaluateCreatureInContext(c, game, aiPlayer);
+        }
 
-        // Check cache first
+        // Non-creature cards can be cached
+        String cacheKey = getCardCacheKey(c);
         Integer cachedValue = cardEvalCache.get(cacheKey);
         if (cachedValue != null) {
             return cachedValue;
         }
 
-        // Calculate value
         int value;
-        if (c.isCreature()) {
-            value = eval.evaluateCreature(c);
-        } else if (c.isLand()) {
+        if (c.isLand()) {
             value = evaluateLand(c);
         } else if (c.isEnchantingCard()) {
             // TODO: Should provide value in whatever it's enchanting?
@@ -657,6 +658,123 @@ public class GameStateEvaluator {
                 GameSimulator.debugPrint(value + " via " + text);
             }
             return super.addValue(value, text);
+        }
+
+        /**
+         * Evaluates a creature considering the current board state.
+         * Adjusts base value based on evasion relevance, board density,
+         * and threat sizing relative to opponent's creatures.
+         */
+        public int evaluateCreatureInContext(Card c, Game game, Player aiPlayer) {
+            int baseValue = evaluateCreature(c);
+            if (game == null || aiPlayer == null) return baseValue;
+
+            Player opponent = aiPlayer.getWeakestOpponent();
+            if (opponent == null) return baseValue;
+
+            boolean isOurs = c.getController() == aiPlayer;
+            Player enemy = isOurs ? opponent : aiPlayer;
+
+            int power = c.getNetCombatDamage();
+            int toughness = c.getNetToughness();
+            int contextBonus = 0;
+
+            CardCollection enemyCreatures = enemy.getCreaturesInPlay();
+            int totalEnemyCreatures = enemyCreatures.size();
+
+            // --- Evasion relevance ---
+            // Bonus when few/no enemy creatures can block this attacker
+            if (power > 0 && !c.hasKeyword(Keyword.DEFENDER) && totalEnemyCreatures > 0) {
+                int potentialBlockers = 0;
+                for (Card blocker : enemyCreatures) {
+                    if (!blocker.isTapped() && canPotentiallyBlock(c, blocker)) {
+                        potentialBlockers++;
+                    }
+                }
+                if (potentialBlockers == 0) {
+                    contextBonus += addValue(power * 8, "ctx:no-blockers");
+                } else if (potentialBlockers == 1) {
+                    contextBonus += addValue(power * 4, "ctx:one-blocker");
+                }
+            }
+
+            // --- Board density ---
+            // Creatures matter more on sparse boards
+            int ourCount = (isOurs ? aiPlayer : opponent).getCreaturesInPlay().size();
+            int totalCreatures = ourCount + totalEnemyCreatures;
+            if (totalCreatures <= 2) {
+                contextBonus += addValue(25, "ctx:sparse-board");
+            } else if (totalCreatures <= 4) {
+                contextBonus += addValue(10, "ctx:medium-board");
+            }
+
+            // --- Threat sizing ---
+            // Bonus for creatures that dominate the opposing board
+            if (power > 0 && totalEnemyCreatures >= 2) {
+                int killsCount = 0;
+                int survivesCount = 0;
+                for (Card ec : enemyCreatures) {
+                    if (power >= ec.getNetToughness()) killsCount++;
+                    if (toughness > ec.getNetCombatDamage()) survivesCount++;
+                }
+                if (killsCount >= totalEnemyCreatures) {
+                    contextBonus += addValue(15, "ctx:kills-all");
+                }
+                if (survivesCount >= totalEnemyCreatures) {
+                    contextBonus += addValue(10, "ctx:survives-all");
+                }
+            }
+
+            // Deathtouch is more valuable against big creatures
+            if (c.hasKeyword(Keyword.DEATHTOUCH) && totalEnemyCreatures > 0) {
+                int bigThreats = 0;
+                for (Card ec : enemyCreatures) {
+                    if (ec.getNetCombatDamage() >= 4) bigThreats++;
+                }
+                if (bigThreats > 0) {
+                    contextBonus += addValue(min(bigThreats * 10, 30), "ctx:dt-vs-big");
+                }
+            }
+
+            return baseValue + contextBonus;
+        }
+
+        /**
+         * Simplified check for whether a blocker can potentially block an attacker
+         * based on evasion keywords. Used for evaluation, not full rules enforcement.
+         */
+        private boolean canPotentiallyBlock(Card attacker, Card blocker) {
+            // Flying: only flying/reach can block
+            if (attacker.hasKeyword(Keyword.FLYING)) {
+                if (!blocker.hasKeyword(Keyword.FLYING) && !blocker.hasKeyword(Keyword.REACH)) {
+                    return false;
+                }
+            }
+            // Horsemanship: only horsemanship can block
+            if (attacker.hasKeyword(Keyword.HORSEMANSHIP)) {
+                if (!blocker.hasKeyword(Keyword.HORSEMANSHIP)) {
+                    return false;
+                }
+            }
+            // Shadow: only shadow can block shadow
+            if (attacker.hasKeyword(Keyword.SHADOW)) {
+                if (!blocker.hasKeyword(Keyword.SHADOW)) {
+                    return false;
+                }
+            }
+            // Fear: only artifact or black creatures
+            if (attacker.hasKeyword(Keyword.FEAR)) {
+                if (!blocker.isArtifact() && !blocker.isBlack()) {
+                    return false;
+                }
+            }
+            // Intimidate: only artifact or color-sharing creatures
+            if (attacker.hasKeyword(Keyword.INTIMIDATE)) {
+                if (!blocker.isArtifact() && !blocker.sharesColorWith(attacker)) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
