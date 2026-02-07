@@ -164,9 +164,17 @@ public enum AiProps { /** */
     // Enable alpha-beta style pruning (soft beta cutoff at depth >= 2 + futility pruning)
     ALPHA_BETA_PRUNING ("false"),
     // Futility margin: skip recursion if base score is this far below current best
-    FUTILITY_MARGIN ("300");
-    // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting
-    // <-- There are no experimental options here -->
+    FUTILITY_MARGIN ("300"),
+
+    // MCTS (Monte Carlo Tree Search) settings
+    // Enable MCTS as alternative to minimax search
+    MCTS_ENABLED ("false"),
+    // Maximum number of MCTS iterations per decision
+    MCTS_ITERATIONS ("1000"),
+    // UCB1 exploration constant (sqrt(2) ~= 1.414 is theoretically optimal)
+    MCTS_EXPLORATION_CONSTANT ("1.414"),
+    // Number of heuristic AI moves to play during rollout phase
+    MCTS_ROLLOUT_DEPTH ("6");
 
 
     private final String strDefaultVal;

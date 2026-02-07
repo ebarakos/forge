@@ -111,7 +111,11 @@ public class SpellAbilityPicker {
         if (sa != null) {
             return sa;
         }
-        createNewPlan(origGameScore, candidateSAs);
+        if (AiProfileUtil.getBoolProperty(player, AiProps.MCTS_ENABLED)) {
+            createNewPlanMCTS(origGameScore, candidateSAs);
+        } else {
+            createNewPlan(origGameScore, candidateSAs);
+        }
         return getPlannedSpellAbility(origGameScore, candidateSAs);
     }
 
@@ -171,6 +175,29 @@ public class SpellAbilityPicker {
 
         printPlan(bestPlan, "Current phase (" + currentPhase + ")");
         plan = bestPlan;
+    }
+
+    private void createNewPlanMCTS(Score origGameScore, List<SpellAbility> candidateSAs) {
+        plan = null;
+
+        if (candidateSAs.isEmpty()) {
+            print("MCTS: No candidates to evaluate");
+            return;
+        }
+
+        MCTSController mcts = new MCTSController(game, player, origGameScore);
+        SpellAbility bestSA = mcts.findBestAction(candidateSAs);
+
+        if (bestSA == null) {
+            print("MCTS: No improving action found after " + mcts.getTotalIterations() + " iterations");
+            return;
+        }
+
+        plan = mcts.buildPlan(bestSA, candidateSAs, origGameScore);
+        numSimulations += mcts.getTotalIterations();
+
+        print("MCTS: Best action after " + mcts.getTotalIterations() + " iterations ("
+                + mcts.getTotalTimeMs() + "ms): " + abilityToString(bestSA));
     }
 
     private SpellAbility chooseSpellAbilityToPlayImpl(SimulationController controller, List<SpellAbility> candidateSAs, Score origGameScore, PhaseType phase) {

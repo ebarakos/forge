@@ -131,7 +131,7 @@ public class SimCommand implements Callable<Integer> {
 
     @Option(
         names = {"-P1", "--player1-profile"},
-        description = "AI profile for player 1. Options: Default, Cautious, Reckless, Experimental, Enhanced, Ascended, AlwaysPass",
+        description = "AI profile for player 1. Options: Default, Cautious, Reckless, Experimental, Enhanced, Ascended, Simulation, MCTS, AlwaysPass",
         paramLabel = "PROFILE"
     )
     private String player1Profile;

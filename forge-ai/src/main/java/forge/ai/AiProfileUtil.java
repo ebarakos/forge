@@ -130,6 +130,9 @@ public class AiProfileUtil {
     public static boolean getBoolProperty(final Player p, final AiProps propName) {
         return Boolean.parseBoolean(getProperty(p, propName));
     }
+    public static double getDoubleProperty(final Player p, final AiProps propName) {
+        return Double.parseDouble(getProperty(p, propName));
+    }
 
     /**
      * Returns an AI property value for the current profile.
