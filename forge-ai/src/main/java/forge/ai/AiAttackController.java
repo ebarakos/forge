@@ -1326,7 +1326,106 @@ public class AiAttackController {
             }
         }
 
+        // Refine attacks by predicting opponent's blocks (skip in assault/passive mode)
+        if (aiAggression > 0 && aiAggression < 5 && !simAI) {
+            refineAttacksWithBlockPrediction(combat);
+        }
+
         return aiAggression;
+    }
+
+    /**
+     * After all attack decisions, simulate opponent's likely blocks and remove
+     * attackers that would die in unfavorable trades.
+     */
+    private void refineAttacksWithBlockPrediction(final Combat combat) {
+        CardCollection declaredAttackers = combat.getAttackers();
+        if (declaredAttackers.size() < 2 || defendingOpponent == null) {
+            return;
+        }
+
+        // Create a test combat to predict blocks without modifying the real one
+        Combat testCombat = new Combat(ai);
+        for (Card attacker : declaredAttackers) {
+            GameEntity def = combat.getDefenderByAttacker(attacker);
+            if (def != null) {
+                testCombat.addAttacker(attacker, def);
+            }
+        }
+
+        // Predict opponent's blocks using their AI logic
+        AiBlockController blockCtrl = new AiBlockController(defendingOpponent, true);
+        blockCtrl.assignBlockersGivenAttackers(testCombat, new ArrayList<>(declaredAttackers));
+
+        // Evaluate each attacker's predicted fate
+        List<Card> toRemove = new ArrayList<>();
+        for (Card attacker : declaredAttackers) {
+            CardCollection predictedBlockers = testCombat.getBlockers(attacker);
+            if (predictedBlockers.isEmpty()) {
+                continue; // unblocked — keep
+            }
+
+            // Skip cases where simplified prediction is unreliable
+            if (attacker.hasKeyword(Keyword.FIRST_STRIKE) || attacker.hasKeyword(Keyword.DOUBLE_STRIKE)
+                    || attacker.hasKeyword(Keyword.INDESTRUCTIBLE)) {
+                continue;
+            }
+            if (ComputerUtilCard.hasActiveUndyingOrPersist(attacker)) {
+                continue;
+            }
+
+            // Check if attacker survives the block
+            int totalBlockerPower = 0;
+            for (Card b : predictedBlockers) {
+                totalBlockerPower += b.getNetCombatDamage();
+            }
+            if (totalBlockerPower < ComputerUtilCombat.getDamageToKill(attacker, false)) {
+                continue; // attacker survives
+            }
+
+            // Attacker would die — check if the trade is still worth it
+
+            // Trample still pushes excess damage through
+            if (attacker.hasKeyword(Keyword.TRAMPLE)) {
+                int blockerToughness = 0;
+                for (Card b : predictedBlockers) {
+                    blockerToughness += b.getNetToughness();
+                }
+                if (attacker.getNetCombatDamage() > blockerToughness) {
+                    continue;
+                }
+            }
+
+            // Attack/combat triggers or lifelink make the attack worthwhile
+            if ("TRUE".equals(attacker.getSVar("HasAttackEffect"))
+                    || "TRUE".equals(attacker.getSVar("HasCombatEffect"))
+                    || attacker.hasKeyword(Keyword.LIFELINK)
+                    || attacker.hasKeyword(Keyword.ANNIHILATOR)) {
+                continue;
+            }
+
+            // Check if attacker kills a blocker of comparable value
+            int attackerValue = ComputerUtilCard.evaluateCreature(attacker);
+            boolean killsValuableBlocker = false;
+            for (Card b : predictedBlockers) {
+                boolean canKill = attacker.hasKeyword(Keyword.DEATHTOUCH)
+                        || attacker.getNetCombatDamage() >= ComputerUtilCombat.getDamageToKill(b, false);
+                if (canKill && ComputerUtilCard.evaluateCreature(b) >= attackerValue) {
+                    killsValuableBlocker = true;
+                    break;
+                }
+            }
+            if (killsValuableBlocker) {
+                continue;
+            }
+
+            // Bad trade — remove this attacker
+            toRemove.add(attacker);
+        }
+
+        for (Card c : toRemove) {
+            combat.removeFromCombat(c);
+        }
     }
 
     private class SpellAbilityFactors {
