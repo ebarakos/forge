@@ -1,54 +1,47 @@
-# Enhanced AI Profile - Deeper simulation and smarter decision-making
-# Uses configurable deeper lookahead and improved evaluation
-# This profile is designed for stronger play with better combo handling
+# Simulation AI Profile - Deep search with pruning for accurate deck evaluation
+# Designed for AI-vs-AI simulation mode where decision quality matters most.
+# Uses alpha-beta pruning and futility pruning to enable depth-8 search
+# within reasonable time budgets.
 
 # ==========================================
-# Enhanced Simulation Settings (New Properties)
+# Simulation Search Settings
 # ==========================================
-# Maximum recursion depth for simulation (default is 3)
-SIMULATION_MAX_DEPTH=6
-# Maximum time in milliseconds per decision (default 5000)
-SIMULATION_TIME_LIMIT_MS=5000
+# Deep search with pruning (default is 3)
+SIMULATION_MAX_DEPTH=8
+# Generous time budget per decision (15 seconds)
+SIMULATION_TIME_LIMIT_MS=15000
 # Enable detection of infinite loops during simulation
 LOOP_DETECTION_ENABLED=true
 # Enable transposition table for caching evaluated positions
 USE_TRANSPOSITION_TABLE=true
 # Enable iterative deepening search
 USE_ITERATIVE_DEEPENING=true
+# Enable alpha-beta style pruning (soft beta cutoff + futility pruning)
+ALPHA_BETA_PRUNING=true
+# Skip recursion if base score is 300+ below current best
+FUTILITY_MARGIN=300
 # Bonus score for detecting combo-ready states
 COMBO_STATE_BONUS=100
-# Enable alpha-beta style pruning for deeper search
-ALPHA_BETA_PRUNING=true
-# Futility margin for pruning
-FUTILITY_MARGIN=300
 
 # ==========================================
 # Strategic Behavior Settings
 # ==========================================
-# The amount of cards at which to stop considering mulligan
 MULLIGAN_THRESHOLD=4
-
-# Strategic planning for Main Phase 2
 PREDICT_SPELLS_FOR_MAIN2=true
-# High chance to reserve mana for Main Phase 2 plays
 RESERVE_MANA_FOR_MAIN2_CHANCE=80
-# Always hold land drops until Main 2 if unused
 HOLD_LAND_DROP_FOR_MAIN2_IF_UNUSED=100
 HOLD_LAND_DROP_ONLY_IF_HAVE_OTHER_PERMS=true
 
 # ==========================================
 # Combat Evaluation - Careful and Calculated
 # ==========================================
-# Not overly aggressive - evaluate trades carefully
 PLAY_AGGRO=false
-# Moderate chance to attack into trades when favorable
 CHANCE_TO_ATTACK_INTO_TRADE=30
 RANDOMLY_ATKTRADE_ONLY_ON_LOWER_LIFE_PRESSURE=true
 ATTACK_INTO_TRADE_WHEN_TAPPED_OUT=false
 CHANCE_TO_ATKTRADE_WHEN_OPP_HAS_MANA=20
 TRY_TO_AVOID_ATTACKING_INTO_CERTAIN_BLOCK=true
 
-# Smart blocking trades
 ENABLE_RANDOM_FAVORABLE_TRADES_ON_BLOCK=true
 RANDOMLY_TRADE_EVEN_WHEN_HAVE_LESS_CREATS=false
 MAX_DIFF_IN_CREATURE_COUNT_TO_TRADE=1
@@ -56,12 +49,11 @@ ALSO_TRADE_WHEN_HAVE_A_REPLACEMENT_CREAT=true
 MIN_CHANCE_TO_RANDOMLY_TRADE_ON_BLOCK=40
 MAX_CHANCE_TO_RANDOMLY_TRADE_ON_BLOCK=80
 
-# Combat tricks - hold for maximum effect
 TRY_TO_HOLD_COMBAT_TRICKS_UNTIL_BLOCK=true
 CHANCE_TO_HOLD_COMBAT_TRICKS_UNTIL_BLOCK=70
 
 # ==========================================
-# Spell Countering - Thoughtful Decisions
+# Spell Countering
 # ==========================================
 MIN_SPELL_CMC_TO_COUNTER=1
 CHANCE_TO_COUNTER_CMC_1=50
@@ -75,9 +67,8 @@ ALWAYS_COUNTER_PUMP_SPELLS=true
 ALWAYS_COUNTER_AURAS=true
 
 # ==========================================
-# Danger Assessment - Slightly Conservative
+# Danger Assessment
 # ==========================================
-# If AI would drop to this amount of life, defend more actively
 AI_IN_DANGER_THRESHOLD=6
 AI_IN_DANGER_MAX_THRESHOLD=6
 
@@ -107,7 +98,7 @@ THRESHOLD_NONTOKEN_CHUMP_TO_SAVE_PLANESWALKER=120
 CHUMP_TO_SAVE_PLANESWALKER_ONLY_ON_LETHAL=true
 
 # ==========================================
-# Scry Logic - Optimize Card Selection
+# Scry Logic
 # ==========================================
 SCRY_NUM_LANDS_TO_STILL_NEED_MORE=4
 SCRY_NUM_LANDS_TO_NOT_NEED_MORE=7
@@ -119,7 +110,7 @@ SCRY_IMMEDIATELY_UNCASTABLE_TO_BOTTOM=true
 SCRY_IMMEDIATELY_UNCASTABLE_CMC_DIFF=2
 
 # ==========================================
-# Flash Creatures - Use Strategically
+# Flash Creatures
 # ==========================================
 FLASH_ENABLE_ADVANCED_LOGIC=true
 FLASH_CHANCE_TO_OBEY_AMBUSHAI=100
@@ -150,7 +141,7 @@ SIDEBOARDING_SHARED_TYPE_ONLY=false
 SIDEBOARDING_PLANESWALKER_EQ_CREATURE=false
 
 # ==========================================
-# Planechase (if applicable)
+# Planechase
 # ==========================================
 DEFAULT_MAX_PLANAR_DIE_ROLLS_PER_TURN=1
 DEFAULT_MIN_TURN_TO_ROLL_PLANAR_DIE=3

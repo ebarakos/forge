@@ -30,10 +30,16 @@ public class SimulationController {
     private final int maxDepth;
     private final boolean loopDetectionEnabled;
     private final boolean useTranspositionTable;
+    private final boolean alphaBetaEnabled;
+    private final int futilityMargin;
     private final GameStateHasher stateHasher;
     private final TranspositionTable transpositionTable;
     private final long startTimeMs;
     private final long timeLimitMs;
+
+    // Alpha tracking: best score found at each depth level
+    // alphaStack[i] = best score found so far at depth i
+    private final List<Integer> alphaStack;
 
     private static class CachedEffect {
         final GameObject hostCard;
@@ -79,16 +85,24 @@ public class SimulationController {
             this.timeLimitMs = AiProfileUtil.getIntProperty(player, AiProps.SIMULATION_TIME_LIMIT_MS);
             this.loopDetectionEnabled = AiProfileUtil.getBoolProperty(player, AiProps.LOOP_DETECTION_ENABLED);
             this.useTranspositionTable = AiProfileUtil.getBoolProperty(player, AiProps.USE_TRANSPOSITION_TABLE);
+            this.alphaBetaEnabled = AiProfileUtil.getBoolProperty(player, AiProps.ALPHA_BETA_PRUNING);
+            this.futilityMargin = AiProfileUtil.getIntProperty(player, AiProps.FUTILITY_MARGIN);
         } else {
             this.maxDepth = DEFAULT_MAX_DEPTH;
             this.timeLimitMs = 5000;
             this.loopDetectionEnabled = false;
             this.useTranspositionTable = false;
+            this.alphaBetaEnabled = false;
+            this.futilityMargin = 300;
         }
 
         // Initialize enhanced components if enabled
         this.stateHasher = loopDetectionEnabled ? new GameStateHasher() : null;
         this.transpositionTable = useTranspositionTable ? new TranspositionTable() : null;
+
+        // Initialize alpha stack with the initial game score
+        this.alphaStack = new ArrayList<>();
+        this.alphaStack.add(score.value);
     }
     
     private int getRecursionDepth() {
@@ -179,6 +193,78 @@ public class SimulationController {
      */
     public Player getAiPlayer() {
         return aiPlayer;
+    }
+
+    /**
+     * Returns whether alpha-beta pruning is enabled.
+     */
+    public boolean isAlphaBetaEnabled() {
+        return alphaBetaEnabled;
+    }
+
+    /**
+     * Gets the best score found so far at the current depth level.
+     */
+    public int getAlpha() {
+        return alphaStack.get(alphaStack.size() - 1);
+    }
+
+    /**
+     * Gets the parent level's best score (used as soft beta bound for child).
+     * Returns MAX_VALUE if at root level (no parent).
+     */
+    public int getParentAlpha() {
+        if (alphaStack.size() < 2) return Integer.MAX_VALUE;
+        return alphaStack.get(alphaStack.size() - 2);
+    }
+
+    /**
+     * Updates the best score at the current depth level.
+     */
+    public void updateAlpha(int scoreValue) {
+        int idx = alphaStack.size() - 1;
+        if (scoreValue > alphaStack.get(idx)) {
+            alphaStack.set(idx, scoreValue);
+        }
+    }
+
+    /**
+     * Checks if recursion should be skipped for a move with the given base score
+     * (futility pruning). If the base score is far below the current best at this
+     * depth level, deeper search is unlikely to make this move competitive.
+     *
+     * @param baseScoreValue the evaluation score after simulating the move (before recursion)
+     * @return true if recursion should be skipped for this move
+     */
+    public boolean shouldSkipRecursion(int baseScoreValue) {
+        if (!alphaBetaEnabled) {
+            return false;
+        }
+        int alpha = getAlpha();
+        // Only apply futility pruning if we have a meaningful alpha (not the initial value)
+        // and the base score is far below it
+        return baseScoreValue + futilityMargin < alpha;
+    }
+
+    /**
+     * Checks if we should stop evaluating more candidates at the current depth
+     * (soft beta cutoff). At depth >= 2, once we find a score that beats the
+     * parent's best, we've proven this branch is competitive and can stop.
+     *
+     * Only applied at depth >= 2 to avoid inaccuracy at the critical depth-1
+     * level that directly feeds root decisions.
+     *
+     * @return true if remaining candidates should be pruned
+     */
+    public boolean shouldBetaCutoff() {
+        if (!alphaBetaEnabled) {
+            return false;
+        }
+        // Only apply at depth >= 2 to preserve accuracy near the root
+        if (getRecursionDepth() < 2) {
+            return false;
+        }
+        return getAlpha() >= getParentAlpha();
     }
 
     public Plan.Decision getLastDecision() {
@@ -294,11 +380,14 @@ public class SimulationController {
         GameSimulator.debugPrint("  With: " + sa);
         scoreStack.add(score);
         simulatorStack.add(simulator);
+        // Push new alpha for child level, initialized to the base score (doing nothing more)
+        alphaStack.add(score.value);
     }
 
     public void pop(Score score, SpellAbility nextSa) {
         scoreStack.remove(scoreStack.size() - 1);
         simulatorStack.remove(simulatorStack.size() - 1);
+        alphaStack.remove(alphaStack.size() - 1);
         GameSimulator.debugPrint("DEPTH"+getRecursionDepth()+" best score " + score + " " + nextSa);
     }
 

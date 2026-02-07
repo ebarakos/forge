@@ -190,10 +190,17 @@ public class SpellAbilityPicker {
                 bestSaValue = value;
                 bestSa = candidateSAs.get(idx);
                 bestSaIndex = idx;
+                controller.updateAlpha(value.value);
 
                 // Record this as a killer move since it improved our score
                 if (bestSa != null) {
                     moveOrderer.get().recordKillerMove(bestSa, controller.getDepth());
+                }
+
+                // Soft beta cutoff: at depth >= 2, once we've proven this branch
+                // beats the parent's best, stop searching for an even better follow-up
+                if (controller.shouldBetaCutoff()) {
+                    break;
                 }
             }
         }

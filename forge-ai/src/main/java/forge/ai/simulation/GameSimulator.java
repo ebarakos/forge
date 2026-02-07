@@ -247,7 +247,8 @@ public class GameSimulator {
             printDiff(origLines, simLines);
         }
         controller.possiblyCacheResult(score, origSa);
-        if (controller.shouldRecurse() && !simGame.isGameOver()) {
+        if (controller.shouldRecurse() && !simGame.isGameOver()
+                && !controller.shouldSkipRecursion(score.value)) {
             controller.push(sa, score, this);
             SpellAbilityPicker sim = new SpellAbilityPicker(simGame, aiPlayer);
             SpellAbility nextSa = sim.chooseSpellAbilityToPlay(controller);

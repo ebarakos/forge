@@ -160,7 +160,11 @@ public enum AiProps { /** */
     // Enable iterative deepening search
     USE_ITERATIVE_DEEPENING ("false"),
     // Bonus score for detecting combo-ready states
-    COMBO_STATE_BONUS ("0");
+    COMBO_STATE_BONUS ("0"),
+    // Enable alpha-beta style pruning (soft beta cutoff at depth >= 2 + futility pruning)
+    ALPHA_BETA_PRUNING ("false"),
+    // Futility margin: skip recursion if base score is this far below current best
+    FUTILITY_MARGIN ("300");
     // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting
     // <-- There are no experimental options here -->
 
