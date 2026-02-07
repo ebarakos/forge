@@ -149,3 +149,8 @@ This file tracks major changes, architectural decisions, and milestones for the 
   5. **Better error messages**: Deck-not-found shows all paths tried + fuzzy suggestions via Levenshtein edit distance and substring matching.
   6. **Consolidated profile flags**: New `-P N:PROFILE` syntax (e.g., `-P 1:Simulation -P 2:Default`), `--list-profiles` to enumerate available profiles. Legacy `-P1`..`-P8` kept but hidden from help.
 - **Why**: CLI needed polish for the deck evaluation workflow: confidence intervals quantify result reliability, CSV enables scripted analysis, progress bars improve UX for long runs, error messages help users fix typos quickly, and the profile syntax is cleaner for multi-player setups. **All 4 phases of the implementation plan are now complete.**
+
+## [2026-02-07] Suppress Noisy Init Messages in CLI Quiet/Structured Mode
+- **Type**: Bugfix
+- **Description**: Suppressed "was not assigned to any set" card DB loading messages during `FModel.initialize()` in `SimulateMatch.simulate()`. When running with `-q`, `-j`, `--json`, or `--csv`, both stdout and stderr are now redirected to `NULL_PRINT_STREAM` during initialization, then restored in a `finally` block. Without those flags, init output still goes to stderr as before.
+- **Why**: Card DB loading emits hundreds of warnings about cards not assigned to sets, which cluttered CLI output and polluted structured output formats (JSON/CSV). These messages are informational and not actionable by CLI users.

@@ -131,13 +131,22 @@ public class SimulateMatch {
     }
 
     public static int simulate(SimCommand cmd) {
-        // Redirect initialization output to stderr
-        System.setOut(ORIGINAL_ERR);
+        // Suppress noisy initialization messages (e.g. "was not assigned to any set")
+        // in quiet mode or when producing structured output
+        boolean suppressInit = cmd.isQuiet() || cmd.getNumJobs() != null
+                || cmd.isJsonOutput() || cmd.isCsvOutput();
+
+        // Redirect initialization output to stderr (or null if suppressed)
+        System.setOut(suppressInit ? NULL_PRINT_STREAM : ORIGINAL_ERR);
+        if (suppressInit) {
+            System.setErr(NULL_PRINT_STREAM);
+        }
 
         try {
             FModel.initialize(null, null);
         } finally {
             System.setOut(ORIGINAL_OUT);
+            System.setErr(ORIGINAL_ERR);
         }
 
         ORIGINAL_ERR.println("Simulation mode");
