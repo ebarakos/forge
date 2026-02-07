@@ -16,6 +16,7 @@ import forge.game.player.Player;
 import forge.game.spellability.AbilityManaPart;
 import forge.game.spellability.SpellAbility;
 import forge.game.staticability.StaticAbility;
+import forge.game.staticability.StaticAbilityCantAttackBlock;
 import forge.game.zone.ZoneType;
 
 import java.util.Arrays;
@@ -418,24 +419,36 @@ public class GameStateEvaluator {
         int score = 0;
         // TODO: more than 2 players
         // TODO: try and reuse evaluateBoardPosition
-        int myCards = 0;
+        Player weakestOpponent = aiPlayer.getWeakestOpponent();
+
+        // --- Card quality weighting ---
+        // Weight hand cards by castability rather than flat count
+        int myHandValue = 0;
         int theirCards = 0;
+        int myAvailableMana = countUntappedManaProducers(aiPlayer);
         for (Card c : game.getCardsIn(ZoneType.Hand)) {
             if (c.getController() == aiPlayer) {
-                myCards++;
+                if (c.isLand()) {
+                    myHandValue += 3; // lands in hand have diminishing value
+                } else if (c.getCMC() <= myAvailableMana) {
+                    myHandValue += 6; // castable spell — real option
+                } else {
+                    myHandValue += 3; // too expensive right now
+                }
             } else {
                 theirCards++;
             }
         }
-        debugPrint("My cards in hand: " + myCards);
+        int myCards = aiPlayer.getCardsIn(ZoneType.Hand).size();
+        debugPrint("My cards in hand: " + myCards + " (value: " + myHandValue + ")");
         debugPrint("Their cards in hand: " + theirCards);
         if (!aiPlayer.isUnlimitedHandSize() && myCards > aiPlayer.getMaxHandSize()) {
-            // Count excess cards for less.
-            score += myCards - aiPlayer.getMaxHandSize();
-            myCards = aiPlayer.getMaxHandSize();
+            // Excess cards will be discarded — count them for less
+            int excess = myCards - aiPlayer.getMaxHandSize();
+            myHandValue -= excess * 2;
         }
-        // TODO weight cards in hand more if opponent has discard or if we have looting or can bluff a trick
-        score += 5 * myCards - 4 * theirCards;
+        score += myHandValue - 4 * theirCards;
+
         debugPrint("  My life: " + aiPlayer.getLife());
         score += 2 * aiPlayer.getLife();
         int opponentIndex = 1;
@@ -456,17 +469,25 @@ public class GameStateEvaluator {
 
         // evaluate mana base quality
         score += evalManaBase(game, aiPlayer, AiDeckStatistics.fromPlayer(aiPlayer));
-        // TODO deal with opponents. Do we want to use perfect information to evaluate their manabase?
-        //int opponentManaScore = 0;
-        //for (Player opponent : aiPlayer.getOpponents()) {
-        //    opponentManaScore += evalManaBase(game, opponent);
-        //}
-        //score -= opponentManaScore / (game.getPlayers().size() - 1);
 
-        // TODO evaluate holding mana open for counterspells
+        // --- Tempo score ---
+        // Having more untapped mana means more options and trick potential
+        if (weakestOpponent != null) {
+            int theirUntappedMana = countUntappedManaProducers(weakestOpponent);
+            int tempoBonus = (myAvailableMana - theirUntappedMana) * 3;
+            if (tempoBonus != 0) {
+                debugPrint("  Tempo: my mana=" + myAvailableMana + " their mana=" + theirUntappedMana + " bonus=" + tempoBonus);
+                score += tempoBonus;
+            }
+        }
 
         int summonSickScore = score;
         PhaseType gamePhase = game.getPhaseHandler().getPhase();
+
+        // Track evasive damage for clock calculation during battlefield iteration
+        int myEvasiveDamage = 0;
+        int theirEvasiveDamage = 0;
+
         for (Card c : game.getCardsIn(ZoneType.Battlefield)) {
             int value = evalCard(game, aiPlayer, c);
             int summonSickValue = value;
@@ -488,6 +509,35 @@ public class GameStateEvaluator {
             String nonAbilityText = c.getNonAbilityText();
             if (!nonAbilityText.isEmpty()) {
                 debugPrint("    "+nonAbilityText.replaceAll("CARDNAME", c.getName()));
+            }
+
+            // Track evasive damage for clock (only non-sick, untapped creatures)
+            if (c.isCreature() && !c.isTapped() && !c.isSick() && !c.hasKeyword(Keyword.DEFENDER)) {
+                int power = c.getNetCombatDamage();
+                if (power > 0 && (c.hasKeyword(Keyword.FLYING) || c.hasKeyword(Keyword.HORSEMANSHIP)
+                        || StaticAbilityCantAttackBlock.cantBlockBy(c, null))) {
+                    if (c.getController() == aiPlayer) {
+                        myEvasiveDamage += power;
+                    } else {
+                        theirEvasiveDamage += power;
+                    }
+                }
+            }
+        }
+
+        // --- Clock calculation ---
+        // Being ahead on the evasive damage clock is strategically valuable
+        if (weakestOpponent != null && (myEvasiveDamage > 0 || theirEvasiveDamage > 0)) {
+            int myTurnsToKill = myEvasiveDamage > 0
+                    ? (weakestOpponent.getLife() + myEvasiveDamage - 1) / myEvasiveDamage : 99;
+            int theirTurnsToKill = theirEvasiveDamage > 0
+                    ? (aiPlayer.getLife() + theirEvasiveDamage - 1) / theirEvasiveDamage : 99;
+            // Each turn of clock advantage is worth ~15 points, capped
+            int clockBonus = max(-80, min(80, (theirTurnsToKill - myTurnsToKill) * 15));
+            if (clockBonus != 0) {
+                debugPrint("  Clock: my turns=" + myTurnsToKill + " their turns=" + theirTurnsToKill + " bonus=" + clockBonus);
+                score += clockBonus;
+                summonSickScore += clockBonus;
             }
         }
 
