@@ -154,3 +154,18 @@ This file tracks major changes, architectural decisions, and milestones for the 
 - **Type**: Bugfix
 - **Description**: Suppressed "was not assigned to any set" card DB loading messages during `FModel.initialize()` in `SimulateMatch.simulate()`. When running with `-q`, `-j`, `--json`, or `--csv`, both stdout and stderr are now redirected to `NULL_PRINT_STREAM` during initialization, then restored in a `finally` block. Without those flags, init output still goes to stderr as before.
 - **Why**: Card DB loading emits hundreds of warnings about cards not assigned to sets, which cluttered CLI output and polluted structured output formats (JSON/CSV). These messages are informational and not actionable by CLI users.
+
+## [2026-02-07] External NN Player Integration (All 9 Tasks Complete)
+- **Type**: Feature
+- **Description**: Added pluggable neural network player interface for external NN training. 11 new files in `forge-ai/src/main/java/forge/ai/nn/`:
+  - **Core types**: `DecisionType.java` (8 decision types), `NNConstants.java` (STATE_SIZE=664, CARD_FEATURES=16, MAX_OPTIONS=64), `NNBridge.java` (interface), `RandomBridge.java` (random baseline)
+  - **Encoders**: `GameStateEncoder.java` (float[664] game state tensor), `OptionEncoder.java` (card/bool/number feature encoding)
+  - **Data export**: `TrainingDataWriter.java` (JSONL per-game files with lazy creation, auto-flush)
+  - **ONNX inference**: `OnnxBridge.java` (onnxruntime, input[1,1760] → policy[1,64] + value[1,1])
+  - **Controllers**: `NNHybridController.java` (6 critical decisions via NN), `NNFullController.java` (~60+ decisions via NN)
+  - **Wiring**: `LobbyPlayerNN.java` (lobby player subclass)
+  - Modified: `LobbyPlayerAi.java` (private→protected `createControllerFor`), `GamePlayerUtil.java` (+`createNNPlayer`), `SimCommand.java` (+5 CLI flags), `SimulateMatch.java` (bridge creation + `finishNNControllers` lifecycle hook)
+  - Added: `forge-ai/src/main/resources/nn/SPEC.md` (ONNX contract), `validate_training_data.py` (JSONL validator)
+  - CLI: `--nn-hybrid`, `--nn-full`, `--nn-model FILE`, `--nn-random`, `--nn-export DIR`
+  - Key fixes during implementation: lazy file creation prevents empty files from snapshot restore, null-check `getPhase()` during early game setup, `finishGame()` hook records outcomes from SimulateMatch after each game
+- **Why**: Enables external NN training loop: generate training data via random play (`--nn-random --nn-export`), train ONNX model externally, then evaluate via `--nn-model`. Hybrid mode lets NN control 6 critical decisions while heuristic AI handles the rest; full mode gives NN total control for end-to-end learning.

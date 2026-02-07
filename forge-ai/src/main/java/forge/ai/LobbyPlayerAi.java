@@ -40,7 +40,7 @@ public class LobbyPlayerAi extends LobbyPlayer implements IGameEntitiesFactory {
         this.rotateProfileEachGame = rotateProfileEachGame;
     }
 
-    private PlayerControllerAi createControllerFor(Player ai) {
+    protected PlayerControllerAi createControllerFor(Player ai) {
         PlayerControllerAi result = new PlayerControllerAi(ai.getGame(), ai, this);
         result.setUseSimulation(useSimulation);
         result.allowCheatShuffle(allowCheatShuffle);

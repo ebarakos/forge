@@ -135,6 +135,40 @@ public class SimCommand implements Callable<Integer> {
     )
     private boolean csvOutput;
 
+    // === Neural Network Options ===
+
+    @Option(
+        names = {"--nn-hybrid"},
+        description = "Use NN hybrid mode: NN controls mulligan, attack, block, targeting; heuristic handles rest."
+    )
+    private boolean nnHybrid;
+
+    @Option(
+        names = {"--nn-full"},
+        description = "Use NN full mode: NN controls all decisions."
+    )
+    private boolean nnFull;
+
+    @Option(
+        names = {"--nn-model"},
+        description = "Path to ONNX model file for NN inference.",
+        paramLabel = "FILE"
+    )
+    private File nnModel;
+
+    @Option(
+        names = {"--nn-random"},
+        description = "Use random bridge instead of ONNX model (for testing/data generation)."
+    )
+    private boolean nnRandom;
+
+    @Option(
+        names = {"--nn-export"},
+        description = "Directory to export training data (JSONL) to.",
+        paramLabel = "DIR"
+    )
+    private File nnExportDir;
+
     // === AI Profile Options ===
 
     @Option(
@@ -240,6 +274,30 @@ public class SimCommand implements Callable<Integer> {
 
     public boolean isListProfiles() {
         return listProfiles;
+    }
+
+    public boolean isNnHybrid() {
+        return nnHybrid;
+    }
+
+    public boolean isNnFull() {
+        return nnFull;
+    }
+
+    public File getNnModel() {
+        return nnModel;
+    }
+
+    public boolean isNnRandom() {
+        return nnRandom;
+    }
+
+    public File getNnExportDir() {
+        return nnExportDir;
+    }
+
+    public boolean isNnMode() {
+        return nnHybrid || nnFull;
     }
 
     /**

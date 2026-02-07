@@ -4,6 +4,8 @@ import forge.LobbyPlayer;
 import forge.ai.AIOption;
 import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
+import forge.ai.nn.LobbyPlayerNN;
+import forge.ai.nn.NNBridge;
 import forge.gui.GuiBase;
 import forge.gui.util.SOptionPane;
 import forge.localinstance.properties.ForgeNetPreferences;
@@ -93,6 +95,21 @@ public final class GamePlayerUtil {
         player.setAiProfile(profile);
         player.setAvatarIndex(avatarIndex);
         player.setSleeveIndex(sleeveIndex);
+        return player;
+    }
+
+    /**
+     * Create an NN-backed AI player.
+     *
+     * @param name       player display name
+     * @param bridge     NNBridge implementation (RandomBridge or OnnxBridge)
+     * @param exportDir  directory for training data export, or null to disable
+     * @param fullMode   true for full NN control, false for hybrid
+     */
+    public static LobbyPlayer createNNPlayer(String name, NNBridge bridge,
+                                              String exportDir, boolean fullMode) {
+        LobbyPlayerNN player = new LobbyPlayerNN(name, bridge, exportDir, fullMode);
+        player.setAiProfile("Default");
         return player;
     }
 

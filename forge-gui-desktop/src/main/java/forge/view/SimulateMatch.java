@@ -17,6 +17,11 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import forge.LobbyPlayer;
+import forge.ai.nn.NNBridge;
+import forge.ai.nn.NNFullController;
+import forge.ai.nn.NNHybridController;
+import forge.ai.nn.OnnxBridge;
+import forge.ai.nn.RandomBridge;
 import forge.cli.ExitCode;
 import forge.cli.ProgressBar;
 import forge.cli.SimCommand;
@@ -60,6 +65,25 @@ public class SimulateMatch {
     private static final PrintStream ORIGINAL_ERR = System.err;
 
     /**
+     * Record game outcome and close training data writers for NN controllers.
+     */
+    private static void finishNNControllers(Game game) {
+        if (game == null || game.getOutcome() == null) return;
+        for (forge.game.player.Player p : game.getRegisteredPlayers()) {
+            forge.game.player.PlayerController ctrl = p.getController();
+            if (ctrl instanceof NNFullController) {
+                boolean won = !game.getOutcome().isDraw() && game.getOutcome().isWinner(p.getLobbyPlayer());
+                ((NNFullController) ctrl).finishGame(won, game.getPhaseHandler().getTurn(),
+                        game.getOutcome().getWinCondition().toString());
+            } else if (ctrl instanceof NNHybridController) {
+                boolean won = !game.getOutcome().isDraw() && game.getOutcome().isWinner(p.getLobbyPlayer());
+                ((NNHybridController) ctrl).finishGame(won, game.getPhaseHandler().getTurn(),
+                        game.getOutcome().getWinCondition().toString());
+            }
+        }
+    }
+
+    /**
      * Configuration for a player in parallel simulation.
      * Stores the original deck and player info so fresh RegisteredPlayer objects
      * can be created for each parallel game (avoiding thread-safety issues).
@@ -69,6 +93,10 @@ public class SimulateMatch {
         final String name;
         final String aiProfile;
         final GameType gameType;
+        // NN mode fields (null for regular AI players)
+        NNBridge nnBridge;
+        String nnExportDir;
+        boolean nnFullMode;
 
         PlayerConfig(Deck deck, String name, String aiProfile, GameType gameType) {
             this.deck = deck;
@@ -84,7 +112,11 @@ public class SimulateMatch {
             } else {
                 rp = new RegisteredPlayer((Deck) deck.copyTo(deck.getName()));
             }
-            rp.setPlayer(GamePlayerUtil.createAiPlayer(name, aiProfile));
+            if (nnBridge != null) {
+                rp.setPlayer(GamePlayerUtil.createNNPlayer(name, nnBridge, nnExportDir, nnFullMode));
+            } else {
+                rp.setPlayer(GamePlayerUtil.createAiPlayer(name, aiProfile));
+            }
             return rp;
         }
     }
@@ -200,6 +232,52 @@ public class SimulateMatch {
             }
         }
 
+        // NN mode setup
+        NNBridge nnBridge = null;
+        String nnExportDir = null;
+        boolean nnFullMode = false;
+
+        if (cmd.isNnMode()) {
+            // Validate NN flags
+            if (cmd.isNnHybrid() && cmd.isNnFull()) {
+                ORIGINAL_ERR.println("Error: Cannot use both --nn-hybrid and --nn-full");
+                return ExitCode.ARGS_ERROR;
+            }
+            if (!cmd.isNnRandom() && cmd.getNnModel() == null) {
+                ORIGINAL_ERR.println("Error: NN mode requires --nn-random or --nn-model FILE");
+                return ExitCode.ARGS_ERROR;
+            }
+
+            nnFullMode = cmd.isNnFull();
+
+            if (cmd.isNnRandom()) {
+                nnBridge = new RandomBridge();
+                ORIGINAL_ERR.println("NN mode: " + (nnFullMode ? "full" : "hybrid") + " with random bridge");
+            } else {
+                File modelFile = cmd.getNnModel();
+                if (!modelFile.exists()) {
+                    ORIGINAL_ERR.println("Error: ONNX model file not found - " + modelFile.getAbsolutePath());
+                    return ExitCode.ARGS_ERROR;
+                }
+                try {
+                    nnBridge = new OnnxBridge(modelFile.getAbsolutePath());
+                    ORIGINAL_ERR.println("NN mode: " + (nnFullMode ? "full" : "hybrid") + " with ONNX model " + modelFile.getName());
+                } catch (Exception e) {
+                    ORIGINAL_ERR.println("Error: Failed to load ONNX model - " + e.getMessage());
+                    return ExitCode.ARGS_ERROR;
+                }
+            }
+
+            if (cmd.getNnExportDir() != null) {
+                nnExportDir = cmd.getNnExportDir().getAbsolutePath();
+                File exportDir = cmd.getNnExportDir();
+                if (!exportDir.exists()) {
+                    exportDir.mkdirs();
+                }
+                ORIGINAL_ERR.println("NN training data export: " + nnExportDir);
+            }
+        }
+
         // Tournament mode
         if (cmd.getTournamentType() != null) {
             boolean useSnapshot = cmd.isUseSnapshot();
@@ -231,7 +309,13 @@ public class SimulateMatch {
             String profile = aiProfiles.getOrDefault(i - 1, "");
 
             // Store config for parallel execution
-            playerConfigs.add(new PlayerConfig(d, name, profile, type));
+            PlayerConfig config = new PlayerConfig(d, name, profile, type);
+            if (nnBridge != null) {
+                config.nnBridge = nnBridge;
+                config.nnExportDir = nnExportDir;
+                config.nnFullMode = nnFullMode;
+            }
+            playerConfigs.add(config);
 
             // Also create RegisteredPlayer for sequential execution
             RegisteredPlayer rp;
@@ -240,7 +324,11 @@ public class SimulateMatch {
             } else {
                 rp = new RegisteredPlayer(d);
             }
-            rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
+            if (nnBridge != null) {
+                rp.setPlayer(GamePlayerUtil.createNNPlayer(name, nnBridge, nnExportDir, nnFullMode));
+            } else {
+                rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
+            }
             pp.add(rp);
             i++;
         }
@@ -404,6 +492,9 @@ public class SimulateMatch {
         result.isDraw = g1.getOutcome().isDraw();
         result.turns = g1.getPhaseHandler().getTurn();
 
+        // Finalize NN training data writers
+        finishNNControllers(g1);
+
         if (!result.isDraw) {
             result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
             result.winnerIndex = determineWinnerIndex(g1, mc);
@@ -541,6 +632,9 @@ public class SimulateMatch {
         result.timeMs = System.currentTimeMillis() - startTime;
         result.isDraw = g1.getOutcome().isDraw();
         result.turns = g1.getPhaseHandler().getTurn();
+
+        // Finalize NN training data writers
+        finishNNControllers(g1);
 
         if (!result.isDraw) {
             result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
