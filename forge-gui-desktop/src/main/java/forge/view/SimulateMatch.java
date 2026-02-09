@@ -17,6 +17,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import forge.LobbyPlayer;
+import forge.ai.nn.EpsilonGreedyBridge;
 import forge.ai.nn.NNBridge;
 import forge.ai.nn.NNFullController;
 import forge.ai.nn.NNHybridController;
@@ -276,6 +277,12 @@ public class SimulateMatch {
                 }
                 ORIGINAL_ERR.println("NN training data export: " + nnExportDir);
             }
+
+            // Wrap with epsilon-greedy if requested
+            if (cmd.getNnEpsilon() > 0 && nnBridge != null) {
+                nnBridge = new EpsilonGreedyBridge(nnBridge, cmd.getNnEpsilon());
+                ORIGINAL_ERR.println("NN exploration: epsilon=" + cmd.getNnEpsilon());
+            }
         }
 
         // Tournament mode
@@ -311,9 +318,14 @@ public class SimulateMatch {
             // Store config for parallel execution
             PlayerConfig config = new PlayerConfig(d, name, profile, type);
             if (nnBridge != null) {
-                config.nnBridge = nnBridge;
-                config.nnExportDir = nnExportDir;
-                config.nnFullMode = nnFullMode;
+                String nnPlayerSetting = cmd.getNnPlayer();
+                boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
+                    || String.valueOf(i).equals(nnPlayerSetting);
+                if (thisPlayerGetsNN) {
+                    config.nnBridge = nnBridge;
+                    config.nnExportDir = nnExportDir;
+                    config.nnFullMode = nnFullMode;
+                }
             }
             playerConfigs.add(config);
 
@@ -325,7 +337,14 @@ public class SimulateMatch {
                 rp = new RegisteredPlayer(d);
             }
             if (nnBridge != null) {
-                rp.setPlayer(GamePlayerUtil.createNNPlayer(name, nnBridge, nnExportDir, nnFullMode));
+                String nnPlayerSetting = cmd.getNnPlayer();
+                boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
+                    || String.valueOf(i).equals(nnPlayerSetting);
+                if (thisPlayerGetsNN) {
+                    rp.setPlayer(GamePlayerUtil.createNNPlayer(name, nnBridge, nnExportDir, nnFullMode));
+                } else {
+                    rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
+                }
             } else {
                 rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
             }

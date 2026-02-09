@@ -169,6 +169,22 @@ public class SimCommand implements Callable<Integer> {
     )
     private File nnExportDir;
 
+    @Option(
+        names = {"--nn-epsilon"},
+        description = "Epsilon for epsilon-greedy exploration (0.0 = pure model, 1.0 = pure random). Default: ${DEFAULT-VALUE}",
+        defaultValue = "0.0",
+        paramLabel = "FLOAT"
+    )
+    private float nnEpsilon;
+
+    @Option(
+        names = {"--nn-player"},
+        description = "Which player uses NN: 1, 2, or all. Default: ${DEFAULT-VALUE}",
+        defaultValue = "all",
+        paramLabel = "PLAYER"
+    )
+    private String nnPlayer;
+
     // === AI Profile Options ===
 
     @Option(
@@ -298,6 +314,14 @@ public class SimCommand implements Callable<Integer> {
 
     public boolean isNnMode() {
         return nnHybrid || nnFull;
+    }
+
+    public float getNnEpsilon() {
+        return nnEpsilon;
+    }
+
+    public String getNnPlayer() {
+        return nnPlayer;
     }
 
     /**

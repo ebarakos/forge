@@ -2,6 +2,8 @@ package forge.ai.nn;
 
 import com.google.common.collect.ListMultimap;
 import forge.LobbyPlayer;
+import forge.ai.ComputerUtilAbility;
+import forge.ai.ComputerUtilCost;
 import forge.ai.PlayerControllerAi;
 import forge.card.ColorSet;
 import forge.card.ICardFace;
@@ -266,13 +268,51 @@ public class NNFullController extends PlayerControllerAi {
     // Spell selection
     // =======================================================================
 
-    /**
-     * TODO: Full NN spell selection requires enumerating candidate spells.
-     * Currently delegates to the heuristic parent.
-     */
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        return super.chooseSpellAbilityToPlay();
+        // 1. Gather all cards with potential abilities
+        CardCollection cards = ComputerUtilAbility.getAvailableCards(getGame(), getPlayer());
+        List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, getPlayer());
+
+        // 2. Filter to affordable spells
+        List<SpellAbility> playable = new ArrayList<>();
+        for (SpellAbility sa : candidates) {
+            sa.setActivatingPlayer(getPlayer());
+            try {
+                if (ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) {
+                    playable.add(sa);
+                }
+            } catch (Exception e) {
+                // Skip spells that error during payability check
+            }
+        }
+
+        if (playable.isEmpty()) {
+            return null;
+        }
+
+        // 3. Cap options, add PASS as last slot
+        int numSpells = Math.min(playable.size(), NNConstants.MAX_OPTIONS - 1);
+        List<SpellAbility> capped = playable.subList(0, numSpells);
+        int totalOptions = numSpells + 1; // +1 for PASS
+
+        // 4. Encode: spell features + all-zeros PASS
+        float[] state = GameStateEncoder.encode(getPlayer(), getGame());
+        float[][] spellFeatures = OptionEncoder.encodeSpellAbilities(capped);
+        float[][] optFeatures = new float[totalOptions][NNConstants.CARD_FEATURES];
+        System.arraycopy(spellFeatures, 0, optFeatures, 0, numSpells);
+        // Last slot (PASS) stays all-zeros
+
+        // 5. NN chooses
+        int chosen = callBridgeWithLogging(DecisionType.SPELL_SELECTION, state, optFeatures, totalOptions);
+
+        if (chosen >= numSpells) {
+            return null; // PASS
+        }
+
+        List<SpellAbility> result = new ArrayList<>();
+        result.add(capped.get(chosen));
+        return result;
     }
 
     // =======================================================================
