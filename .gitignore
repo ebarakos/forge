@@ -102,5 +102,7 @@ user/
 # Runtime cache (downloaded card images, db)
 cache/
 
-# Claude Code - keep project memory, ignore user-specific settings
-.claude/settings.local.json
+# Claude Code - local agent state (memory, settings, etc.)
+.claude/
+CLAUDE.md
+TODO.md
