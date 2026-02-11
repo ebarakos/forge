@@ -27,7 +27,7 @@ import java.util.Map;
  *
  * <p>Overridden methods:
  * <ol>
- *   <li>{@link #chooseSpellAbilityToPlay()} — spell selection (TODO: currently delegates to heuristic)</li>
+ *   <li>{@link #chooseSpellAbilityToPlay()} — spell selection</li>
  *   <li>{@link #mulliganKeepHand(Player, int)} — mulligan decision</li>
  *   <li>{@link #tuckCardsViaMulligan(Player, int)} — London mulligan card selection</li>
  *   <li>{@link #declareAttackers(Player, Combat)} — attack decisions</li>
