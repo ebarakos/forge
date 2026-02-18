@@ -102,6 +102,9 @@ user/
 # Runtime cache (downloaded card images, db)
 cache/
 
+# Local secrets (API keys)
+.env
+
 # Claude Code - local agent state (memory, settings, etc.)
 .claude/
 CLAUDE.md

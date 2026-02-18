@@ -5,6 +5,14 @@ set -euo pipefail
 # Usage: ./run.sh [--clean] [--build-only] [--run-only] [--gui] [app args...]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source .env if present (for API keys etc.)
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
+
 MARKER_FILE="$SCRIPT_DIR/.last_build_timestamp"
 JAR_PATTERN="$SCRIPT_DIR/forge-gui-desktop/target/forge-gui-desktop-*-jar-with-dependencies.jar"
 MVN="$SCRIPT_DIR/mvnw"

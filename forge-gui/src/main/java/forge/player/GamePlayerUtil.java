@@ -4,6 +4,8 @@ import forge.LobbyPlayer;
 import forge.ai.AIOption;
 import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
+import forge.ai.llm.LLMClient;
+import forge.ai.llm.LobbyPlayerLLM;
 import forge.ai.nn.LobbyPlayerNN;
 import forge.ai.nn.NNBridge;
 import forge.gui.GuiBase;
@@ -109,6 +111,18 @@ public final class GamePlayerUtil {
     public static LobbyPlayer createNNPlayer(String name, NNBridge bridge,
                                               String exportDir, boolean fullMode) {
         LobbyPlayerNN player = new LobbyPlayerNN(name, bridge, exportDir, fullMode);
+        player.setAiProfile("Default");
+        return player;
+    }
+
+    /**
+     * Create an LLM-backed AI player.
+     *
+     * @param name   player display name
+     * @param client LLMClient instance for API calls
+     */
+    public static LobbyPlayer createLLMPlayer(String name, LLMClient client) {
+        LobbyPlayerLLM player = new LobbyPlayerLLM(name, client);
         player.setAiProfile("Default");
         return player;
     }

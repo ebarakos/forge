@@ -185,11 +185,50 @@ public class SimCommand implements Callable<Integer> {
     )
     private String nnPlayer;
 
+    // === LLM Options ===
+
+    @Option(
+        names = {"--llm-key"},
+        description = "API key for LLM provider. Also reads FORGE_LLM_API_KEY or OPENROUTER_API_KEY env vars.",
+        paramLabel = "KEY"
+    )
+    private String llmKey;
+
+    @Option(
+        names = {"--llm-temperature"},
+        description = "LLM temperature (0.0-2.0). Default: ${DEFAULT-VALUE}",
+        defaultValue = "0.2",
+        paramLabel = "FLOAT"
+    )
+    private double llmTemperature;
+
+    @Option(
+        names = {"--llm-budget"},
+        description = "Max total LLM spend in dollars per run (0 = unlimited). Default: ${DEFAULT-VALUE}",
+        defaultValue = "0.0",
+        paramLabel = "DOLLARS"
+    )
+    private double llmBudget;
+
+    @Option(
+        names = {"--llm-timeout"},
+        description = "HTTP timeout per LLM call in milliseconds. Default: ${DEFAULT-VALUE}",
+        defaultValue = "30000",
+        paramLabel = "MS"
+    )
+    private int llmTimeout;
+
+    @Option(
+        names = {"--llm-debug"},
+        description = "Print all LLM prompts and responses to stderr."
+    )
+    private boolean llmDebug;
+
     // === AI Profile Options ===
 
     @Option(
         names = {"-P", "--profile"},
-        description = "AI profile assignment as N:PROFILE (e.g. 1:Simulation 2:Default). Can be repeated.",
+        description = "AI profile assignment as N:PROFILE (e.g. 1:Simulation 2:Default). LLM profiles: ollama:MODEL or openrouter:MODEL. Can be repeated.",
         paramLabel = "N:PROFILE"
     )
     private List<String> profileAssignments = new ArrayList<>();
@@ -323,6 +362,20 @@ public class SimCommand implements Callable<Integer> {
     public String getNnPlayer() {
         return nnPlayer;
     }
+
+    // === LLM Getters ===
+
+    public String getLlmKey() {
+        if (llmKey != null && !llmKey.isEmpty()) return llmKey;
+        String key = System.getenv("FORGE_LLM_API_KEY");
+        if (key != null && !key.isEmpty()) return key;
+        return System.getenv("OPENROUTER_API_KEY");
+    }
+
+    public double getLlmTemperature() { return llmTemperature; }
+    public double getLlmBudget() { return llmBudget; }
+    public int getLlmTimeout() { return llmTimeout; }
+    public boolean isLlmDebug() { return llmDebug; }
 
     /**
      * Get the AI profile for a specific player (0-indexed).

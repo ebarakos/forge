@@ -17,6 +17,8 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import forge.LobbyPlayer;
+import forge.ai.llm.LLMClient;
+import forge.ai.llm.LLMConfig;
 import forge.ai.nn.EpsilonGreedyBridge;
 import forge.ai.nn.NNBridge;
 import forge.ai.nn.NNFullController;
@@ -98,6 +100,8 @@ public class SimulateMatch {
         NNBridge nnBridge;
         String nnExportDir;
         boolean nnFullMode;
+        // LLM mode field (null for regular AI players)
+        LLMClient llmClient;
 
         PlayerConfig(Deck deck, String name, String aiProfile, GameType gameType) {
             this.deck = deck;
@@ -113,7 +117,9 @@ public class SimulateMatch {
             } else {
                 rp = new RegisteredPlayer((Deck) deck.copyTo(deck.getName()));
             }
-            if (nnBridge != null) {
+            if (llmClient != null) {
+                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClient));
+            } else if (nnBridge != null) {
                 rp.setPlayer(GamePlayerUtil.createNNPlayer(name, nnBridge, nnExportDir, nnFullMode));
             } else {
                 rp.setPlayer(GamePlayerUtil.createAiPlayer(name, aiProfile));
@@ -160,6 +166,10 @@ public class SimulateMatch {
         ORIGINAL_OUT.println();
         ORIGINAL_OUT.println("Usage: -P 1:Simulation -P 2:Default");
         ORIGINAL_OUT.println("  or:  -P1 Simulation -P2 Default  (legacy syntax)");
+        ORIGINAL_OUT.println();
+        ORIGINAL_OUT.println("LLM profiles (use provider:model syntax):");
+        ORIGINAL_OUT.println("  -P1 ollama:llama3              Local Ollama model");
+        ORIGINAL_OUT.println("  -P2 openrouter:deepseek/deepseek-chat  OpenRouter model");
         return ExitCode.SUCCESS;
     }
 
@@ -293,6 +303,23 @@ public class SimulateMatch {
             return ExitCode.SUCCESS;
         }
 
+        // Build per-player LLM clients (if profile is an LLM profile)
+        Map<Integer, LLMClient> llmClients = new HashMap<>();
+        for (Map.Entry<Integer, String> entry : aiProfiles.entrySet()) {
+            String profile = entry.getValue();
+            if (LLMConfig.isLlmProfile(profile)) {
+                LLMConfig llmConfig = LLMConfig.fromProfileString(profile,
+                        cmd.getLlmKey(), cmd.getLlmTemperature(), cmd.getLlmTimeout(),
+                        cmd.getLlmBudget(), cmd.isLlmDebug());
+                if (llmConfig != null) {
+                    LLMClient client = new LLMClient(llmConfig);
+                    llmClients.put(entry.getKey(), client);
+                    ORIGINAL_ERR.println("Player " + (entry.getKey() + 1)
+                            + ": LLM mode (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")");
+                }
+            }
+        }
+
         // Build player configurations
         List<RegisteredPlayer> pp = new ArrayList<>();
         List<PlayerConfig> playerConfigs = new ArrayList<>();
@@ -317,7 +344,9 @@ public class SimulateMatch {
 
             // Store config for parallel execution
             PlayerConfig config = new PlayerConfig(d, name, profile, type);
-            if (nnBridge != null) {
+            if (llmClients.containsKey(i - 1)) {
+                config.llmClient = llmClients.get(i - 1);
+            } else if (nnBridge != null) {
                 String nnPlayerSetting = cmd.getNnPlayer();
                 boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
                     || String.valueOf(i).equals(nnPlayerSetting);
@@ -336,7 +365,9 @@ public class SimulateMatch {
             } else {
                 rp = new RegisteredPlayer(d);
             }
-            if (nnBridge != null) {
+            if (llmClients.containsKey(i - 1)) {
+                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClients.get(i - 1)));
+            } else if (nnBridge != null) {
                 String nnPlayerSetting = cmd.getNnPlayer();
                 boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
                     || String.valueOf(i).equals(nnPlayerSetting);
@@ -401,9 +432,13 @@ public class SimulateMatch {
         // Suppress stdout during game execution:
         // - quiet mode: suppress all output
         // - json/csv mode: suppress to prevent debug prints from corrupting structured output
+        // - Exception: --llm-debug keeps stderr open for LLM debug trace
+        boolean keepStderr = cmd.isLlmDebug();
         if (quietMode || structuredOutput) {
             System.setOut(NULL_PRINT_STREAM);
-            System.setErr(NULL_PRINT_STREAM);
+            if (!keepStderr) {
+                System.setErr(NULL_PRINT_STREAM);
+            }
         }
 
         List<GameResult> allResults = new ArrayList<>();
@@ -449,6 +484,18 @@ public class SimulateMatch {
             outputCsvResult(allResults, playerConfigs, totalTime);
         } else if (numThreads > 1) {
             // Summary already printed by parallel method
+        }
+
+        // Print LLM cost summary if any LLM clients were used
+        if (!llmClients.isEmpty()) {
+            ORIGINAL_ERR.println();
+            for (Map.Entry<Integer, LLMClient> entry : llmClients.entrySet()) {
+                LLMClient c = entry.getValue();
+                ORIGINAL_ERR.printf("LLM Player %d: %d calls, %d+%d tokens, %dms total, est $%.4f%n",
+                        entry.getKey() + 1, c.getTotalCalls(),
+                        c.getTotalInputTokens(), c.getTotalOutputTokens(),
+                        c.getTotalLatencyMs(), c.getEstimatedCost());
+            }
         }
 
         System.out.flush();
