@@ -18,6 +18,7 @@
 package forge.ai;
 
 import forge.LobbyPlayer;
+import forge.ai.llm.LLMConfig;
 import forge.game.player.Player;
 import forge.util.Aggregates;
 import forge.util.FileUtil;
@@ -188,6 +189,8 @@ public class AiProfileUtil {
         availableProfiles.add(AI_PROFILE_RANDOM_MATCH);
         availableProfiles.add(AI_PROFILE_RANDOM_DUEL);
         availableProfiles.addAll(getAvailableProfiles());
+        availableProfiles.add(LLMConfig.LLM_LOCAL_DISPLAY);
+        availableProfiles.add(LLMConfig.LLM_OPENROUTER_DISPLAY);
 
         return availableProfiles;
     }

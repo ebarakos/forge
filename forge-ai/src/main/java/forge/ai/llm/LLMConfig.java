@@ -4,6 +4,15 @@ package forge.ai.llm;
  * Immutable per-player LLM configuration.
  */
 public final class LLMConfig {
+
+    // GUI display names for AI profile dropdown
+    public static final String LLM_LOCAL_DISPLAY = "LLM (Local)";
+    public static final String LLM_OPENROUTER_DISPLAY = "LLM (OpenRouter)";
+
+    // Default models for each provider
+    private static final String DEFAULT_LOCAL_MODEL = "llama3";
+    private static final String DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-chat";
+
     private final String apiBaseUrl;
     private final String apiKey;       // nullable for local Ollama
     private final String model;
@@ -79,6 +88,66 @@ public final class LLMConfig {
         if (profile == null) return false;
         String lower = profile.toLowerCase().trim();
         return lower.startsWith("ollama:") || lower.startsWith("openrouter:");
+    }
+
+    /** Returns true if the profile string is an LLM GUI display name. */
+    public static boolean isLlmDisplayProfile(String profile) {
+        return LLM_LOCAL_DISPLAY.equals(profile) || LLM_OPENROUTER_DISPLAY.equals(profile);
+    }
+
+    /** Maps a GUI display name to the internal profile string (e.g. "ollama:llama3"). */
+    public static String toProfileString(String displayName) {
+        if (LLM_LOCAL_DISPLAY.equals(displayName)) {
+            return "ollama:" + DEFAULT_LOCAL_MODEL;
+        } else if (LLM_OPENROUTER_DISPLAY.equals(displayName)) {
+            return "openrouter:" + DEFAULT_OPENROUTER_MODEL;
+        }
+        return null;
+    }
+
+    /** Loads API key from environment variables, then falls back to .env file. */
+    public static String loadApiKeyFromEnv() {
+        String key = System.getenv("FORGE_LLM_API_KEY");
+        if (key != null && !key.isEmpty()) return key;
+
+        key = System.getenv("OPENROUTER_API_KEY");
+        if (key != null && !key.isEmpty()) return key;
+
+        // Try .env file in working directory
+        String fromDotEnv = loadDotEnvValue("FORGE_LLM_API_KEY");
+        if (fromDotEnv != null) return fromDotEnv;
+        fromDotEnv = loadDotEnvValue("OPENROUTER_API_KEY");
+        return fromDotEnv;
+    }
+
+    /** Returns true if LLM debug is enabled via env var or .env file. */
+    public static boolean isDebugEnabled() {
+        String env = System.getenv("FORGE_LLM_DEBUG");
+        if (env != null && !env.isEmpty() && !"false".equalsIgnoreCase(env) && !"0".equals(env)) {
+            return true;
+        }
+        String dotEnv = loadDotEnvValue("FORGE_LLM_DEBUG");
+        return dotEnv != null && !dotEnv.isEmpty() && !"false".equalsIgnoreCase(dotEnv) && !"0".equals(dotEnv);
+    }
+
+    /** Read a single value from .env file in the working directory. */
+    private static String loadDotEnvValue(String key) {
+        java.io.File envFile = new java.io.File(".env");
+        if (!envFile.exists()) return null;
+        String prefix = key + "=";
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(envFile))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.startsWith("#") || line.isEmpty()) continue;
+                if (line.startsWith(prefix)) {
+                    return line.substring(prefix.length()).trim();
+                }
+            }
+        } catch (java.io.IOException e) {
+            // Ignore
+        }
+        return null;
     }
 
     public static class Builder {

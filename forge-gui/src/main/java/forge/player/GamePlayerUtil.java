@@ -5,6 +5,7 @@ import forge.ai.AIOption;
 import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.llm.LLMClient;
+import forge.ai.llm.LLMConfig;
 import forge.ai.llm.LobbyPlayerLLM;
 import forge.ai.nn.LobbyPlayerNN;
 import forge.ai.nn.NNBridge;
@@ -125,6 +126,23 @@ public final class GamePlayerUtil {
         LobbyPlayerLLM player = new LobbyPlayerLLM(name, client);
         player.setAiProfile("Default");
         return player;
+    }
+
+    /**
+     * Create an LLM-backed AI player from a GUI display profile name
+     * (e.g. "LLM (Local)" or "LLM (OpenRouter)").
+     */
+    public static LobbyPlayer createLLMPlayerFromProfile(String name, String displayProfile) {
+        String profileString = LLMConfig.toProfileString(displayProfile);
+        String apiKey = LLMConfig.loadApiKeyFromEnv();
+        boolean debug = LLMConfig.isDebugEnabled();
+        LLMConfig config = LLMConfig.fromProfileString(profileString, apiKey,
+                0.2, 30000, 0, debug);
+        System.err.println("[LLM] Creating " + displayProfile + " player '" + name
+                + "' → " + config.getProvider() + ":" + config.getModel()
+                + " (apiKey=" + (apiKey != null ? "set" : "MISSING") + ", debug=" + debug + ")");
+        LLMClient client = new LLMClient(config);
+        return createLLMPlayer(name, client);
     }
 
     public static void setPlayerName() {

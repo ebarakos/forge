@@ -422,8 +422,12 @@ public abstract class GameLobby implements IHasGameType {
             final LobbyPlayer lobbyPlayer;
             if (isAI) {
                 String aiProfile = slot.getAiProfile();
-                lobbyPlayer = GamePlayerUtil.createAiPlayer(name, avatar, sleeve, aiOptions,
-                    (aiProfile == null || aiProfile.isEmpty()) ? "" : aiProfile);
+                if (forge.ai.llm.LLMConfig.isLlmDisplayProfile(aiProfile)) {
+                    lobbyPlayer = GamePlayerUtil.createLLMPlayerFromProfile(name, aiProfile);
+                } else {
+                    lobbyPlayer = GamePlayerUtil.createAiPlayer(name, avatar, sleeve, aiOptions,
+                        (aiProfile == null || aiProfile.isEmpty()) ? "" : aiProfile);
+                }
             }
             else {
                 boolean setNameNow = false;
