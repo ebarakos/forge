@@ -2,6 +2,7 @@ package forge.ai.llm;
 
 import com.google.common.collect.ListMultimap;
 import forge.LobbyPlayer;
+import forge.ai.AiPlayDecision;
 import forge.ai.ComputerUtilAbility;
 import forge.ai.ComputerUtilCost;
 import forge.ai.PlayerControllerAi;
@@ -35,6 +36,7 @@ import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.staticability.StaticAbility;
 import forge.game.trigger.WrappedAbility;
+import forge.game.phase.PhaseType;
 import forge.game.zone.ZoneType;
 import forge.util.collect.FCollectionView;
 import org.apache.commons.lang3.tuple.ImmutablePair;
@@ -44,6 +46,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 
 /**
@@ -97,6 +100,67 @@ public class LLMFullController extends PlayerControllerAi {
                         + " - " + e.getMessage());
             }
             return -1;
+        }
+    }
+
+    /**
+     * Call the LLM and return the raw response text (not parsed as a single index).
+     * Returns null on failure.
+     */
+    private String callLLMRaw(String userPrompt, String callLabel) {
+        if (budgetExceeded) {
+            return null;
+        }
+        try {
+            return client.chatCompletion(
+                    PromptTemplates.SYSTEM_PROMPT, userPrompt,
+                    callLabel, getPlayer().getName());
+        } catch (BudgetExceededException e) {
+            budgetExceeded = true;
+            return null;
+        } catch (Exception e) {
+            if (client.isDebug()) {
+                System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
+                        + " - " + e.getMessage());
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Use the heuristic AI's targeting logic to set up targets on the given SA.
+     * Returns true if targeting succeeded (or no targeting is needed).
+     */
+    private boolean validateAndSetTargets(SpellAbility sa) {
+        if (!sa.usesTargeting()) {
+            return true;
+        }
+
+        try {
+            sa.setActivatingPlayer(getPlayer());
+            SpellAbility root = sa.getRootAbility();
+            if (root.isSpell() || root.isTrigger() || root.isReplacementAbility()) {
+                sa.setLastStateBattlefield(getGame().getLastStateBattlefield());
+                sa.setLastStateGraveyard(getGame().getLastStateGraveyard());
+            }
+
+            AiPlayDecision decision = getAi().canPlaySa(sa);
+            sa.clearLastState();
+
+            if (decision == AiPlayDecision.WillPlay) {
+                return true;
+            }
+            if (decision == AiPlayDecision.TargetingFailed) {
+                return false;
+            }
+            // Strategic refusal — targets may have been set as a side effect
+            return sa.isTargetNumberValid();
+        } catch (Exception e) {
+            sa.clearLastState();
+            if (client.isDebug()) {
+                System.err.println("[LLM] validateAndSetTargets failed: " + e.getMessage());
+            }
+            return false;
         }
     }
 
@@ -273,16 +337,38 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        // Only use LLM for MAIN phases — heuristic handles instant-speed responses
+        // during UPKEEP, DRAW, COMBAT, END_OF_TURN etc. much better
+        PhaseType phase = getGame().getPhaseHandler().getPhase();
+        if (phase != PhaseType.MAIN1 && phase != PhaseType.MAIN2) {
+            return super.chooseSpellAbilityToPlay();
+        }
+
+        // Delegate land drops to heuristic (no benefit from LLM deciding which basic to play)
+        CardCollection landsWannaPlay = ComputerUtilAbility.getAvailableLandsToPlay(getGame(), getPlayer());
+        if (landsWannaPlay != null && !landsWannaPlay.isEmpty()) {
+            return super.chooseSpellAbilityToPlay();
+        }
+
         CardCollection cards = ComputerUtilAbility.getAvailableCards(getGame(), getPlayer());
         List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, getPlayer());
 
         List<SpellAbility> playable = new ArrayList<>();
         for (SpellAbility sa : candidates) {
+            // Filter out mana abilities and land abilities — engine handles these automatically
+            if (sa.isManaAbility() || sa.isLandAbility()) {
+                continue;
+            }
             sa.setActivatingPlayer(getPlayer());
             try {
-                if (ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) {
-                    playable.add(sa);
+                if (!ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) {
+                    continue;
                 }
+                // Pre-validate targeting: only show spells that can actually target
+                if (!validateAndSetTargets(sa)) {
+                    continue;
+                }
+                playable.add(sa);
             } catch (Exception e) {
                 // Skip
             }
@@ -299,15 +385,15 @@ public class LLMFullController extends PlayerControllerAi {
         int chosen = callLLM(prompt, totalOptions, "chooseSpellAbilityToPlay");
 
         if (chosen < 0) {
-            // Fallback to heuristic
             return super.chooseSpellAbilityToPlay();
         }
         if (chosen >= playable.size()) {
             return null; // PASS
         }
 
+        SpellAbility selectedSa = playable.get(chosen);
         List<SpellAbility> result = new ArrayList<>();
-        result.add(playable.get(chosen));
+        result.add(selectedSa);
         return result;
     }
 
@@ -359,7 +445,7 @@ public class LLMFullController extends PlayerControllerAi {
             return;
         }
 
-        CardCollection canAttack = new CardCollection();
+        List<Card> canAttack = new ArrayList<>();
         for (Card c : potentialAttackers) {
             if (CombatUtil.canAttack(c, defaultDefender)) {
                 canAttack.add(c);
@@ -369,15 +455,17 @@ public class LLMFullController extends PlayerControllerAi {
             return;
         }
 
+        // Single batched LLM call for all attack decisions
         String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
-        for (Card c : canAttack) {
-            String attackOption = OptionSerializer.serializeAttackOption(c);
-            String prompt = PromptTemplates.attack(gameState, attackOption);
-            int chosen = callLLM(prompt, 2, "declareAttack");
-            if (chosen == 0) {
-                combat.addAttacker(c, defaultDefender);
+        String options = OptionSerializer.serializeBatchAttackOptions(canAttack);
+        String prompt = PromptTemplates.batchAttack(gameState, options);
+        String response = callLLMRaw(prompt, "declareAttackers");
+
+        if (response != null) {
+            Set<Integer> attackIndices = ResponseParser.parseBatchIndices(response, canAttack.size());
+            for (int idx : attackIndices) {
+                combat.addAttacker(canAttack.get(idx), defaultDefender);
             }
-            // chosen == 1 or failure: don't attack
         }
 
         if (!CombatUtil.validateAttackers(combat)) {

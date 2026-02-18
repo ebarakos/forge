@@ -137,25 +137,60 @@ public final class OptionSerializer {
         return "Card: " + desc + "\nOPTIONS:\n0: Top of library\n1: " + bottomLabel + "\n";
     }
 
+    /**
+     * Serialize all potential attackers as a single batch prompt.
+     * The LLM responds with comma-separated indices of creatures to attack with.
+     */
+    public static String serializeBatchAttackOptions(List<Card> canAttack) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Which creatures should attack? Respond with comma-separated numbers (e.g. 0,2) or NONE.\n\n");
+        for (int i = 0; i < canAttack.size(); i++) {
+            sb.append(i).append(": ").append(GameStateSerializer.serializeCardBattlefield(canAttack.get(i))).append('\n');
+        }
+        return sb.toString();
+    }
+
     private static void serializeSpellAbility(StringBuilder sb, SpellAbility sa) {
         Card host = sa.getHostCard();
-        if (host != null) {
-            sb.append(host.getName());
-            if (!host.getManaCost().isNoCost()) {
-                sb.append(" (").append(host.getManaCost().getSimpleString()).append(')');
-            }
+        if (host == null) {
+            sb.append(sa.toString());
+            return;
         }
 
-        String desc = sa.getStackDescription();
-        if (desc != null && !desc.isEmpty()) {
-            sb.append(" - ").append(desc);
+        // Card name + mana cost
+        sb.append(host.getName());
+        if (!host.getManaCost().isNoCost()) {
+            sb.append(" (").append(host.getManaCost().getSimpleString()).append(')');
+        }
+
+        // Card type
+        sb.append(" [").append(host.getType().toString()).append(']');
+
+        // P/T for creatures
+        if (host.isCreature()) {
+            sb.append(' ').append(host.getNetPower()).append('/').append(host.getNetToughness());
+        }
+
+        // Oracle text — most important for LLM understanding
+        String oracle = host.getOracleText();
+        if (oracle != null && !oracle.isEmpty()) {
+            if (oracle.length() > 150) {
+                oracle = oracle.substring(0, 147) + "...";
+            }
+            sb.append(" - \"").append(oracle).append('"');
         } else {
-            String saDesc = sa.getDescription();
-            if (saDesc != null && !saDesc.isEmpty()) {
-                if (saDesc.length() > 120) {
-                    saDesc = saDesc.substring(0, 117) + "...";
+            // Fall back to SA description if no oracle text
+            String desc = sa.getStackDescription();
+            if (desc != null && !desc.isEmpty()) {
+                sb.append(" - ").append(desc);
+            } else {
+                String saDesc = sa.getDescription();
+                if (saDesc != null && !saDesc.isEmpty()) {
+                    if (saDesc.length() > 150) {
+                        saDesc = saDesc.substring(0, 147) + "...";
+                    }
+                    sb.append(" - \"").append(saDesc).append('"');
                 }
-                sb.append(" - \"").append(saDesc).append('"');
             }
         }
     }

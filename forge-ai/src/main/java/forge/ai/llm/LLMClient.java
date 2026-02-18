@@ -68,7 +68,9 @@ public class LLMClient {
         JsonObject body = new JsonObject();
         body.addProperty("model", config.getModel());
         body.addProperty("temperature", config.getTemperature());
-        body.addProperty("max_tokens", 256);
+        // Thinking models need more output tokens for reasoning chain + answer
+        // Non-thinking free models are often chatty — need room to finish before the number
+        body.addProperty("max_tokens", config.isThinkingModel() ? 4096 : 1024);
 
         JsonArray messages = new JsonArray();
         JsonObject sysMsg = new JsonObject();
@@ -141,6 +143,9 @@ public class LLMClient {
         } catch (Exception e) {
             throw new LLMException("Failed to extract content from LLM response: " + response.body(), e);
         }
+
+        // Strip <think>...</think> tags from thinking models (some providers embed reasoning in content)
+        content = ResponseParser.stripThinkingTags(content);
 
         // Extract token usage if available (some providers omit or null-out usage)
         int inputTokens = 0;

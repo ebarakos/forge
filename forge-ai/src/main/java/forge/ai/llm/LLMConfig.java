@@ -11,7 +11,7 @@ public final class LLMConfig {
 
     // Default models for each provider
     private static final String DEFAULT_LOCAL_MODEL = "llama3";
-    private static final String DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-chat";
+    private static final String DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash";
 
     private final String apiBaseUrl;
     private final String apiKey;       // nullable for local Ollama
@@ -43,6 +43,13 @@ public final class LLMConfig {
     public int getTimeoutMs() { return timeoutMs; }
     public boolean isDebug() { return debug; }
     public double getBudgetLimit() { return budgetLimit; }
+
+    /** Returns true if this model is a thinking/reasoning model that produces chain-of-thought tokens. */
+    public boolean isThinkingModel() {
+        if (model == null) return false;
+        String lower = model.toLowerCase();
+        return lower.contains("-r1") || lower.contains("thinking") || lower.contains("gemini-2.5");
+    }
 
     /**
      * Parse a profile string like "ollama:llama3" or "openrouter:deepseek/deepseek-chat"
