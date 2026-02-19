@@ -551,6 +551,7 @@ public class SimulateMatch {
             ORIGINAL_ERR.println("Stopping slow match as draw");
         } catch (Exception | StackOverflowError e) {
             ORIGINAL_ERR.println("Game error: " + e.getMessage());
+            e.printStackTrace(ORIGINAL_ERR);
         } finally {
             if (sw.isStarted()) {
                 sw.stop();
@@ -1350,6 +1351,7 @@ public class SimulateMatch {
             ORIGINAL_OUT.println("Stopping slow match as draw");
         } catch (Exception | StackOverflowError e) {
             ORIGINAL_ERR.println("Game error: " + e.getMessage());
+            e.printStackTrace(ORIGINAL_ERR);
         } finally {
             if (sw.isStarted()) {
                 sw.stop();

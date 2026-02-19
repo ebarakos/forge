@@ -62,6 +62,20 @@ public final class PromptTemplates {
     }
 
     /**
+     * Build a user prompt for batch block declaration (all attackers/blockers at once).
+     */
+    public static String batchBlock(String gameState, String blockOptions) {
+        return gameState + "\nDECLARE BLOCKERS\n" + blockOptions;
+    }
+
+    /**
+     * Build a user prompt for a batched scry/surveil decision.
+     */
+    public static String batchScry(String gameState, String scryOptions) {
+        return gameState + "\nSCRY/SURVEIL\n" + scryOptions;
+    }
+
+    /**
      * Build a user prompt for choosing a card from a list.
      */
     public static String chooseCard(String gameState, String options, String context) {

@@ -258,6 +258,15 @@ public final class GameStateSerializer {
             }
         }
 
+        // Oracle text for non-creature, non-land permanents (enchantments, artifacts, etc.)
+        if (!c.isCreature() && !c.isLand()) {
+            String oracle = c.getOracleText();
+            if (oracle != null && !oracle.isEmpty()) {
+                if (oracle.length() > 100) oracle = oracle.substring(0, 97) + "...";
+                sb.append(" - \"").append(oracle).append('"');
+            }
+        }
+
         return sb.toString();
     }
 

@@ -70,7 +70,7 @@ public class LLMClient {
         body.addProperty("temperature", config.getTemperature());
         // Omit max_tokens — let the provider use whatever the account can afford.
         // Our prompts ask for just a number, so responses are naturally short.
-        // Setting max_tokens causes OpenRouter 402 errors when credits are low.
+        // Note: OpenRouter 402 errors are a credits issue, not a max_tokens issue.
 
         JsonArray messages = new JsonArray();
         JsonObject sysMsg = new JsonObject();

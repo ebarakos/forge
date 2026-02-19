@@ -57,9 +57,78 @@ public class LLMFullController extends PlayerControllerAi {
     private final LLMClient client;
     private volatile boolean budgetExceeded = false;
 
+    /** Sliding window of recent action summaries for LLM context. */
+    private final List<String> actionHistory = new ArrayList<>();
+    private static final int MAX_HISTORY = 10;
+
     public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
         super(game, p, lp);
         this.client = client;
+    }
+
+    /** Record an action summary for the sliding window history. */
+    private void recordAction(String summary) {
+        actionHistory.add(summary);
+        if (actionHistory.size() > MAX_HISTORY) {
+            actionHistory.remove(0);
+        }
+    }
+
+    /** Format the action history section for inclusion in prompts. */
+    private String getActionHistoryText() {
+        if (actionHistory.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("\nRECENT ACTIONS:\n");
+        for (String action : actionHistory) {
+            sb.append("- ").append(action).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** Build the game state text with action history appended. */
+    private String buildGameStateWithHistory() {
+        return GameStateSerializer.serializeGameState(getPlayer(), getGame())
+                + getActionHistoryText();
+    }
+
+    // =======================================================================
+    // Instant-speed decision check
+    // =======================================================================
+
+    /**
+     * Check if the LLM should be called for an instant-speed decision.
+     * Returns true when: there's a spell on the stack (counterspell opportunity)
+     * or it's the opponent's combat phase (combat trick opportunity),
+     * AND the player has affordable instant-speed spells in hand.
+     */
+    private boolean shouldCallLLMForInstantSpeed() {
+        try {
+            // Check if there's a reason to respond at instant speed
+            boolean hasStackTarget = !getGame().getStack().isEmpty();
+            PhaseType phase = getGame().getPhaseHandler().getPhase();
+            boolean isOpponentCombat = !getGame().getPhaseHandler().isPlayerTurn(getPlayer())
+                    && (phase == PhaseType.COMBAT_DECLARE_ATTACKERS
+                        || phase == PhaseType.COMBAT_DECLARE_BLOCKERS
+                        || phase == PhaseType.COMBAT_FIRST_STRIKE_DAMAGE
+                        || phase == PhaseType.COMBAT_DAMAGE);
+
+            if (!hasStackTarget && !isOpponentCombat) {
+                return false;
+            }
+
+            // Check if we have any affordable instant-speed spells
+            CardCollection cards = ComputerUtilAbility.getAvailableCards(getGame(), getPlayer());
+            List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, getPlayer());
+            for (SpellAbility sa : candidates) {
+                if (sa.isManaAbility() || sa.isLandAbility()) continue;
+                sa.setActivatingPlayer(getPlayer());
+                if (ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) {
+                    return true; // At least one playable instant-speed spell
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            return false; // On any error, delegate to heuristic
+        }
     }
 
     // =======================================================================
@@ -176,7 +245,7 @@ public class LLMFullController extends PlayerControllerAi {
         List<Card> cardList = new ArrayList<>();
         for (Card c : cards) { cardList.add(c); }
 
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String options = OptionSerializer.serializeCardOptions(cardList, false);
         String prompt = PromptTemplates.chooseCard(gameState, options, context);
         int chosen = callLLM(prompt, cards.size(), "chooseCard");
@@ -198,7 +267,7 @@ public class LLMFullController extends PlayerControllerAi {
         List<T> entityList = new ArrayList<>();
         for (T e : entities) { entityList.add(e); }
 
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String options = OptionSerializer.serializeEntityOptions(entityList, isOptional);
         int numOpts = isOptional ? entityList.size() + 1 : entityList.size();
         String prompt = PromptTemplates.chooseCard(gameState, options, context);
@@ -219,7 +288,7 @@ public class LLMFullController extends PlayerControllerAi {
         if (min == max) {
             return min;
         }
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String options = OptionSerializer.serializeNumberOptions(min, max);
         String prompt = PromptTemplates.numberChoice(gameState, options, context);
         int chosen = callLLM(prompt, max - min + 1, "number");
@@ -236,7 +305,7 @@ public class LLMFullController extends PlayerControllerAi {
         if (sas.size() == 1) {
             return sas.get(0);
         }
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String options = OptionSerializer.serializeGenericOptions(sas);
         String prompt = PromptTemplates.genericChoice(gameState, options, context);
         int chosen = callLLM(prompt, sas.size(), "chooseSpellAbility");
@@ -257,7 +326,7 @@ public class LLMFullController extends PlayerControllerAi {
             List<Card> cardList = new ArrayList<>();
             for (Card c : remaining) { cardList.add(c); }
 
-            String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+            String gameState = buildGameStateWithHistory();
             String options = OptionSerializer.serializeCardOptions(cardList, canStop);
             int numOpts = canStop ? remaining.size() + 1 : remaining.size();
             String chooseContext = context + " (pick " + (i + 1) + ", need " + min + "-" + max + ")";
@@ -291,7 +360,7 @@ public class LLMFullController extends PlayerControllerAi {
         if (options.size() == 1) {
             return options.get(0);
         }
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String optText = OptionSerializer.serializeGenericOptions(options);
         String prompt = PromptTemplates.genericChoice(gameState, optText, context);
         int chosen = callLLM(prompt, options.size(), "genericChoice");
@@ -308,7 +377,7 @@ public class LLMFullController extends PlayerControllerAi {
         if (options.size() == 1) {
             return options.get(0);
         }
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String optText = OptionSerializer.serializeStringOptions(options);
         String prompt = PromptTemplates.genericChoice(gameState, optText, context);
         int chosen = callLLM(prompt, options.size(), "stringChoice");
@@ -324,17 +393,28 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        // Only use LLM for MAIN phases — heuristic handles instant-speed responses
-        // during UPKEEP, DRAW, COMBAT, END_OF_TURN etc. much better
+        // Use LLM for MAIN phases always; for non-MAIN phases, only when there's
+        // a meaningful instant-speed decision (e.g., counterspell opportunity, combat trick)
         PhaseType phase = getGame().getPhaseHandler().getPhase();
         if (phase != PhaseType.MAIN1 && phase != PhaseType.MAIN2) {
-            return super.chooseSpellAbilityToPlay();
+            if (!shouldCallLLMForInstantSpeed()) {
+                return super.chooseSpellAbilityToPlay();
+            }
+            // Fall through to normal spell selection — getSpellAbilities() already
+            // filters to only instant-speed playable spells during non-MAIN phases
         }
 
-        // Delegate land drops to heuristic (no benefit from LLM deciding which basic to play)
+        // Delegate land drops to heuristic (no benefit from LLM deciding which basic to play),
+        // but ONLY the land drop — don't let heuristic also choose spells.
+        // After the land resolves, the engine loops and calls us again for spell decisions.
         CardCollection landsWannaPlay = ComputerUtilAbility.getAvailableLandsToPlay(getGame(), getPlayer());
         if (landsWannaPlay != null && !landsWannaPlay.isEmpty()) {
-            return super.chooseSpellAbilityToPlay();
+            List<SpellAbility> heuristicChoice = super.chooseSpellAbilityToPlay();
+            if (heuristicChoice != null && !heuristicChoice.isEmpty()
+                    && heuristicChoice.get(0).isLandAbility()) {
+                return heuristicChoice; // Play just the land; engine will call us again for spells
+            }
+            // Heuristic decided not to play a land (e.g., holding for MAIN2) — fall through to LLM
         }
 
         CardCollection cards = ComputerUtilAbility.getAvailableCards(getGame(), getPlayer());
@@ -365,7 +445,7 @@ public class LLMFullController extends PlayerControllerAi {
             return null;
         }
 
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String options = OptionSerializer.serializeSpellOptions(playable);
         String prompt = PromptTemplates.spellSelection(gameState, options);
         int totalOptions = playable.size() + 1; // +1 for PASS
@@ -379,6 +459,33 @@ public class LLMFullController extends PlayerControllerAi {
         }
 
         SpellAbility selectedSa = playable.get(chosen);
+
+        // Record action for sliding window history
+        String phaseName = phase != null ? phase.toString() : "MAIN";
+        int turn = getGame().getPhaseHandler().getTurn();
+        Card host = selectedSa.getHostCard();
+        String spellName = host != null ? host.getName() : selectedSa.toString();
+        StringBuilder actionSb = new StringBuilder();
+        actionSb.append("Turn ").append(turn).append(' ').append(phaseName)
+                .append(": Cast ").append(spellName);
+        // Include target info if available
+        if (selectedSa.usesTargeting() && selectedSa.getTargets() != null
+                && !selectedSa.getTargets().isEmpty()) {
+            actionSb.append(" targeting ");
+            boolean first = true;
+            for (Card tc : selectedSa.getTargets().getTargetCards()) {
+                if (!first) actionSb.append(", ");
+                first = false;
+                actionSb.append(tc.getName());
+            }
+            for (Player tp : selectedSa.getTargets().getTargetPlayers()) {
+                if (!first) actionSb.append(", ");
+                first = false;
+                actionSb.append(tp.getName());
+            }
+        }
+        recordAction(actionSb.toString());
+
         List<SpellAbility> result = new ArrayList<>();
         result.add(selectedSa);
         return result;
@@ -390,13 +497,15 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn) {
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String prompt = PromptTemplates.mulligan(gameState);
         int chosen = callLLM(prompt, 2, "mulligan");
         if (chosen < 0) {
             return super.mulliganKeepHand(firstPlayer, cardsToReturn);
         }
-        return chosen == 0; // 0 = Keep, 1 = Mulligan
+        boolean keep = chosen == 0;
+        recordAction(keep ? "Kept opening hand" : "Mulliganed");
+        return keep;
     }
 
     @Override
@@ -440,7 +549,7 @@ public class LLMFullController extends PlayerControllerAi {
         }
 
         // Single batched LLM call for all attack decisions
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String options = OptionSerializer.serializeBatchAttackOptions(canAttack);
         String prompt = PromptTemplates.batchAttack(gameState, options);
         String response = callLLMRaw(prompt, "declareAttackers");
@@ -459,6 +568,25 @@ public class LLMFullController extends PlayerControllerAi {
         if (!CombatUtil.validateAttackers(combat)) {
             combat.clearAttackers();
             super.declareAttackers(attacker, combat);
+        }
+
+        // Record attack action
+        if (!attackIndices.isEmpty()) {
+            int turn = getGame().getPhaseHandler().getTurn();
+            StringBuilder actionSb = new StringBuilder();
+            actionSb.append("Turn ").append(turn).append(" COMBAT: Attacked with ");
+            boolean first = true;
+            for (int idx : attackIndices) {
+                if (!first) actionSb.append(", ");
+                first = false;
+                Card c = canAttack.get(idx);
+                actionSb.append(c.getName());
+                if (c.isCreature()) {
+                    actionSb.append(" (").append(c.getNetPower()).append('/')
+                            .append(c.getNetToughness()).append(')');
+                }
+            }
+            recordAction(actionSb.toString());
         }
     }
 
@@ -480,28 +608,68 @@ public class LLMFullController extends PlayerControllerAi {
             return;
         }
 
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        // Build lists of attackers that have at least one legal blocker
+        List<Card> attackerList = new ArrayList<>();
         for (Card att : attackers) {
-            List<Card> blockOptions = new ArrayList<>();
             for (Card b : availableBlockers) {
                 if (CombatUtil.canBlock(att, b, combat)) {
-                    blockOptions.add(b);
+                    attackerList.add(att);
+                    break;
                 }
             }
-            if (blockOptions.isEmpty()) {
-                continue;
-            }
+        }
+        if (attackerList.isEmpty()) {
+            return;
+        }
 
-            String blockOption = OptionSerializer.serializeBlockOptions(att, blockOptions);
-            String prompt = PromptTemplates.block(gameState, blockOption);
-            int numOpts = blockOptions.size() + 1; // +1 for no-block
-            int chosen = callLLM(prompt, numOpts, "declareBlock");
+        List<Card> blockerList = new ArrayList<>(availableBlockers);
 
-            if (chosen >= 0 && chosen < blockOptions.size()) {
-                Card blocker = blockOptions.get(chosen);
-                combat.addBlocker(att, blocker);
-                availableBlockers.remove(blocker);
+        // Single batched LLM call for all block assignments
+        String gameState = buildGameStateWithHistory();
+        String options = OptionSerializer.serializeBatchBlockOptions(attackerList, blockerList);
+        String prompt = PromptTemplates.batchBlock(gameState, options);
+        String response = callLLMRaw(prompt, "declareBlockers");
+
+        if (response == null) {
+            super.declareBlockers(defender, combat);
+            return;
+        }
+
+        Map<Integer, Set<Integer>> assignments = ResponseParser.parseBatchBlockAssignments(
+                response, attackerList.size(), blockerList.size());
+
+        for (Map.Entry<Integer, Set<Integer>> entry : assignments.entrySet()) {
+            int attIdx = entry.getKey();
+            if (attIdx < 0 || attIdx >= attackerList.size()) continue;
+            Card att = attackerList.get(attIdx);
+            for (int bIdx : entry.getValue()) {
+                if (bIdx < 0 || bIdx >= blockerList.size()) continue;
+                Card blocker = blockerList.get(bIdx);
+                if (CombatUtil.canBlock(att, blocker, combat)) {
+                    combat.addBlocker(att, blocker);
+                }
             }
+        }
+
+        // Record block action
+        if (!assignments.isEmpty()) {
+            int turn = getGame().getPhaseHandler().getTurn();
+            StringBuilder actionSb = new StringBuilder();
+            actionSb.append("Turn ").append(turn).append(" COMBAT: Blocked ");
+            boolean first = true;
+            for (Map.Entry<Integer, Set<Integer>> entry2 : assignments.entrySet()) {
+                if (!first) actionSb.append("; ");
+                first = false;
+                Card att = attackerList.get(entry2.getKey());
+                actionSb.append(att.getName()).append(" with ");
+                boolean firstB = true;
+                for (int bIdx : entry2.getValue()) {
+                    if (!firstB) actionSb.append("+");
+                    firstB = false;
+                    actionSb.append(blockerList.get(bIdx).getName());
+                }
+            }
+            recordAction(actionSb.toString());
         }
     }
 
@@ -677,7 +845,7 @@ public class LLMFullController extends PlayerControllerAi {
         List<Card> cardList = new ArrayList<>();
         for (Card c : fetchList) { cardList.add(c); }
 
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+        String gameState = buildGameStateWithHistory();
         String options = OptionSerializer.serializeCardOptions(cardList, isOptional);
         int numOpts = isOptional ? fetchList.size() + 1 : fetchList.size();
         String prompt = PromptTemplates.chooseCard(gameState, options, selectPrompt);
@@ -775,36 +943,72 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
-        CardCollection toTop = new CardCollection();
-        CardCollection toBottom = new CardCollection();
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
-        for (Card c : topN) {
-            String option = OptionSerializer.serializeScryOption(c, false);
+        if (topN.size() <= 1) {
+            // Single card: one LLM call with top/bottom choice
+            CardCollection toTop = new CardCollection();
+            CardCollection toBottom = new CardCollection();
+            String gameState = buildGameStateWithHistory();
+            String option = OptionSerializer.serializeScryOption(topN.get(0), false);
             String prompt = PromptTemplates.scry(gameState, option);
             int chosen = callLLM(prompt, 2, "scry");
-            if (chosen == 0) {
-                toTop.add(c);
-            } else {
-                toBottom.add(c);
-            }
+            if (chosen == 0) { toTop.add(topN.get(0)); } else { toBottom.add(topN.get(0)); }
+            return ImmutablePair.of(toTop, toBottom);
+        }
+
+        // Batch: single LLM call for all cards
+        List<Card> cardList = new ArrayList<>();
+        for (Card c : topN) { cardList.add(c); }
+
+        String gameState = buildGameStateWithHistory();
+        String options = OptionSerializer.serializeBatchScryOptions(cardList, false);
+        String prompt = PromptTemplates.batchScry(gameState, options);
+        String response = callLLMRaw(prompt, "scry");
+
+        CardCollection toTop = new CardCollection();
+        CardCollection toBottom = new CardCollection();
+        if (response == null) {
+            return super.arrangeForScry(topN);
+        }
+
+        Set<Integer> keepOnTop = ResponseParser.parseBatchIndices(response, cardList.size());
+        for (int i = 0; i < cardList.size(); i++) {
+            if (keepOnTop.contains(i)) { toTop.add(cardList.get(i)); }
+            else { toBottom.add(cardList.get(i)); }
         }
         return ImmutablePair.of(toTop, toBottom);
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
-        CardCollection toTop = new CardCollection();
-        CardCollection toGraveyard = new CardCollection();
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
-        for (Card c : topN) {
-            String option = OptionSerializer.serializeScryOption(c, true);
+        if (topN.size() <= 1) {
+            CardCollection toTop = new CardCollection();
+            CardCollection toGraveyard = new CardCollection();
+            String gameState = buildGameStateWithHistory();
+            String option = OptionSerializer.serializeScryOption(topN.get(0), true);
             String prompt = PromptTemplates.scry(gameState, option);
             int chosen = callLLM(prompt, 2, "surveil");
-            if (chosen == 0) {
-                toTop.add(c);
-            } else {
-                toGraveyard.add(c);
-            }
+            if (chosen == 0) { toTop.add(topN.get(0)); } else { toGraveyard.add(topN.get(0)); }
+            return ImmutablePair.of(toTop, toGraveyard);
+        }
+
+        List<Card> cardList = new ArrayList<>();
+        for (Card c : topN) { cardList.add(c); }
+
+        String gameState = buildGameStateWithHistory();
+        String options = OptionSerializer.serializeBatchScryOptions(cardList, true);
+        String prompt = PromptTemplates.batchScry(gameState, options);
+        String response = callLLMRaw(prompt, "surveil");
+
+        CardCollection toTop = new CardCollection();
+        CardCollection toGraveyard = new CardCollection();
+        if (response == null) {
+            return super.arrangeForSurveil(topN);
+        }
+
+        Set<Integer> keepOnTop = ResponseParser.parseBatchIndices(response, cardList.size());
+        for (int i = 0; i < cardList.size(); i++) {
+            if (keepOnTop.contains(i)) { toTop.add(cardList.get(i)); }
+            else { toGraveyard.add(cardList.get(i)); }
         }
         return ImmutablePair.of(toTop, toGraveyard);
     }

@@ -1,6 +1,8 @@
 package forge.ai.llm;
 
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -106,6 +108,70 @@ public final class ResponseParser {
             if (val >= 0 && val < numOptions) lastValid = val;
         }
         return lastValid;
+    }
+
+    /**
+     * Parse batch block assignments from LLM response.
+     * Expected format: "A0:B1, A2:B0,B1" or "NONE" for no blocks.
+     * Returns map of attacker index → set of blocker indices.
+     */
+    public static Map<Integer, Set<Integer>> parseBatchBlockAssignments(
+            String response, int numAttackers, int numBlockers) {
+        Map<Integer, Set<Integer>> result = new LinkedHashMap<>();
+        if (response == null || response.isBlank()) return result;
+
+        String trimmed = response.strip().toUpperCase();
+        if (trimmed.equals("NONE") || trimmed.equals("N/A") || trimmed.equals("NO")) {
+            return result;
+        }
+
+        // Split on commas that separate assignments (but not blocker lists within an assignment)
+        // Format: "A0:B1, A2:B0,B1" — each assignment is "Ax:By" or "Ax:By,Bz"
+        // We split on spaces and commas between assignments
+        // Strategy: find all "A<n>:B<m>" patterns
+        Pattern assignPattern = Pattern.compile("A?(\\d+)\\s*:\\s*B?(\\d+(?:\\s*[,+]\\s*B?\\d+)*)");
+        Matcher m = assignPattern.matcher(trimmed);
+        while (m.find()) {
+            int attackerIdx = Integer.parseInt(m.group(1));
+            if (attackerIdx < 0 || attackerIdx >= numAttackers) continue;
+
+            Set<Integer> blockers = new LinkedHashSet<>();
+            String blockerStr = m.group(2);
+            Matcher bm = Pattern.compile("\\d+").matcher(blockerStr);
+            while (bm.find()) {
+                int blockerIdx = Integer.parseInt(bm.group());
+                if (blockerIdx >= 0 && blockerIdx < numBlockers) {
+                    blockers.add(blockerIdx);
+                }
+            }
+            if (!blockers.isEmpty()) {
+                result.put(attackerIdx, blockers);
+            }
+        }
+
+        // Fallback: if no "A:B" pattern found, try simple format like "0:1, 2:0"
+        if (result.isEmpty()) {
+            Pattern simplePattern = Pattern.compile("(\\d+)\\s*:\\s*(\\d+(?:\\s*,\\s*\\d+)*)");
+            Matcher sm = simplePattern.matcher(trimmed);
+            while (sm.find()) {
+                int attackerIdx = Integer.parseInt(sm.group(1));
+                if (attackerIdx < 0 || attackerIdx >= numAttackers) continue;
+
+                Set<Integer> blockers = new LinkedHashSet<>();
+                Matcher bm = Pattern.compile("\\d+").matcher(sm.group(2));
+                while (bm.find()) {
+                    int blockerIdx = Integer.parseInt(bm.group());
+                    if (blockerIdx >= 0 && blockerIdx < numBlockers) {
+                        blockers.add(blockerIdx);
+                    }
+                }
+                if (!blockers.isEmpty()) {
+                    result.put(attackerIdx, blockers);
+                }
+            }
+        }
+
+        return result;
     }
 
     /**

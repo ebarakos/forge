@@ -132,12 +132,48 @@ public final class OptionSerializer {
     }
 
     /**
+     * Serialize all attackers and available blockers as a single batch prompt.
+     * LLM responds with block assignments like "A0:B1, A2:B0,B1" or NONE.
+     */
+    public static String serializeBatchBlockOptions(List<Card> attackers, List<Card> blockers) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Assign blockers to attackers. Format: A0:B1, A2:B0,B1 (gang-block). Use NONE for no blocks.\n\n");
+        sb.append("Attackers:\n");
+        for (int i = 0; i < attackers.size(); i++) {
+            sb.append("  A").append(i).append(": ")
+              .append(GameStateSerializer.serializeCardBattlefield(attackers.get(i))).append('\n');
+        }
+        sb.append("\nYour available blockers:\n");
+        for (int i = 0; i < blockers.size(); i++) {
+            sb.append("  B").append(i).append(": ")
+              .append(GameStateSerializer.serializeCardBattlefield(blockers.get(i))).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /**
      * Serialize scry/surveil options for one card.
      */
     public static String serializeScryOption(Card card, boolean isSurveil) {
         String desc = GameStateSerializer.serializeCardFull(card);
         String bottomLabel = isSurveil ? "Graveyard" : "Bottom";
         return "Card: " + desc + "\nOPTIONS:\n0: Top of library\n1: " + bottomLabel + "\n";
+    }
+
+    /**
+     * Serialize cards for a batched scry/surveil decision.
+     * LLM responds with comma-separated indices of cards to keep on top.
+     */
+    public static String serializeBatchScryOptions(List<Card> cards, boolean isSurveil) {
+        String bottomLabel = isSurveil ? "graveyard" : "bottom of library";
+        StringBuilder sb = new StringBuilder();
+        sb.append("Choose which cards to keep on TOP of library. ")
+          .append("Respond with comma-separated numbers (e.g. 0,2) for cards to keep on top, ")
+          .append("NONE for all to ").append(bottomLabel).append(", or ALL to keep all on top.\n\n");
+        for (int i = 0; i < cards.size(); i++) {
+            sb.append(i).append(": ").append(GameStateSerializer.serializeCardFull(cards.get(i))).append('\n');
+        }
+        return sb.toString();
     }
 
     /**
