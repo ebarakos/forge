@@ -137,7 +137,7 @@ public final class GamePlayerUtil {
         String apiKey = LLMConfig.loadApiKeyFromEnv();
         boolean debug = LLMConfig.isDebugEnabled();
         LLMConfig config = LLMConfig.fromProfileString(profileString, apiKey,
-                0.2, 30000, 0, debug);
+                0.2, 0, 0, debug);
         System.err.println("[LLM] Creating " + displayProfile + " player '" + name
                 + "' → " + config.getProvider() + ":" + config.getModel()
                 + " (apiKey=" + (apiKey != null ? "set" : "MISSING") + ", debug=" + debug + ")");

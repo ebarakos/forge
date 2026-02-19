@@ -232,7 +232,8 @@ public class SimulateMatch {
             rules.setGamesPerMatch(matchSize);
         }
 
-        rules.setSimTimeout(cmd.getTimeout());
+        // Set game timeout (0 = auto, will be overridden for LLM games after detection)
+        rules.setSimTimeout(cmd.getTimeout() > 0 ? cmd.getTimeout() : 120);
 
         // Custom base directory for relative deck paths
         String customDeckBaseDir = null;
@@ -318,6 +319,11 @@ public class SimulateMatch {
                             + ": LLM mode (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")");
                 }
             }
+        }
+
+        // Auto-increase game timeout for LLM games (LLM calls are inherently slow)
+        if (!llmClients.isEmpty() && cmd.getTimeout() <= 0) {
+            rules.setSimTimeout(1800); // 30 min
         }
 
         // Build player configurations

@@ -71,8 +71,8 @@ public class SimCommand implements Callable<Integer> {
 
     @Option(
         names = {"-c", "--clock"},
-        description = "Maximum time in seconds before calling match a draw. Default: ${DEFAULT-VALUE}",
-        defaultValue = "120",
+        description = "Maximum seconds per game before calling it a draw. 0 = auto (120s normal, 1800s LLM). Default: ${DEFAULT-VALUE}",
+        defaultValue = "0",
         paramLabel = "SECS"
     )
     private int timeout;
@@ -212,8 +212,8 @@ public class SimCommand implements Callable<Integer> {
 
     @Option(
         names = {"--llm-timeout"},
-        description = "HTTP timeout per LLM call in milliseconds. Default: ${DEFAULT-VALUE}",
-        defaultValue = "30000",
+        description = "HTTP timeout per LLM call in milliseconds. 0 = auto (120s local, 30s cloud). Default: ${DEFAULT-VALUE}",
+        defaultValue = "0",
         paramLabel = "MS"
     )
     private int llmTimeout;

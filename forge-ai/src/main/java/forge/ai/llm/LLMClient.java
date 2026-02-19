@@ -68,9 +68,9 @@ public class LLMClient {
         JsonObject body = new JsonObject();
         body.addProperty("model", config.getModel());
         body.addProperty("temperature", config.getTemperature());
-        // Thinking models need more output tokens for reasoning chain + answer
-        // Non-thinking free models are often chatty — need room to finish before the number
-        body.addProperty("max_tokens", config.isThinkingModel() ? 4096 : 1024);
+        // Omit max_tokens — let the provider use whatever the account can afford.
+        // Our prompts ask for just a number, so responses are naturally short.
+        // Setting max_tokens causes OpenRouter 402 errors when credits are low.
 
         JsonArray messages = new JsonArray();
         JsonObject sysMsg = new JsonObject();

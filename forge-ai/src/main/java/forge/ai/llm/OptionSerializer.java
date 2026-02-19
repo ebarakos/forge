@@ -2,7 +2,10 @@ package forge.ai.llm;
 
 import forge.game.GameEntity;
 import forge.game.card.Card;
+import forge.game.card.CardCollectionView;
+import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
+import forge.game.spellability.TargetChoices;
 
 import java.util.List;
 
@@ -192,6 +195,48 @@ public final class OptionSerializer {
                     sb.append(" - \"").append(saDesc).append('"');
                 }
             }
+        }
+
+        // Show pre-validated targets (set by validateAndSetTargets before serialization)
+        appendTargetInfo(sb, sa);
+    }
+
+    /**
+     * Append target information to a spell ability description.
+     * Targets are set by the heuristic AI's targeting logic before the LLM sees options.
+     */
+    private static void appendTargetInfo(StringBuilder sb, SpellAbility sa) {
+        if (!sa.usesTargeting()) return;
+        TargetChoices targets = sa.getTargets();
+        if (targets == null || targets.isEmpty()) return;
+
+        sb.append(" -> targeting ");
+        boolean first = true;
+
+        // Targeted cards
+        CardCollectionView targetCards = targets.getTargetCards();
+        for (Card c : targetCards) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append(c.getName());
+            if (c.isCreature()) {
+                sb.append(" (").append(c.getNetPower()).append('/').append(c.getNetToughness()).append(')');
+            }
+        }
+
+        // Targeted players
+        for (Player p : targets.getTargetPlayers()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append(p.getName());
+        }
+
+        // Targeted spells on stack
+        for (SpellAbility tgtSa : targets.getTargetSpells()) {
+            if (!first) sb.append(", ");
+            first = false;
+            Card tgtHost = tgtSa.getHostCard();
+            sb.append(tgtHost != null ? tgtHost.getName() : tgtSa.toString()).append(" (on stack)");
         }
     }
 }

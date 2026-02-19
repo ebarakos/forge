@@ -13,6 +13,10 @@ public final class LLMConfig {
     private static final String DEFAULT_LOCAL_MODEL = "llama3";
     private static final String DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash";
 
+    // Default timeouts per provider (local models need longer for cold starts / model loading)
+    private static final int DEFAULT_LOCAL_TIMEOUT_MS = 120_000;   // 2 minutes
+    private static final int DEFAULT_CLOUD_TIMEOUT_MS = 30_000;    // 30 seconds
+
     private final String apiBaseUrl;
     private final String apiKey;       // nullable for local Ollama
     private final String model;
@@ -65,19 +69,24 @@ public final class LLMConfig {
         String model;
         String baseUrl;
 
+        int defaultTimeout;
         if (lower.startsWith("ollama:")) {
             provider = "ollama";
             model = profile.substring("ollama:".length()).trim();
             if (model.isEmpty()) model = "llama3";
             baseUrl = "http://localhost:11434/v1";
+            defaultTimeout = DEFAULT_LOCAL_TIMEOUT_MS;
         } else if (lower.startsWith("openrouter:")) {
             provider = "openrouter";
             model = profile.substring("openrouter:".length()).trim();
             if (model.isEmpty()) model = "deepseek/deepseek-chat";
             baseUrl = "https://openrouter.ai/api/v1";
+            defaultTimeout = DEFAULT_CLOUD_TIMEOUT_MS;
         } else {
             return null; // Not an LLM profile
         }
+
+        int effectiveTimeout = (timeoutMs > 0) ? timeoutMs : defaultTimeout;
 
         return new Builder()
                 .provider(provider)
@@ -85,7 +94,7 @@ public final class LLMConfig {
                 .apiKey(apiKey)
                 .model(model)
                 .temperature(temperature)
-                .timeoutMs(timeoutMs)
+                .timeoutMs(effectiveTimeout)
                 .budgetLimit(budgetLimit)
                 .debug(debug)
                 .build();

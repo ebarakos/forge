@@ -111,6 +111,7 @@ public final class GameOutcome implements Iterable<Entry<RegisteredPlayer, Playe
     }
 
     public boolean isDraw() {
+        if (winCondition == GameEndReason.Draw) return true;
         for (PlayerStatistics stats : playerRating.values()) {
             if (stats.getOutcome().hasWon()) {
                 return false;

@@ -27,7 +27,6 @@ import forge.game.keyword.KeywordInterface;
 import forge.game.mana.Mana;
 import forge.game.player.DelayedReveal;
 import forge.game.player.Player;
-import forge.game.player.PlayerActionConfirmMode;
 import forge.game.zone.PlayerZone;
 import forge.game.replacement.ReplacementEffect;
 import forge.game.spellability.AbilitySub;
@@ -35,7 +34,6 @@ import forge.game.spellability.OptionalCostValue;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.staticability.StaticAbility;
-import forge.game.trigger.WrappedAbility;
 import forge.game.phase.PhaseType;
 import forge.game.zone.ZoneType;
 import forge.util.collect.FCollectionView;
@@ -215,17 +213,6 @@ public class LLMFullController extends PlayerControllerAi {
             chosen = entityList.size() - 1;
         }
         return entityList.get(chosen);
-    }
-
-    private boolean chooseBooleanLLM(String question) {
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
-        String boolOptions = OptionSerializer.serializeBooleanOptions(question);
-        String prompt = PromptTemplates.booleanChoice(gameState, boolOptions);
-        int chosen = callLLM(prompt, 2, "boolean");
-        if (chosen < 0) {
-            return true; // default to yes on failure
-        }
-        return chosen == 0; // 0 = Yes, 1 = No
     }
 
     private int chooseNumberLLM(int min, int max, String context) {
@@ -426,10 +413,7 @@ public class LLMFullController extends PlayerControllerAi {
         return CardCollection.getView(chosen);
     }
 
-    @Override
-    public boolean confirmMulliganScry(Player p) {
-        return chooseBooleanLLM("Do you want to scry 1?");
-    }
+    // confirmMulliganScry: delegated to heuristic (always scries, not worth an LLM call)
 
     // =======================================================================
     // Combat
@@ -461,11 +445,15 @@ public class LLMFullController extends PlayerControllerAi {
         String prompt = PromptTemplates.batchAttack(gameState, options);
         String response = callLLMRaw(prompt, "declareAttackers");
 
-        if (response != null) {
-            Set<Integer> attackIndices = ResponseParser.parseBatchIndices(response, canAttack.size());
-            for (int idx : attackIndices) {
-                combat.addAttacker(canAttack.get(idx), defaultDefender);
-            }
+        if (response == null) {
+            // LLM failure — fall back to heuristic attack logic
+            super.declareAttackers(attacker, combat);
+            return;
+        }
+
+        Set<Integer> attackIndices = ResponseParser.parseBatchIndices(response, canAttack.size());
+        for (int idx : attackIndices) {
+            combat.addAttacker(canAttack.get(idx), defaultDefender);
         }
 
         if (!CombatUtil.validateAttackers(combat)) {
@@ -517,16 +505,7 @@ public class LLMFullController extends PlayerControllerAi {
         }
     }
 
-    @Override
-    public List<Card> exertAttackers(List<Card> attackers) {
-        List<Card> exerted = new ArrayList<>();
-        for (Card c : attackers) {
-            if (chooseBooleanLLM("Exert " + c.getName() + "?")) {
-                exerted.add(c);
-            }
-        }
-        return exerted;
-    }
+    // exertAttackers: delegated to heuristic (combat-phase decision, handled by AI logic)
 
     @Override
     public List<Card> enlistAttackers(List<Card> attackers) {
@@ -740,87 +719,15 @@ public class LLMFullController extends PlayerControllerAi {
     // Boolean / confirm decisions
     // =======================================================================
 
-    @Override
-    public boolean confirmAction(SpellAbility sa, PlayerActionConfirmMode mode, String message,
-                                  List<String> options, Card cardToShow, Map<String, Object> params) {
-        return chooseBooleanLLM(message != null ? message : "Confirm action?");
-    }
+    // confirmAction, confirmBidAction, confirmReplacementEffect, confirmStaticApplication,
+    // confirmTrigger, confirmPayment: all delegated to heuristic AI (inherited from
+    // PlayerControllerAi). These are secondary decisions where the heuristic's doTrigger()
+    // and specialized logic outperforms LLM reasoning, especially for slow local models
+    // where each call costs 15-30s. LLM value is in strategic spell/combat decisions.
 
-    @Override
-    public boolean confirmBidAction(SpellAbility sa, PlayerActionConfirmMode mode, String string,
-                                     int bid, Player winner) {
-        return chooseBooleanLLM(string != null ? string : "Confirm bid?");
-    }
+    // chooseBinary, willPutCardOnTop: delegated to heuristic (same rationale as above)
 
-    @Override
-    public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA,
-                                             GameEntity affected, String question) {
-        return chooseBooleanLLM(question != null ? question : "Apply replacement effect?");
-    }
-
-    @Override
-    public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode,
-                                             String message, String logic) {
-        return chooseBooleanLLM(message != null ? message : "Apply static ability?");
-    }
-
-    @Override
-    public boolean confirmTrigger(WrappedAbility wrapper) {
-        if (wrapper.isMandatory()) {
-            return true;
-        }
-        return chooseBooleanLLM("Put trigger on stack: " + wrapper.getStackDescription() + "?");
-    }
-
-    @Override
-    public boolean confirmPayment(CostPart costPart, String prompt, SpellAbility sa) {
-        return chooseBooleanLLM(prompt != null ? prompt : "Pay cost?");
-    }
-
-    @Override
-    public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kindOfChoice,
-                                 Boolean defaultChoice) {
-        return chooseBooleanLLM(question);
-    }
-
-    @Override
-    public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kindOfChoice,
-                                 Map<String, Object> params) {
-        return chooseBooleanLLM(question);
-    }
-
-    @Override
-    public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean[] results, boolean call) {
-        return super.chooseFlipResult(sa, flipper, results, call);
-    }
-
-    @Override
-    public boolean willPutCardOnTop(Card c) {
-        return chooseBooleanLLM("Put " + c.getName() + " on top of library?");
-    }
-
-    @Override
-    public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2,
-                                    String faceUp) {
-        StringBuilder question = new StringBuilder("Choose a pile.\nPile 1: ");
-        for (int i = 0; i < pile1.size(); i++) {
-            if (i > 0) question.append(", ");
-            question.append(pile1.get(i).getName());
-        }
-        question.append("\nPile 2: ");
-        for (int i = 0; i < pile2.size(); i++) {
-            if (i > 0) question.append(", ");
-            question.append(pile2.get(i).getName());
-        }
-        question.append("\n0: Pile 1\n1: Pile 2");
-        String gameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
-        String prompt = PromptTemplates.booleanChoice(gameState, question.toString());
-        int chosen = callLLM(prompt, 2, "choosePile");
-        if (chosen < 0) {
-            return super.chooseCardsPile(sa, pile1, pile2, faceUp);
-        }
-        return chosen == 0;
-    }
+    // chooseCardsPile: delegated to heuristic
 
     // =======================================================================
     // Number choices
@@ -1068,16 +975,7 @@ public class LLMFullController extends PlayerControllerAi {
         return chooseFromGenericList(rolls, "Choose roll to ignore");
     }
 
-    @Override
-    public List<Integer> chooseDiceToReroll(List<Integer> rolls) {
-        List<Integer> toReroll = new ArrayList<>();
-        for (Integer roll : rolls) {
-            if (chooseBooleanLLM("Reroll die showing " + roll + "?")) {
-                toReroll.add(roll);
-            }
-        }
-        return toReroll;
-    }
+    // chooseDiceToReroll: delegated to heuristic
 
     @Override
     public Integer chooseRollToModify(List<Integer> rolls) {
@@ -1155,16 +1053,7 @@ public class LLMFullController extends PlayerControllerAi {
     // Contraptions
     // =======================================================================
 
-    @Override
-    public List<Card> chooseContraptionsToCrank(List<Card> contraptions) {
-        List<Card> toCrank = new ArrayList<>();
-        for (Card c : contraptions) {
-            if (chooseBooleanLLM("Crank contraption: " + c.getName() + "?")) {
-                toCrank.add(c);
-            }
-        }
-        return toCrank;
-    }
+    // chooseContraptionsToCrank: delegated to heuristic
 
     // =======================================================================
     // Splice

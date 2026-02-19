@@ -5,10 +5,15 @@ import forge.game.card.Card;
 import forge.game.card.CardCollectionView;
 import forge.game.card.CounterType;
 import forge.game.player.Player;
+import forge.game.spellability.AbilityManaPart;
+import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.zone.ZoneType;
 
+import forge.util.collect.FCollectionView;
+
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -50,6 +55,9 @@ public final class GameStateSerializer {
             sb.append(" | Library: ").append(opp.getCardsIn(ZoneType.Library).size());
             sb.append('\n');
         }
+
+        // Available mana
+        serializeAvailableMana(sb, me);
 
         // Your battlefield
         sb.append("\nYOUR BATTLEFIELD:\n");
@@ -93,6 +101,81 @@ public final class GameStateSerializer {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * Serialize available mana from untapped mana sources.
+     * Shows color breakdown and total, e.g. "Available mana: 2W 1U 1C (4 total)"
+     */
+    private static void serializeAvailableMana(StringBuilder sb, Player player) {
+        // Count producible mana by color from untapped sources
+        Map<Character, Integer> colorCounts = new LinkedHashMap<>();
+        colorCounts.put('W', 0);
+        colorCounts.put('U', 0);
+        colorCounts.put('B', 0);
+        colorCounts.put('R', 0);
+        colorCounts.put('G', 0);
+        colorCounts.put('C', 0);
+
+        for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isTapped()) continue;
+            FCollectionView<SpellAbility> manaAbilities = c.getManaAbilities();
+            if (manaAbilities.isEmpty()) continue;
+
+            // Use the first mana ability to determine what this source produces
+            boolean counted = false;
+            for (SpellAbility ma : manaAbilities) {
+                if (counted) break;
+                AbilityManaPart manaPart = ma.getManaPart();
+                if (manaPart == null) continue;
+                String produced = manaPart.getOrigProduced();
+                if (produced == null || produced.isEmpty()) continue;
+
+                if (produced.contains("Any")) {
+                    // "Any" color — count as one of each WUBRG? No, count as 1 generic.
+                    // Best representation: count as 1 "any" mana
+                    colorCounts.put('A', colorCounts.getOrDefault('A', 0) + 1);
+                    counted = true;
+                } else {
+                    // Parse individual color letters from produced string (e.g. "W", "G G", "W U")
+                    for (String token : produced.split("\\s+")) {
+                        if (token.length() == 1 && colorCounts.containsKey(token.charAt(0))) {
+                            colorCounts.merge(token.charAt(0), 1, Integer::sum);
+                            counted = true;
+                        } else if ("C".equals(token) || "1".equals(token)) {
+                            colorCounts.merge('C', 1, Integer::sum);
+                            counted = true;
+                        }
+                    }
+                }
+                // Only count first playable mana ability per source
+                if (counted) break;
+            }
+        }
+
+        // Also include mana currently in pool
+        int poolTotal = player.getManaPool().totalMana();
+
+        int total = poolTotal;
+        for (int v : colorCounts.values()) total += v;
+
+        if (total == 0) return;
+
+        sb.append("Available mana: ");
+        boolean first = true;
+        for (Map.Entry<Character, Integer> entry : colorCounts.entrySet()) {
+            if (entry.getValue() == 0) continue;
+            if (!first) sb.append(' ');
+            first = false;
+            char color = entry.getKey();
+            String label = color == 'A' ? "Any" : String.valueOf(color);
+            sb.append(entry.getValue()).append(label);
+        }
+        if (poolTotal > 0) {
+            if (!first) sb.append(' ');
+            sb.append("+").append(poolTotal).append(" in pool");
+        }
+        sb.append(" (").append(total).append(" total)\n");
     }
 
     private static void serializeBattlefield(StringBuilder sb, CardCollectionView cards) {
