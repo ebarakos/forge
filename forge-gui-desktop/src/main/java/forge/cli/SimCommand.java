@@ -224,11 +224,17 @@ public class SimCommand implements Callable<Integer> {
     )
     private boolean llmDebug;
 
+    @Option(
+        names = {"--llm-free"},
+        description = "Auto-append :free to OpenRouter model names (uses free tier, 50 req/day limit)."
+    )
+    private boolean llmFree;
+
     // === AI Profile Options ===
 
     @Option(
         names = {"-P", "--profile"},
-        description = "AI profile assignment as N:PROFILE (e.g. 1:Simulation 2:Default). LLM profiles: ollama:MODEL or openrouter:MODEL. Can be repeated.",
+        description = "AI profile assignment as N:PROFILE (e.g. 1:Simulation 2:Default). LLM profiles: ollama:MODEL, openrouter:MODEL, or cerebras:MODEL. Can be repeated.",
         paramLabel = "N:PROFILE"
     )
     private List<String> profileAssignments = new ArrayList<>();
@@ -376,6 +382,7 @@ public class SimCommand implements Callable<Integer> {
     public double getLlmBudget() { return llmBudget; }
     public int getLlmTimeout() { return llmTimeout; }
     public boolean isLlmDebug() { return llmDebug; }
+    public boolean isLlmFree() { return llmFree; }
 
     /**
      * Get the AI profile for a specific player (0-indexed).

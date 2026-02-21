@@ -191,6 +191,7 @@ public class AiProfileUtil {
         availableProfiles.addAll(getAvailableProfiles());
         availableProfiles.add(LLMConfig.LLM_LOCAL_DISPLAY);
         availableProfiles.add(LLMConfig.LLM_OPENROUTER_DISPLAY);
+        availableProfiles.add(LLMConfig.LLM_CEREBRAS_DISPLAY);
 
         return availableProfiles;
     }

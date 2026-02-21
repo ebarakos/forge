@@ -68,9 +68,10 @@ public class LLMClient {
         JsonObject body = new JsonObject();
         body.addProperty("model", config.getModel());
         body.addProperty("temperature", config.getTemperature());
-        // Omit max_tokens — let the provider use whatever the account can afford.
-        // Our prompts ask for just a number, so responses are naturally short.
-        // Note: OpenRouter 402 errors are a credits issue, not a max_tokens issue.
+        // Set max_tokens to bound token usage. Responses are short (numbers/indices),
+        // but thinking models need room for chain-of-thought reasoning.
+        int maxTokens = config.isThinkingModel() ? 16384 : 512;
+        body.addProperty("max_tokens", maxTokens);
 
         JsonArray messages = new JsonArray();
         JsonObject sysMsg = new JsonObject();

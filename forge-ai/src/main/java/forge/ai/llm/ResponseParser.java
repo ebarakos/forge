@@ -26,13 +26,40 @@ public final class ResponseParser {
     /**
      * Strip {@code <think>...</think>} blocks from content.
      * Some providers embed reasoning tokens directly in the content field.
+     * Also handles malformed closing tags (e.g. phi4-mini-reasoning outputs
+     * {@code </atech>} instead of {@code </think>}).
      */
     public static String stripThinkingTags(String content) {
         if (content == null) return null;
-        if (!content.contains("<think>") && !content.contains("<Think>")) {
+        if (!content.toLowerCase().contains("<think>")) {
             return content;
         }
-        return THINK_PATTERN.matcher(content).replaceAll("").strip();
+        // First try the well-formed pattern
+        String result = THINK_PATTERN.matcher(content).replaceAll("").strip();
+        // If the content still starts with <think>, the closing tag is malformed.
+        // Strip from <think> to the last </...> tag, keeping only what follows it.
+        if (result.toLowerCase().contains("<think>")) {
+            // Find the last occurrence of any closing tag like </think>, </atech>, etc.
+            int lastClose = result.lastIndexOf("</");
+            if (lastClose >= 0) {
+                int tagEnd = result.indexOf('>', lastClose);
+                if (tagEnd >= 0) {
+                    result = result.substring(tagEnd + 1).strip();
+                }
+            }
+            // If still contains <think>, just take everything after the last newline
+            if (result.toLowerCase().contains("<think>") || result.isEmpty()) {
+                String[] lines = content.split("\n");
+                for (int i = lines.length - 1; i >= 0; i--) {
+                    String line = lines[i].strip();
+                    if (!line.isEmpty() && !line.toLowerCase().contains("<think>")
+                            && !line.startsWith("</")) {
+                        return line;
+                    }
+                }
+            }
+        }
+        return result;
     }
 
     /**

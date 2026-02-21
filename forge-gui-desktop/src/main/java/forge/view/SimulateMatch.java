@@ -169,7 +169,8 @@ public class SimulateMatch {
         ORIGINAL_OUT.println();
         ORIGINAL_OUT.println("LLM profiles (use provider:model syntax):");
         ORIGINAL_OUT.println("  -P1 ollama:llama3              Local Ollama model");
-        ORIGINAL_OUT.println("  -P2 openrouter:deepseek/deepseek-chat  OpenRouter model");
+        ORIGINAL_OUT.println("  -P2 openrouter:google/gemini-2.5-flash:free  OpenRouter free model");
+        ORIGINAL_OUT.println("  -P2 cerebras:llama3.1-8b       Cerebras (1M tokens/day free)");
         return ExitCode.SUCCESS;
     }
 
@@ -311,7 +312,7 @@ public class SimulateMatch {
             if (LLMConfig.isLlmProfile(profile)) {
                 LLMConfig llmConfig = LLMConfig.fromProfileString(profile,
                         cmd.getLlmKey(), cmd.getLlmTemperature(), cmd.getLlmTimeout(),
-                        cmd.getLlmBudget(), cmd.isLlmDebug());
+                        cmd.getLlmBudget(), cmd.isLlmDebug(), cmd.isLlmFree());
                 if (llmConfig != null) {
                     LLMClient client = new LLMClient(llmConfig);
                     llmClients.put(entry.getKey(), client);
