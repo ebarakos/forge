@@ -19,6 +19,7 @@ import com.google.gson.GsonBuilder;
 import forge.LobbyPlayer;
 import forge.ai.llm.LLMClient;
 import forge.ai.llm.LLMConfig;
+import forge.ai.llm.LLMMode;
 import forge.ai.nn.EpsilonGreedyBridge;
 import forge.ai.nn.NNBridge;
 import forge.ai.nn.NNFullController;
@@ -100,8 +101,9 @@ public class SimulateMatch {
         NNBridge nnBridge;
         String nnExportDir;
         boolean nnFullMode;
-        // LLM mode field (null for regular AI players)
+        // LLM mode fields (null for regular AI players)
         LLMClient llmClient;
+        LLMMode llmMode;
 
         PlayerConfig(Deck deck, String name, String aiProfile, GameType gameType) {
             this.deck = deck;
@@ -118,7 +120,7 @@ public class SimulateMatch {
                 rp = new RegisteredPlayer((Deck) deck.copyTo(deck.getName()));
             }
             if (llmClient != null) {
-                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClient));
+                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClient, llmMode));
             } else if (nnBridge != null) {
                 rp.setPlayer(GamePlayerUtil.createNNPlayer(name, nnBridge, nnExportDir, nnFullMode));
             } else {
@@ -307,6 +309,7 @@ public class SimulateMatch {
 
         // Build per-player LLM clients (if profile is an LLM profile)
         Map<Integer, LLMClient> llmClients = new HashMap<>();
+        Map<Integer, LLMMode> llmModes = new HashMap<>();
         for (Map.Entry<Integer, String> entry : aiProfiles.entrySet()) {
             String profile = entry.getValue();
             if (LLMConfig.isLlmProfile(profile)) {
@@ -314,10 +317,17 @@ public class SimulateMatch {
                         cmd.getLlmKey(), cmd.getLlmTemperature(), cmd.getLlmTimeout(),
                         cmd.getLlmBudget(), cmd.isLlmDebug(), cmd.isLlmFree());
                 if (llmConfig != null) {
+                    // Global --llm-mode overrides per-player @mode suffix
+                    LLMMode effectiveMode = llmConfig.getMode();
+                    String globalMode = cmd.getLlmMode();
+                    if (globalMode != null && !globalMode.isEmpty()) {
+                        effectiveMode = LLMMode.fromString(globalMode);
+                    }
                     LLMClient client = new LLMClient(llmConfig);
                     llmClients.put(entry.getKey(), client);
+                    llmModes.put(entry.getKey(), effectiveMode);
                     ORIGINAL_ERR.println("Player " + (entry.getKey() + 1)
-                            + ": LLM mode (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")");
+                            + ": LLM " + effectiveMode + " (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")");
                 }
             }
         }
@@ -353,6 +363,7 @@ public class SimulateMatch {
             PlayerConfig config = new PlayerConfig(d, name, profile, type);
             if (llmClients.containsKey(i - 1)) {
                 config.llmClient = llmClients.get(i - 1);
+                config.llmMode = llmModes.getOrDefault(i - 1, LLMMode.HEAVY);
             } else if (nnBridge != null) {
                 String nnPlayerSetting = cmd.getNnPlayer();
                 boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
@@ -373,7 +384,8 @@ public class SimulateMatch {
                 rp = new RegisteredPlayer(d);
             }
             if (llmClients.containsKey(i - 1)) {
-                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClients.get(i - 1)));
+                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClients.get(i - 1),
+                        llmModes.getOrDefault(i - 1, LLMMode.HEAVY)));
             } else if (nnBridge != null) {
                 String nnPlayerSetting = cmd.getNnPlayer();
                 boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
@@ -760,6 +772,22 @@ public class SimulateMatch {
             double[] ci = WilsonInterval.calculate95(wins[p], results.size());
             ps.winRateCiLower = ci[0];
             ps.winRateCiUpper = ci[1];
+            // Populate LLM usage stats if this player is LLM-backed
+            if (playerConfigs.get(p).llmClient != null) {
+                LLMClient c = playerConfigs.get(p).llmClient;
+                SimulationResult.LlmUsage usage = new SimulationResult.LlmUsage();
+                usage.mode = playerConfigs.get(p).llmMode != null
+                        ? playerConfigs.get(p).llmMode.name() : "HEAVY";
+                usage.provider = c.getProvider();
+                usage.model = c.getModel();
+                usage.totalCalls = c.getTotalCalls();
+                usage.totalFallbacks = c.getTotalFallbacks();
+                usage.totalInputTokens = c.getTotalInputTokens();
+                usage.totalOutputTokens = c.getTotalOutputTokens();
+                usage.totalLatencyMs = c.getTotalLatencyMs();
+                usage.estimatedCost = c.getEstimatedCost();
+                ps.llmUsage = usage;
+            }
             jsonResult.summary.players.add(ps);
         }
 

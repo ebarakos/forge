@@ -27,6 +27,7 @@ public class LLMClient {
 
     // Thread-safe aggregate counters
     private final AtomicInteger totalCalls = new AtomicInteger(0);
+    private final AtomicInteger totalFallbacks = new AtomicInteger(0);
     private final AtomicInteger totalInputTokens = new AtomicInteger(0);
     private final AtomicInteger totalOutputTokens = new AtomicInteger(0);
     private final AtomicLong totalLatencyMs = new AtomicLong(0);
@@ -208,6 +209,7 @@ public class LLMClient {
 
     // Stats getters
     public int getTotalCalls() { return totalCalls.get(); }
+    public int getTotalFallbacks() { return totalFallbacks.get(); }
     public int getTotalInputTokens() { return totalInputTokens.get(); }
     public int getTotalOutputTokens() { return totalOutputTokens.get(); }
     public long getTotalLatencyMs() { return totalLatencyMs.get(); }
@@ -217,4 +219,12 @@ public class LLMClient {
             return estimatedCost;
         }
     }
+
+    /** Record that a fallback to heuristic occurred. */
+    public void recordFallback() { totalFallbacks.incrementAndGet(); }
+
+    // Config delegate getters for JSON output
+    public LLMMode getMode() { return config.getMode(); }
+    public String getModel() { return config.getModel(); }
+    public String getProvider() { return config.getProvider(); }
 }

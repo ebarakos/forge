@@ -5,10 +5,18 @@ package forge.ai.llm;
  */
 public final class LLMConfig {
 
-    // GUI display names for AI profile dropdown
+    // GUI display names for AI profile dropdown (legacy — default to HEAVY mode)
     public static final String LLM_LOCAL_DISPLAY = "LLM (Local)";
     public static final String LLM_OPENROUTER_DISPLAY = "LLM (OpenRouter Free)";
     public static final String LLM_CEREBRAS_DISPLAY = "LLM (Cerebras)";
+
+    // Mode-specific GUI display names
+    public static final String LLM_HEAVY_LOCAL_DISPLAY = "LLM Heavy (Local)";
+    public static final String LLM_LIGHT_LOCAL_DISPLAY = "LLM Light (Local)";
+    public static final String LLM_HEAVY_OPENROUTER_DISPLAY = "LLM Heavy (OpenRouter)";
+    public static final String LLM_LIGHT_OPENROUTER_DISPLAY = "LLM Light (OpenRouter)";
+    public static final String LLM_HEAVY_CEREBRAS_DISPLAY = "LLM Heavy (Cerebras)";
+    public static final String LLM_LIGHT_CEREBRAS_DISPLAY = "LLM Light (Cerebras)";
 
     // Default models for each provider
     private static final String DEFAULT_LOCAL_MODEL = "llama3";
@@ -26,6 +34,7 @@ public final class LLMConfig {
     private final double temperature;
     private final int timeoutMs;
     private final boolean debug;
+    private final LLMMode mode;
 
     // Shared across all LLM players
     private final double budgetLimit;  // 0 = unlimited
@@ -39,6 +48,7 @@ public final class LLMConfig {
         this.timeoutMs = b.timeoutMs;
         this.debug = b.debug;
         this.budgetLimit = b.budgetLimit;
+        this.mode = b.mode;
     }
 
     public String getApiBaseUrl() { return apiBaseUrl; }
@@ -49,6 +59,7 @@ public final class LLMConfig {
     public int getTimeoutMs() { return timeoutMs; }
     public boolean isDebug() { return debug; }
     public double getBudgetLimit() { return budgetLimit; }
+    public LLMMode getMode() { return mode; }
 
     /** Returns true if this model is a thinking/reasoning model that produces chain-of-thought tokens. */
     public boolean isThinkingModel() {
@@ -68,6 +79,19 @@ public final class LLMConfig {
                                                double budgetLimit, boolean debug,
                                                boolean free) {
         if (profile == null) return null;
+
+        // Extract @mode suffix (e.g., "cerebras:llama3.1-8b@light")
+        LLMMode mode = LLMMode.HEAVY;
+        int atIdx = profile.lastIndexOf('@');
+        if (atIdx > 0) {
+            String modeSuffix = profile.substring(atIdx + 1).trim();
+            LLMMode parsed = LLMMode.fromString(modeSuffix);
+            // Only strip if it's a recognized mode (avoid stripping from model names)
+            if ("heavy".equalsIgnoreCase(modeSuffix) || "light".equalsIgnoreCase(modeSuffix)) {
+                mode = parsed;
+                profile = profile.substring(0, atIdx);
+            }
+        }
 
         String lower = profile.toLowerCase().trim();
         String provider;
@@ -117,6 +141,7 @@ public final class LLMConfig {
                 .timeoutMs(effectiveTimeout)
                 .budgetLimit(budgetLimit)
                 .debug(debug)
+                .mode(mode)
                 .build();
     }
 
@@ -136,17 +161,26 @@ public final class LLMConfig {
     /** Returns true if the profile string is an LLM GUI display name. */
     public static boolean isLlmDisplayProfile(String profile) {
         return LLM_LOCAL_DISPLAY.equals(profile) || LLM_OPENROUTER_DISPLAY.equals(profile)
-                || LLM_CEREBRAS_DISPLAY.equals(profile);
+                || LLM_CEREBRAS_DISPLAY.equals(profile)
+                || LLM_HEAVY_LOCAL_DISPLAY.equals(profile) || LLM_LIGHT_LOCAL_DISPLAY.equals(profile)
+                || LLM_HEAVY_OPENROUTER_DISPLAY.equals(profile) || LLM_LIGHT_OPENROUTER_DISPLAY.equals(profile)
+                || LLM_HEAVY_CEREBRAS_DISPLAY.equals(profile) || LLM_LIGHT_CEREBRAS_DISPLAY.equals(profile);
     }
 
-    /** Maps a GUI display name to the internal profile string (e.g. "ollama:llama3"). */
+    /** Maps a GUI display name to the internal profile string (e.g. "ollama:llama3@light"). */
     public static String toProfileString(String displayName) {
-        if (LLM_LOCAL_DISPLAY.equals(displayName)) {
-            return "ollama:" + DEFAULT_LOCAL_MODEL;
-        } else if (LLM_OPENROUTER_DISPLAY.equals(displayName)) {
-            return "openrouter:" + DEFAULT_OPENROUTER_MODEL;
-        } else if (LLM_CEREBRAS_DISPLAY.equals(displayName)) {
-            return "cerebras:" + DEFAULT_CEREBRAS_MODEL;
+        if (LLM_LOCAL_DISPLAY.equals(displayName) || LLM_HEAVY_LOCAL_DISPLAY.equals(displayName)) {
+            return "ollama:" + DEFAULT_LOCAL_MODEL + "@heavy";
+        } else if (LLM_LIGHT_LOCAL_DISPLAY.equals(displayName)) {
+            return "ollama:" + DEFAULT_LOCAL_MODEL + "@light";
+        } else if (LLM_OPENROUTER_DISPLAY.equals(displayName) || LLM_HEAVY_OPENROUTER_DISPLAY.equals(displayName)) {
+            return "openrouter:" + DEFAULT_OPENROUTER_MODEL + "@heavy";
+        } else if (LLM_LIGHT_OPENROUTER_DISPLAY.equals(displayName)) {
+            return "openrouter:" + DEFAULT_OPENROUTER_MODEL + "@light";
+        } else if (LLM_CEREBRAS_DISPLAY.equals(displayName) || LLM_HEAVY_CEREBRAS_DISPLAY.equals(displayName)) {
+            return "cerebras:" + DEFAULT_CEREBRAS_MODEL + "@heavy";
+        } else if (LLM_LIGHT_CEREBRAS_DISPLAY.equals(displayName)) {
+            return "cerebras:" + DEFAULT_CEREBRAS_MODEL + "@light";
         }
         return null;
     }
@@ -212,6 +246,7 @@ public final class LLMConfig {
         private int timeoutMs = 30000;
         private boolean debug = false;
         private double budgetLimit = 0;
+        private LLMMode mode = LLMMode.HEAVY;
 
         public Builder apiBaseUrl(String url) { this.apiBaseUrl = url; return this; }
         public Builder apiKey(String key) { this.apiKey = key; return this; }
@@ -221,6 +256,7 @@ public final class LLMConfig {
         public Builder timeoutMs(int ms) { this.timeoutMs = ms; return this; }
         public Builder debug(boolean d) { this.debug = d; return this; }
         public Builder budgetLimit(double limit) { this.budgetLimit = limit; return this; }
+        public Builder mode(LLMMode m) { this.mode = m; return this; }
 
         public LLMConfig build() { return new LLMConfig(this); }
     }

@@ -55,16 +55,29 @@ import java.util.function.Predicate;
 public class LLMFullController extends PlayerControllerAi {
 
     private final LLMClient client;
+    private final LLMMode mode;
     private volatile boolean budgetExceeded = false;
 
     /** Sliding window of recent action summaries for LLM context. */
     private final List<String> actionHistory = new ArrayList<>();
     private static final int MAX_HISTORY = 10;
 
-    public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
+    public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client, LLMMode mode) {
         super(game, p, lp);
         this.client = client;
+        this.mode = mode != null ? mode : LLMMode.HEAVY;
     }
+
+    public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
+        this(game, p, lp, client, LLMMode.HEAVY);
+    }
+
+    /** Returns true if this controller is in LIGHT mode (fewer LLM calls). */
+    private boolean isLightMode() {
+        return mode == LLMMode.LIGHT;
+    }
+
+    public LLMMode getMode() { return mode; }
 
     /** Record an action summary for the sliding window history. */
     private void recordAction(String summary) {
@@ -101,6 +114,7 @@ public class LLMFullController extends PlayerControllerAi {
      * AND the player has affordable instant-speed spells in hand.
      */
     private boolean shouldCallLLMForInstantSpeed() {
+        if (isLightMode()) return false;
         try {
             // Check if there's a reason to respond at instant speed
             boolean hasStackTarget = !getGame().getStack().isEmpty();
@@ -152,11 +166,13 @@ public class LLMFullController extends PlayerControllerAi {
                 if (client.isDebug()) {
                     System.err.println("[LLM FALLBACK] " + callLabel + ": parse failed");
                 }
+                client.recordFallback();
                 return -1;
             }
             return choice;
         } catch (BudgetExceededException e) {
             budgetExceeded = true;
+            client.recordFallback();
             return -1;
         } catch (Exception e) {
             if (e instanceof BudgetExceededException) {
@@ -166,6 +182,7 @@ public class LLMFullController extends PlayerControllerAi {
                 System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
                         + " - " + e.getMessage());
             }
+            client.recordFallback();
             return -1;
         }
     }
@@ -184,12 +201,14 @@ public class LLMFullController extends PlayerControllerAi {
                     callLabel, getPlayer().getName());
         } catch (BudgetExceededException e) {
             budgetExceeded = true;
+            client.recordFallback();
             return null;
         } catch (Exception e) {
             if (client.isDebug()) {
                 System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
                         + " - " + e.getMessage());
             }
+            client.recordFallback();
             return null;
         }
     }
@@ -530,6 +549,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public void declareAttackers(Player attacker, Combat combat) {
+        if (isLightMode()) { super.declareAttackers(attacker, combat); return; }
         CardCollection potentialAttackers = attacker.getCreaturesInPlay();
         List<GameEntity> defenders = new ArrayList<>(combat.getDefenders());
         GameEntity defaultDefender = defenders.isEmpty() ? null : defenders.get(0);
@@ -592,6 +612,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
+        if (isLightMode()) { super.declareBlockers(defender, combat); return; }
         CardCollection attackers = combat.getAttackers();
         if (attackers.isEmpty()) {
             return;
@@ -704,6 +725,7 @@ public class LLMFullController extends PlayerControllerAi {
             FCollectionView<T> optionList, DelayedReveal delayedReveal,
             SpellAbility sa, String title, boolean isOptional,
             Player targetedPlayer, Map<String, Object> params) {
+        if (isLightMode()) return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, targetedPlayer, params);
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
@@ -718,6 +740,7 @@ public class LLMFullController extends PlayerControllerAi {
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(
             FCollectionView<T> optionList, int min, int max, DelayedReveal delayedReveal,
             SpellAbility sa, String title, Player targetedPlayer, Map<String, Object> params) {
+        if (isLightMode()) return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title, targetedPlayer, params);
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
@@ -742,6 +765,7 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public SpellAbility chooseSingleSpellForEffect(List<SpellAbility> spells, SpellAbility sa,
                                                     String title, Map<String, Object> params) {
+        if (isLightMode()) return super.chooseSingleSpellForEffect(spells, sa, title, params);
         SpellAbility result = chooseFromSpellAbilities(spells, title);
         return result != null ? result : super.chooseSingleSpellForEffect(spells, sa, title, params);
     }
@@ -749,6 +773,7 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa,
                                                              String title, int num, Map<String, Object> params) {
+        if (isLightMode()) return super.chooseSpellAbilitiesForEffect(spells, sa, title, num, params);
         List<SpellAbility> remaining = new ArrayList<>(spells);
         List<SpellAbility> selected = new ArrayList<>();
         for (int i = 0; i < num && !remaining.isEmpty(); i++) {
@@ -779,12 +804,14 @@ public class LLMFullController extends PlayerControllerAi {
     public CardCollectionView chooseCardsForEffect(CardCollectionView sourceList, SpellAbility sa,
                                                     String title, int min, int max,
                                                     boolean isOptional, Map<String, Object> params) {
+        if (isLightMode()) return super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
         return chooseMultipleCards(sourceList, min, max, isOptional, title);
     }
 
     @Override
     public CardCollection chooseCardsForEffectMultiple(Map<String, CardCollection> validMap,
                                                         SpellAbility sa, String title, boolean isOptional) {
+        if (isLightMode()) return super.chooseCardsForEffectMultiple(validMap, sa, title, isOptional);
         CardCollection choices = new CardCollection();
         for (Map.Entry<String, CardCollection> entry : validMap.entrySet()) {
             CardCollection cc = new CardCollection(entry.getValue());
@@ -819,11 +846,13 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public CardCollectionView chooseCardsToDelve(int genericAmount, CardCollection grave) {
+        if (isLightMode()) return super.chooseCardsToDelve(genericAmount, grave);
         return chooseMultipleCards(grave, 0, genericAmount, true, "Choose cards to delve");
     }
 
     @Override
     public CardCollection chooseCardsToRevealFromHand(int min, int max, CardCollectionView valid) {
+        if (isLightMode()) return super.chooseCardsToRevealFromHand(min, max, valid);
         return chooseMultipleCards(valid, min, max, min == 0, "Choose cards to reveal");
     }
 
@@ -832,6 +861,7 @@ public class LLMFullController extends PlayerControllerAi {
                                                SpellAbility sa, CardCollection fetchList,
                                                DelayedReveal delayedReveal, String selectPrompt,
                                                boolean isOptional, Player decider) {
+        if (isLightMode()) return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider);
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
@@ -868,6 +898,7 @@ public class LLMFullController extends PlayerControllerAi {
                                                 SpellAbility sa, CardCollection fetchList,
                                                 int min, int max, DelayedReveal delayedReveal,
                                                 String selectPrompt, Player decider) {
+        if (isLightMode()) return super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max, delayedReveal, selectPrompt, decider);
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
@@ -903,18 +934,21 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, int min, int max) {
+        if (isLightMode()) return super.chooseNumber(sa, title, min, max);
         return chooseNumberLLM(min, max, title);
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, int min, int max,
                              Map<String, Object> params) {
+        if (isLightMode()) return super.chooseNumber(sa, title, min, max, params);
         return chooseNumberLLM(min, max, title);
     }
 
     @Override
     public int chooseNumber(SpellAbility sa, String title, List<Integer> values,
                              Player relatedPlayer) {
+        if (isLightMode()) return super.chooseNumber(sa, title, values, relatedPlayer);
         if (values == null || values.isEmpty()) { return 0; }
         if (values.size() == 1) { return values.get(0); }
         Integer result = chooseFromGenericList(values, title);
@@ -923,12 +957,14 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public int chooseNumberForCostReduction(SpellAbility sa, int min, int max) {
+        if (isLightMode()) return super.chooseNumberForCostReduction(sa, min, max);
         return chooseNumberLLM(min, max, "Choose cost reduction amount");
     }
 
     @Override
     public int chooseNumberForKeywordCost(SpellAbility sa, forge.game.cost.Cost cost,
                                            KeywordInterface keyword, String prompt, int max) {
+        if (isLightMode()) return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
         return chooseNumberLLM(0, max, prompt);
     }
 
@@ -943,6 +979,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+        if (isLightMode()) return super.arrangeForScry(topN);
         if (topN.size() <= 1) {
             // Single card: one LLM call with top/bottom choice
             CardCollection toTop = new CardCollection();
@@ -980,6 +1017,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+        if (isLightMode()) return super.arrangeForSurveil(topN);
         if (topN.size() <= 1) {
             CardCollection toTop = new CardCollection();
             CardCollection toGraveyard = new CardCollection();
@@ -1019,6 +1057,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
+        if (isLightMode()) return super.chooseColor(message, sa, colors);
         if (colors.countColors() <= 1) {
             return super.chooseColor(message, sa, colors);
         }
@@ -1038,6 +1077,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public byte chooseColorAllowColorless(String message, Card c, ColorSet colors) {
+        if (isLightMode()) return super.chooseColorAllowColorless(message, c, colors);
         List<String> colorNames = new ArrayList<>();
         List<MagicColor.Color> colorList = new ArrayList<>();
         for (MagicColor.Color col : colors) {
@@ -1066,6 +1106,7 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public String chooseSomeType(String kindOfType, SpellAbility sa, Collection<String> validTypes,
                                   boolean isOptional) {
+        if (isLightMode()) return super.chooseSomeType(kindOfType, sa, validTypes, isOptional);
         List<String> types = new ArrayList<>(validTypes);
         if (types.isEmpty()) { return ""; }
         String result = chooseFromStringList(types, "Choose a " + kindOfType);
@@ -1074,6 +1115,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public String chooseSector(Card assignee, String ai, List<String> sectors) {
+        if (isLightMode()) return super.chooseSector(assignee, ai, sectors);
         String result = chooseFromStringList(sectors, "Choose sector");
         return result != null ? result : sectors.get(0);
     }
@@ -1085,6 +1127,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public String chooseProtectionType(String string, SpellAbility sa, List<String> choices) {
+        if (isLightMode()) return super.chooseProtectionType(string, sa, choices);
         String result = chooseFromStringList(choices, "Choose protection type");
         return result != null ? result : choices.get(0);
     }
@@ -1092,6 +1135,7 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public String chooseKeywordForPump(List<String> options, SpellAbility sa, String prompt,
                                         Card tgtCard) {
+        if (isLightMode()) return super.chooseKeywordForPump(options, sa, prompt, tgtCard);
         if (options == null || options.isEmpty()) { return null; }
         String result = chooseFromStringList(options, prompt);
         return result != null ? result : options.get(0);
@@ -1100,6 +1144,7 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public CounterType chooseCounterType(List<CounterType> options, SpellAbility sa, String prompt,
                                           Map<String, Object> params) {
+        if (isLightMode()) return super.chooseCounterType(options, sa, prompt, params);
         if (options == null || options.isEmpty()) { return null; }
         if (options.size() == 1) { return options.get(0); }
         return chooseFromGenericList(options, prompt);
@@ -1111,6 +1156,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public ICardFace chooseSingleCardFace(SpellAbility sa, List<ICardFace> faces, String message) {
+        if (isLightMode()) return super.chooseSingleCardFace(sa, faces, message);
         if (faces == null || faces.isEmpty()) { return null; }
         if (faces.size() == 1) { return faces.get(0); }
         return chooseFromGenericList(faces, message);
@@ -1119,6 +1165,7 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public CardState chooseSingleCardState(SpellAbility sa, List<CardState> states, String message,
                                             Map<String, Object> params) {
+        if (isLightMode()) return super.chooseSingleCardState(sa, states, message, params);
         if (states == null || states.isEmpty()) { return null; }
         if (states.size() == 1) { return states.get(0); }
         return chooseFromGenericList(states, message);
@@ -1130,6 +1177,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public ReplacementEffect chooseSingleReplacementEffect(List<ReplacementEffect> possibleReplacers) {
+        if (isLightMode()) return super.chooseSingleReplacementEffect(possibleReplacers);
         if (possibleReplacers == null || possibleReplacers.size() <= 1) {
             return super.chooseSingleReplacementEffect(possibleReplacers);
         }
@@ -1138,6 +1186,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public StaticAbility chooseSingleStaticAbility(String prompt, List<StaticAbility> possibleStatics) {
+        if (isLightMode()) return super.chooseSingleStaticAbility(prompt, possibleStatics);
         if (possibleStatics == null || possibleStatics.size() <= 1) {
             return super.chooseSingleStaticAbility(prompt, possibleStatics);
         }
@@ -1171,11 +1220,13 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public PlanarDice choosePDRollToIgnore(List<PlanarDice> rolls) {
+        if (isLightMode()) return super.choosePDRollToIgnore(rolls);
         return chooseFromGenericList(rolls, "Choose roll to ignore");
     }
 
     @Override
     public Integer chooseRollToIgnore(List<Integer> rolls) {
+        if (isLightMode()) return super.chooseRollToIgnore(rolls);
         return chooseFromGenericList(rolls, "Choose roll to ignore");
     }
 
@@ -1183,17 +1234,20 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public Integer chooseRollToModify(List<Integer> rolls) {
+        if (isLightMode()) return super.chooseRollToModify(rolls);
         return chooseFromGenericList(rolls, "Choose roll to modify");
     }
 
     @Override
     public RollDiceEffect.DieRollResult chooseRollToSwap(List<RollDiceEffect.DieRollResult> rolls) {
+        if (isLightMode()) return super.chooseRollToSwap(rolls);
         return chooseFromGenericList(rolls, "Choose roll to swap");
     }
 
     @Override
     public String chooseRollSwapValue(List<String> swapChoices, Integer currentResult,
                                        int power, int toughness) {
+        if (isLightMode()) return super.chooseRollSwapValue(swapChoices, currentResult, power, toughness);
         return chooseFromStringList(swapChoices, "Choose swap value");
     }
 
@@ -1204,6 +1258,7 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public Object vote(SpellAbility sa, String prompt, List<Object> options,
                         ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) {
+        if (isLightMode()) return super.vote(sa, prompt, options, votes, forPlayer, optional);
         if (options == null || options.isEmpty()) { return null; }
         return chooseFromGenericList(options, prompt);
     }
@@ -1215,6 +1270,7 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(
             SpellAbility sa, List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) {
+        if (isLightMode()) return super.chooseTarget(sa, allTargets);
         return chooseFromGenericList(allTargets, "Choose target");
     }
 
@@ -1230,6 +1286,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public PlayerZone chooseStartingHand(List<PlayerZone> zones) {
+        if (isLightMode()) return super.chooseStartingHand(zones);
         return chooseFromGenericList(zones, "Choose starting hand");
     }
 
@@ -1244,6 +1301,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public Mana chooseManaFromPool(List<Mana> manaChoices) {
+        if (isLightMode()) return super.chooseManaFromPool(manaChoices);
         return chooseFromGenericList(manaChoices, "Choose mana from pool");
     }
 

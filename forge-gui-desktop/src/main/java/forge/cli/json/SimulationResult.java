@@ -67,6 +67,23 @@ public class SimulationResult {
         public Double winRateCiLower;
         /** Wilson score 95% confidence interval upper bound (percentage) */
         public Double winRateCiUpper;
+        /** LLM usage stats (null if player is not LLM-backed) */
+        public LlmUsage llmUsage;
+    }
+
+    /**
+     * LLM usage statistics for a player across all games.
+     */
+    public static class LlmUsage {
+        public String mode;
+        public String provider;
+        public String model;
+        public int totalCalls;
+        public int totalFallbacks;
+        public int totalInputTokens;
+        public int totalOutputTokens;
+        public long totalLatencyMs;
+        public double estimatedCost;
     }
 
     /**

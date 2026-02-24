@@ -230,6 +230,14 @@ public class SimCommand implements Callable<Integer> {
     )
     private boolean llmFree;
 
+    @Option(
+        names = {"--llm-mode"},
+        description = "LLM decision mode: heavy (LLM handles most decisions) or light (LLM handles only spells/mulligan/discard/sacrifice). Overrides per-player @mode suffix.",
+        defaultValue = "",
+        paramLabel = "MODE"
+    )
+    private String llmMode;
+
     // === AI Profile Options ===
 
     @Option(
@@ -383,6 +391,7 @@ public class SimCommand implements Callable<Integer> {
     public int getLlmTimeout() { return llmTimeout; }
     public boolean isLlmDebug() { return llmDebug; }
     public boolean isLlmFree() { return llmFree; }
+    public String getLlmMode() { return llmMode; }
 
     /**
      * Get the AI profile for a specific player (0-indexed).

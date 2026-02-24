@@ -6,6 +6,7 @@ import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.llm.LLMClient;
 import forge.ai.llm.LLMConfig;
+import forge.ai.llm.LLMMode;
 import forge.ai.llm.LobbyPlayerLLM;
 import forge.ai.nn.LobbyPlayerNN;
 import forge.ai.nn.NNBridge;
@@ -121,16 +122,21 @@ public final class GamePlayerUtil {
      *
      * @param name   player display name
      * @param client LLMClient instance for API calls
+     * @param mode   LLM decision routing mode (HEAVY or LIGHT)
      */
-    public static LobbyPlayer createLLMPlayer(String name, LLMClient client) {
-        LobbyPlayerLLM player = new LobbyPlayerLLM(name, client);
+    public static LobbyPlayer createLLMPlayer(String name, LLMClient client, LLMMode mode) {
+        LobbyPlayerLLM player = new LobbyPlayerLLM(name, client, mode);
         player.setAiProfile("Default");
         return player;
     }
 
+    public static LobbyPlayer createLLMPlayer(String name, LLMClient client) {
+        return createLLMPlayer(name, client, LLMMode.HEAVY);
+    }
+
     /**
      * Create an LLM-backed AI player from a GUI display profile name
-     * (e.g. "LLM (Local)" or "LLM (OpenRouter)").
+     * (e.g. "LLM (Local)" or "LLM Heavy (Cerebras)").
      */
     public static LobbyPlayer createLLMPlayerFromProfile(String name, String displayProfile) {
         String profileString = LLMConfig.toProfileString(displayProfile);
@@ -140,9 +146,10 @@ public final class GamePlayerUtil {
                 0.2, 0, 0, debug);
         System.err.println("[LLM] Creating " + displayProfile + " player '" + name
                 + "' → " + config.getProvider() + ":" + config.getModel()
+                + " mode=" + config.getMode()
                 + " (apiKey=" + (apiKey != null ? "set" : "MISSING") + ", debug=" + debug + ")");
         LLMClient client = new LLMClient(config);
-        return createLLMPlayer(name, client);
+        return createLLMPlayer(name, client, config.getMode());
     }
 
     public static void setPlayerName() {
