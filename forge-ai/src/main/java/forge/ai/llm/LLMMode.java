@@ -2,8 +2,9 @@ package forge.ai.llm;
 
 /**
  * LLM decision routing mode.
- * HEAVY: LLM handles most decisions (attacks, blocks, effects, colors, etc.)
- * LIGHT: LLM handles only key strategic decisions (spells, mulligan, discard, sacrifice)
+ * HEAVY: LLM handles most decisions (attacks, blocks, effects, colors, scry, etc.)
+ * LIGHT: LLM handles only spell selection (MAIN phases) and mulligan decisions;
+ *        all other decisions (combat, discard, sacrifice, card choices) use the heuristic AI.
  */
 public enum LLMMode {
     HEAVY, LIGHT;

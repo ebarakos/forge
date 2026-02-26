@@ -529,6 +529,7 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(Player mulliganingPlayer, int cardsToReturn) {
+        if (isLightMode()) return super.tuckCardsViaMulligan(mulliganingPlayer, cardsToReturn);
         CardCollection hand = new CardCollection(getPlayer().getCardsIn(ZoneType.Hand));
         if (hand.size() <= cardsToReturn) {
             return CardCollection.getView(hand);
@@ -791,12 +792,14 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public CardCollectionView choosePermanentsToSacrifice(SpellAbility sa, int min, int max,
                                                            CardCollectionView validTargets, String message) {
+        if (isLightMode()) return super.choosePermanentsToSacrifice(sa, min, max, validTargets, message);
         return chooseMultipleCards(validTargets, min, max, min == 0, "Choose permanents to sacrifice: " + message);
     }
 
     @Override
     public CardCollectionView choosePermanentsToDestroy(SpellAbility sa, int min, int max,
                                                          CardCollectionView validTargets, String message) {
+        if (isLightMode()) return super.choosePermanentsToDestroy(sa, min, max, validTargets, message);
         return chooseMultipleCards(validTargets, min, max, min == 0, "Choose permanents to destroy: " + message);
     }
 
@@ -829,17 +832,20 @@ public class LLMFullController extends PlayerControllerAi {
     @Override
     public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa,
                                                     CardCollection validCards, int min, int max) {
+        if (isLightMode()) return super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max);
         return chooseMultipleCards(validCards, min, max, false, "Choose cards to discard");
     }
 
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int num, CardCollectionView hand,
                                                               String param, SpellAbility sa) {
+        if (isLightMode()) return super.chooseCardsToDiscardUnlessType(num, hand, param, sa);
         return chooseMultipleCards(hand, 1, num, false, "Choose cards to discard");
     }
 
     @Override
     public CardCollection chooseCardsToDiscardToMaximumHandSize(int numDiscard) {
+        if (isLightMode()) return super.chooseCardsToDiscardToMaximumHandSize(numDiscard);
         CardCollection hand = new CardCollection(getPlayer().getCardsIn(ZoneType.Hand));
         return chooseMultipleCards(hand, numDiscard, numDiscard, false, "Discard to hand size");
     }

@@ -169,3 +169,8 @@ This file tracks major changes, architectural decisions, and milestones for the 
   - CLI: `--nn-hybrid`, `--nn-full`, `--nn-model FILE`, `--nn-random`, `--nn-export DIR`
   - Key fixes during implementation: lazy file creation prevents empty files from snapshot restore, null-check `getPhase()` during early game setup, `finishGame()` hook records outcomes from SimulateMatch after each game
 - **Why**: Enables external NN training loop: generate training data via random play (`--nn-random --nn-export`), train ONNX model externally, then evaluate via `--nn-model`. Hybrid mode lets NN control 6 critical decisions while heuristic AI handles the rest; full mode gives NN total control for end-to-end learning.
+
+## [2026-02-26] Refine LLM Light Mode — Delegate More to Heuristic
+- **Type**: Feature
+- **Description**: Narrowed LLM Light mode to only spell selection + mulligan. Added `isLightMode()` guards to 6 methods: `tuckCardsViaMulligan`, `choosePermanentsToSacrifice`, `choosePermanentsToDestroy`, `chooseCardsToDiscardFrom`, `chooseCardsToDiscardUnlessType`, `chooseCardsToDiscardToMaximumHandSize`. Updated `LLMMode.java` Javadoc. Improved spell selection prompt: "PASS (last option)" + "prefer acting over passing".
+- **Why**: Benchmarks (Ollama llama3, Burn vs Dimir Faeries, 10 games) show Light 80% vs Heavy 60% win rate against heuristic baseline. Light uses 28% fewer calls (13.1 vs 18.3/game), 32% fewer tokens (98K vs 143K), 28% faster (28s vs 39s/game). Small models make worse tactical decisions than heuristic AI — LLM adds value only on strategic spell selection.

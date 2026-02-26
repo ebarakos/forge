@@ -30,7 +30,8 @@ public final class PromptTemplates {
      * Build a user prompt for a spell selection decision.
      */
     public static String spellSelection(String gameState, String options) {
-        return gameState + "\nChoose a spell or ability to play, or PASS.\n\n" + options;
+        return gameState + "\nChoose a spell or ability to play, or PASS (last option).\n"
+                + "If you have mana available and a good play, prefer acting over passing.\n\n" + options;
     }
 
     /**
