@@ -1185,14 +1185,30 @@ public class NNFullController extends PlayerControllerAi {
     // - getAbilityToPlay(): trigger event handling
     // - chooseSingleCardFace(predicate): throws UnsupportedOperationException in parent
 
+    /** Expose the data writer so SimulateMatch can wire up cross-player mirror data. */
+    public TrainingDataWriter getDataWriter() {
+        return dataWriter;
+    }
+
     /**
-     * Record the game outcome and close the training data writer.
-     * Called by SimulateMatch after each game ends.
+     * Record the game outcome, optionally writing a mirror file from the
+     * opponent's buffered decisions. Called by SimulateMatch after each game ends.
+     *
+     * @param won             true if this controller's player won
+     * @param turns           turn count at game end
+     * @param reason          win condition string
+     * @param mirrorDecisions decisions buffered by the opponent's controller
+     *                        (already encoded from the opponent's POV), or null
      */
-    public void finishGame(boolean won, int turns, String reason) {
+    public void finishGame(boolean won, int turns, String reason,
+                           java.util.List<TrainingDataWriter.DecisionRecord> mirrorDecisions) {
         if (dataWriter != null) {
-            dataWriter.recordOutcome(won ? 1.0f : 0.0f, turns, reason);
-            dataWriter.close();
+            dataWriter.recordOutcome(won ? 1.0f : 0.0f, turns, reason, mirrorDecisions);
         }
+    }
+
+    /** Backward-compatible overload — no mirror file. */
+    public void finishGame(boolean won, int turns, String reason) {
+        finishGame(won, turns, reason, null);
     }
 }

@@ -15,11 +15,19 @@ import forge.game.zone.ZoneType;
 /**
  * Encodes game state into a fixed-size float tensor for neural network input.
  *
- * Layout (total STATE_SIZE = 664):
+ * Layout (total STATE_SIZE = 704):
  *   [0..23]    Global features (life, hand size, phase, mana, etc.)
- *   [24..279]  My battlefield (16 slots x 16 features)
- *   [280..535] Opponent battlefield (16 slots x 16 features)
- *   [536..663] My hand (8 slots x 16 features)
+ *   [24..295]  My battlefield (16 slots x 17 features)
+ *   [296..567] Opponent battlefield (16 slots x 17 features)
+ *   [568..703] My hand (8 slots x 17 features)
+ *
+ * Per-card features (17 floats):
+ *   [0]  present, [1] CMC/10, [2] power/20, [3] toughness/20,
+ *   [4]  is_creature, [5] is_land, [6] is_instant_or_sorcery,
+ *   [7]  is_enchantment, [8] is_artifact,
+ *   [9]  color_W, [10] color_U, [11] color_B, [12] color_R, [13] color_G,
+ *   [14] is_tapped, [15] has_summoning_sickness,
+ *   [16] card_id (CardVocabulary index / CARD_VOCAB_SIZE)
  */
 public final class GameStateEncoder {
 
@@ -98,7 +106,7 @@ public final class GameStateEncoder {
     }
 
     /**
-     * Encode a single card into a float[16] feature vector.
+     * Encode a single card into a float[17] feature vector.
      * This is reused by {@link OptionEncoder} for option encoding.
      *
      * @param card the card to encode
@@ -126,6 +134,10 @@ public final class GameStateEncoder {
 
         features[14] = card.isTapped() ? 1.0f : 0.0f;               // is_tapped
         features[15] = card.hasSickness() ? 1.0f : 0.0f;            // has_summoning_sickness
+
+        // Card identity: hash-based vocabulary index, normalized to [0, 1)
+        features[16] = CardVocabulary.getIndex(card.getName())
+                / (float) NNConstants.CARD_VOCAB_SIZE;               // card_id
 
         return features;
     }

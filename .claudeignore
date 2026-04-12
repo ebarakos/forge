@@ -54,3 +54,15 @@ docs/
 # Build/release configs
 forge-gui/release-files/
 forge-gui-desktop/filters/
+
+# Card image cache (18MB, binary)
+cache/
+
+# Debug logs and benchmark output files at root
+*.log
+heavy-vs-heuristic.json
+heavy-vs-light.json
+light-vs-heuristic.json
+
+# Binary JARs (unreadable)
+**/*.jar

@@ -70,19 +70,81 @@ public class SimulateMatch {
 
     /**
      * Record game outcome and close training data writers for NN controllers.
+     *
+     * <p>When exactly one NN controller has a data writer and the other player is
+     * not an NN controller (heuristic), no mirror file is produced because the
+     * heuristic player makes decisions outside the NN pipeline.
+     *
+     * <p>When exactly two NN controllers are present and both have data writers,
+     * the <em>first</em> controller also writes a mirror file containing the
+     * second player's buffered decisions (encoded from the second player's own
+     * perspective, so no state flip is needed) with the outcome inverted.
+     * The second controller writes only its primary file. This produces three
+     * distinct files per game: P1's perspective, P2's perspective (primary), and
+     * P2's perspective again as P1's mirror — the last two being identical in
+     * content but written by different code paths. In practice the Python data
+     * loader simply loads all JSONL files from the export directory, so the extra
+     * copy is harmless (and can be deduplicated later if desired).
+     *
+     * <p>The mirror data is passed as {@code mirrorDecisions} to
+     * {@link NNFullController#finishGame} / {@link NNHybridController#finishGame},
+     * which delegate to
+     * {@link forge.ai.nn.TrainingDataWriter#recordOutcome(float, int, String, List)}.
      */
     private static void finishNNControllers(Game game) {
         if (game == null || game.getOutcome() == null) return;
-        for (forge.game.player.Player p : game.getRegisteredPlayers()) {
+
+        // Gather (controller, player, dataWriter) triples for NN players only.
+        // We need the writer references before any finishGame call closes them.
+        List<forge.game.player.Player> players = new ArrayList<>(game.getRegisteredPlayers());
+        List<Object[]> nnEntries = new ArrayList<>(); // [controller, player, dataWriter]
+        for (forge.game.player.Player p : players) {
             forge.game.player.PlayerController ctrl = p.getController();
+            forge.ai.nn.TrainingDataWriter dw = null;
             if (ctrl instanceof NNFullController) {
-                boolean won = !game.getOutcome().isDraw() && game.getOutcome().isWinner(p.getLobbyPlayer());
-                ((NNFullController) ctrl).finishGame(won, game.getPhaseHandler().getTurn(),
-                        game.getOutcome().getWinCondition().toString());
+                dw = ((NNFullController) ctrl).getDataWriter();
             } else if (ctrl instanceof NNHybridController) {
-                boolean won = !game.getOutcome().isDraw() && game.getOutcome().isWinner(p.getLobbyPlayer());
-                ((NNHybridController) ctrl).finishGame(won, game.getPhaseHandler().getTurn(),
-                        game.getOutcome().getWinCondition().toString());
+                dw = ((NNHybridController) ctrl).getDataWriter();
+            }
+            if (dw != null) {
+                nnEntries.add(new Object[]{ctrl, p, dw});
+            }
+        }
+
+        // Snapshot each writer's decision buffer before calling finishGame.
+        // finishGame closes the writer, so we must capture buffers first.
+        Map<forge.ai.nn.TrainingDataWriter, List<forge.ai.nn.TrainingDataWriter.DecisionRecord>> buffers
+                = new java.util.IdentityHashMap<>();
+        for (Object[] entry : nnEntries) {
+            forge.ai.nn.TrainingDataWriter dw = (forge.ai.nn.TrainingDataWriter) entry[2];
+            buffers.put(dw, dw.getBuffer());
+        }
+
+        int turns = game.getPhaseHandler().getTurn();
+        String reason = game.getOutcome().getWinCondition().toString();
+
+        for (int i = 0; i < nnEntries.size(); i++) {
+            Object[] entry = nnEntries.get(i);
+            forge.game.player.PlayerController ctrl = (forge.game.player.PlayerController) entry[0];
+            forge.game.player.Player p = (forge.game.player.Player) entry[1];
+
+            boolean won = !game.getOutcome().isDraw() && game.getOutcome().isWinner(p.getLobbyPlayer());
+
+            // Only the first NN controller writes a mirror file, and only when
+            // there is exactly one other NN controller to mirror from.
+            // (If there are 2 NN players, P1 gets P2's buffer as mirror;
+            //  P2 writes only its own primary file — P2's primary IS the mirror.)
+            List<forge.ai.nn.TrainingDataWriter.DecisionRecord> mirrorBuf = null;
+            if (nnEntries.size() == 2 && i == 0) {
+                Object[] opponentEntry = nnEntries.get(1);
+                forge.ai.nn.TrainingDataWriter oppDw = (forge.ai.nn.TrainingDataWriter) opponentEntry[2];
+                mirrorBuf = buffers.get(oppDw);
+            }
+
+            if (ctrl instanceof NNFullController) {
+                ((NNFullController) ctrl).finishGame(won, turns, reason, mirrorBuf);
+            } else if (ctrl instanceof NNHybridController) {
+                ((NNHybridController) ctrl).finishGame(won, turns, reason, mirrorBuf);
             }
         }
     }
@@ -299,6 +361,23 @@ public class SimulateMatch {
             }
         }
 
+        // NN board evaluator for heuristic search (--nn-eval)
+        if (cmd.getNnEvalModel() != null) {
+            File evalModelFile = cmd.getNnEvalModel();
+            if (!evalModelFile.exists()) {
+                ORIGINAL_ERR.println("Error: NN eval model file not found - " + evalModelFile.getAbsolutePath());
+                return ExitCode.ARGS_ERROR;
+            }
+            try {
+                forge.ai.nn.NNEvaluator nnEval = new forge.ai.nn.NNEvaluator(evalModelFile.getAbsolutePath());
+                forge.ai.nn.NNEvaluator.setSharedInstance(nnEval);
+                ORIGINAL_ERR.println("NN eval: using " + evalModelFile.getName() + " for board evaluation in heuristic search");
+            } catch (Exception e) {
+                ORIGINAL_ERR.println("Error: Failed to load NN eval model - " + e.getMessage());
+                return ExitCode.ARGS_ERROR;
+            }
+        }
+
         // Tournament mode
         if (cmd.getTournamentType() != null) {
             boolean useSnapshot = cmd.isUseSnapshot();
@@ -363,7 +442,7 @@ public class SimulateMatch {
             PlayerConfig config = new PlayerConfig(d, name, profile, type);
             if (llmClients.containsKey(i - 1)) {
                 config.llmClient = llmClients.get(i - 1);
-                config.llmMode = llmModes.getOrDefault(i - 1, LLMMode.HEAVY);
+                config.llmMode = llmModes.getOrDefault(i - 1, LLMMode.LIGHT);
             } else if (nnBridge != null) {
                 String nnPlayerSetting = cmd.getNnPlayer();
                 boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
@@ -385,7 +464,7 @@ public class SimulateMatch {
             }
             if (llmClients.containsKey(i - 1)) {
                 rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClients.get(i - 1),
-                        llmModes.getOrDefault(i - 1, LLMMode.HEAVY)));
+                        llmModes.getOrDefault(i - 1, LLMMode.LIGHT)));
             } else if (nnBridge != null) {
                 String nnPlayerSetting = cmd.getNnPlayer();
                 boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)

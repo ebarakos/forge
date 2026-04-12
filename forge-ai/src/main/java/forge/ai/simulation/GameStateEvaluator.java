@@ -38,6 +38,22 @@ public class GameStateEvaluator {
     private final java.util.Map<String, Integer> cardEvalCache = new java.util.HashMap<>();
     private static final int MAX_CACHE_SIZE = 1000;
 
+    // Optional NN evaluator — when set, replaces the heuristic for non-terminal states
+    private forge.ai.nn.NNEvaluator nnEvaluator = null;
+
+    /**
+     * Attach a value-only NN evaluator to replace the heuristic for
+     * non-terminal game states. When set, {@link #getScoreForGameState}
+     * delegates to the NN instead of the hand-crafted scoring function.
+     * Terminal states (win/loss) are still detected and returned as
+     * {@code Integer.MAX/MIN_VALUE} — the NN is only called for live states.
+     *
+     * @param nnEvaluator pre-loaded NNEvaluator, or {@code null} to disable
+     */
+    public void setNNEvaluator(forge.ai.nn.NNEvaluator nnEvaluator) {
+        this.nnEvaluator = nnEvaluator;
+    }
+
     public void setDebugging(boolean debugging) {
         this.debugging = debugging;
     }
@@ -402,6 +418,22 @@ public class GameStateEvaluator {
     public Score getScoreForGameState(Game game, Player aiPlayer) {
         if (game.isGameOver()) {
             return getScoreForGameOver(game, aiPlayer);
+        }
+
+        // When a value-only NN evaluator is attached, use it for live states.
+        // We still simulate upcoming combat first so that immediate lethal
+        // (the most tactically important case) is detected before NN evaluation.
+        if (nnEvaluator != null) {
+            CombatSimResult result = simulateUpcomingCombatThisTurn(game, aiPlayer);
+            if (result != null) {
+                Player aiPlayerCopy = (Player) result.copier.find(aiPlayer);
+                if (result.gameCopy.isGameOver()) {
+                    return getScoreForGameOver(result.gameCopy, aiPlayerCopy);
+                }
+                // Evaluate the post-combat state with the NN
+                return nnEvaluator.evaluate(result.gameCopy, aiPlayerCopy);
+            }
+            return nnEvaluator.evaluate(game, aiPlayer);
         }
 
         CombatSimResult result = simulateUpcomingCombatThisTurn(game, aiPlayer);

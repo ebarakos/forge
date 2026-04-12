@@ -104,6 +104,11 @@ public class AiController {
         game = game0;
         memory = new AiCardMemory();
         simPicker = new SpellAbilityPicker(game, player);
+        // Inject NN evaluator into search if configured via --nn-eval
+        forge.ai.nn.NNEvaluator nnEval = forge.ai.nn.NNEvaluator.getSharedInstance();
+        if (nnEval != null) {
+            simPicker.setNNEvaluator(nnEval);
+        }
     }
 
     public boolean canCheatShuffle() {

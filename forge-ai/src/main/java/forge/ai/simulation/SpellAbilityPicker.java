@@ -34,6 +34,9 @@ public class SpellAbilityPicker {
     // Reused evaluator instance to reduce GC pressure (cleared per decision)
     private final GameStateEvaluator evaluator = new GameStateEvaluator();
 
+    // Optional NN evaluator — injected via setNNEvaluator() to replace heuristic scoring
+    private forge.ai.nn.NNEvaluator nnEvaluator = null;
+
     // Move orderer for alpha-beta pruning efficiency
     // ThreadLocal to avoid shared mutable state across parallel simulation threads
     private static final ThreadLocal<MoveOrderer> moveOrderer =
@@ -46,6 +49,19 @@ public class SpellAbilityPicker {
 
     public void setInterceptor(SpellAbilityChoicesIterator in) {
         this.interceptor = in;
+    }
+
+    /**
+     * Attach a value-only NN evaluator to use instead of the heuristic
+     * board-position scoring. The evaluator is propagated to each
+     * {@link GameStateEvaluator} instance used during search.
+     *
+     * @param nnEvaluator pre-loaded {@link forge.ai.nn.NNEvaluator}, or
+     *                    {@code null} to revert to heuristic evaluation
+     */
+    public void setNNEvaluator(forge.ai.nn.NNEvaluator nnEvaluator) {
+        this.nnEvaluator = nnEvaluator;
+        this.evaluator.setNNEvaluator(nnEvaluator);
     }
 
     private void print(String str) {

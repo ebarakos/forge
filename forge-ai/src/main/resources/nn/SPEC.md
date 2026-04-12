@@ -1,5 +1,9 @@
 # Forge NN Player — ONNX Model Contract
 
+> **DEPRECATED** — The NN player is no longer actively developed. No trained model exists.
+> The code and this spec are preserved for reference and potential future work, but the
+> `--nn-*` CLI flags are hidden from help output and unsupported. Use the LLM player instead.
+
 This document specifies the contract between Forge (the MTG simulation engine) and
 external neural network models used via the `--nn-hybrid` or `--nn-full` CLI flags.
 

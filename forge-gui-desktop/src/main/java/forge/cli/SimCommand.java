@@ -135,55 +135,31 @@ public class SimCommand implements Callable<Integer> {
     )
     private boolean csvOutput;
 
-    // === Neural Network Options ===
+    // === Neural Network Options (deprecated — no trained model exists; flags kept for compatibility) ===
 
-    @Option(
-        names = {"--nn-hybrid"},
-        description = "Use NN hybrid mode: NN controls mulligan, attack, block, targeting; heuristic handles rest."
-    )
+    @Option(names = {"--nn-hybrid"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true)
     private boolean nnHybrid;
 
-    @Option(
-        names = {"--nn-full"},
-        description = "Use NN full mode: NN controls all decisions."
-    )
+    @Option(names = {"--nn-full"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true)
     private boolean nnFull;
 
-    @Option(
-        names = {"--nn-model"},
-        description = "Path to ONNX model file for NN inference.",
-        paramLabel = "FILE"
-    )
+    @Option(names = {"--nn-model"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, paramLabel = "FILE")
     private File nnModel;
 
-    @Option(
-        names = {"--nn-random"},
-        description = "Use random bridge instead of ONNX model (for testing/data generation)."
-    )
+    @Option(names = {"--nn-random"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true)
     private boolean nnRandom;
 
-    @Option(
-        names = {"--nn-export"},
-        description = "Directory to export training data (JSONL) to.",
-        paramLabel = "DIR"
-    )
+    @Option(names = {"--nn-export"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, paramLabel = "DIR")
     private File nnExportDir;
 
-    @Option(
-        names = {"--nn-epsilon"},
-        description = "Epsilon for epsilon-greedy exploration (0.0 = pure model, 1.0 = pure random). Default: ${DEFAULT-VALUE}",
-        defaultValue = "0.0",
-        paramLabel = "FLOAT"
-    )
+    @Option(names = {"--nn-epsilon"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, defaultValue = "0.0", paramLabel = "FLOAT")
     private float nnEpsilon;
 
-    @Option(
-        names = {"--nn-player"},
-        description = "Which player uses NN: 1, 2, or all. Default: ${DEFAULT-VALUE}",
-        defaultValue = "all",
-        paramLabel = "PLAYER"
-    )
+    @Option(names = {"--nn-player"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, defaultValue = "all", paramLabel = "PLAYER")
     private String nnPlayer;
+
+    @Option(names = {"--nn-eval"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, paramLabel = "FILE")
+    private File nnEvalModel;
 
     // === LLM Options ===
 
@@ -375,6 +351,10 @@ public class SimCommand implements Callable<Integer> {
 
     public String getNnPlayer() {
         return nnPlayer;
+    }
+
+    public File getNnEvalModel() {
+        return nnEvalModel;
     }
 
     // === LLM Getters ===
