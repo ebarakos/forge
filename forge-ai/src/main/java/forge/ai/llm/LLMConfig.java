@@ -27,39 +27,59 @@ public final class LLMConfig {
     private static final int DEFAULT_LOCAL_TIMEOUT_MS = 300_000;   // 5 minutes (reasoning models are verbose)
     private static final int DEFAULT_CLOUD_TIMEOUT_MS = 30_000;    // 30 seconds
 
+    // Minimum inter-call gap to stay under provider RPM limits.
+    // Cerebras free tier = 30 RPM → 2100ms per call (with 5% safety margin).
+    private static final int CEREBRAS_MIN_INTERVAL_MS = 2100;
+
     private final String apiBaseUrl;
-    private final String apiKey;       // nullable for local Ollama
+    private final String apiKey;          // nullable for local Ollama
     private final String model;
-    private final String provider;     // "ollama" or "openrouter"
+    private final String provider;        // "ollama", "openrouter", "cerebras", or "relay"
+    private final String relayProvider;   // upstream provider when using relay (e.g. "cerebras")
+    private final String userApiKey;      // BYO key forwarded as X-User-Api-Key when using relay
     private final double temperature;
     private final int timeoutMs;
+    private final int minIntervalMs;      // minimum gap between calls to respect provider RPM limits
     private final boolean debug;
     private final LLMMode mode;
 
     // Shared across all LLM players
     private final double budgetLimit;  // 0 = unlimited
+    /** D2: Anthropic-style prompt caching (cache_control: ephemeral). */
+    private final boolean promptCaching;
 
     private LLMConfig(Builder b) {
         this.apiBaseUrl = b.apiBaseUrl;
         this.apiKey = b.apiKey;
         this.model = b.model;
         this.provider = b.provider;
+        this.relayProvider = b.relayProvider;
+        this.userApiKey = b.userApiKey;
         this.temperature = b.temperature;
         this.timeoutMs = b.timeoutMs;
+        this.minIntervalMs = b.minIntervalMs;
         this.debug = b.debug;
         this.budgetLimit = b.budgetLimit;
         this.mode = b.mode;
+        this.promptCaching = b.promptCaching;
     }
 
     public String getApiBaseUrl() { return apiBaseUrl; }
     public String getApiKey() { return apiKey; }
     public String getModel() { return model; }
     public String getProvider() { return provider; }
+    /** Upstream provider the relay should route to (e.g. "cerebras"). Null for non-relay providers. */
+    public String getRelayProvider() { return relayProvider; }
+    /** BYO key forwarded as X-User-Api-Key to the relay. Null if not set. */
+    public String getUserApiKey() { return userApiKey; }
     public double getTemperature() { return temperature; }
     public int getTimeoutMs() { return timeoutMs; }
+    /** Minimum milliseconds between LLM calls (client-side throttle). 0 = no throttle. */
+    public int getMinIntervalMs() { return minIntervalMs; }
     public boolean isDebug() { return debug; }
     public double getBudgetLimit() { return budgetLimit; }
     public LLMMode getMode() { return mode; }
+    public boolean isPromptCachingEnabled() { return promptCaching; }
 
     /** Returns true if this model is a thinking/reasoning model that produces chain-of-thought tokens. */
     public boolean isThinkingModel() {
@@ -80,8 +100,8 @@ public final class LLMConfig {
                                                boolean free) {
         if (profile == null) return null;
 
-        // Extract @mode suffix (e.g., "cerebras:llama3.1-8b@light")
-        LLMMode mode = LLMMode.HEAVY;
+        // Extract @mode suffix (e.g., "cerebras:llama3.1-8b@heavy"). Default is LIGHT.
+        LLMMode mode = LLMMode.LIGHT;
         int atIdx = profile.lastIndexOf('@');
         if (atIdx > 0) {
             String modeSuffix = profile.substring(atIdx + 1).trim();
@@ -97,6 +117,7 @@ public final class LLMConfig {
         String provider;
         String model;
         String baseUrl;
+        String relayProviderOverride = null;
 
         int defaultTimeout;
         if (lower.startsWith("ollama:")) {
@@ -126,22 +147,83 @@ public final class LLMConfig {
             if (cerebrasKey != null && !cerebrasKey.isEmpty()) {
                 apiKey = cerebrasKey;
             }
+        } else if (lower.startsWith("relay:")) {
+            provider = "relay";
+            model = profile.substring("relay:".length()).trim();
+            if (model.isEmpty()) {
+                model = loadProviderApiKey("RELAY_MODEL");
+                if (model == null || model.isEmpty()) model = DEFAULT_CEREBRAS_MODEL;
+            }
+            baseUrl = loadProviderApiKey("RELAY_BASE_URL");
+            if (baseUrl == null || baseUrl.isEmpty()) baseUrl = "http://localhost:8787/v1";
+            defaultTimeout = DEFAULT_CLOUD_TIMEOUT_MS;
+            // Relay doesn't need an API key — it manages keys centrally
+            // But honour an explicit key if provided (forwarded as X-User-Api-Key)
+        } else if (lower.startsWith("relay-cerebras:") || lower.startsWith("relay-openrouter:")
+                || lower.startsWith("relay-groq:") || lower.startsWith("relay-openai:")
+                || lower.startsWith("relay-anthropic:")) {
+            // Per-profile relay upstream: "relay-<upstream>:<model>"
+            provider = "relay";
+            int colon = profile.indexOf(':');
+            String upstream = profile.substring("relay-".length(), colon).toLowerCase();
+            model = profile.substring(colon + 1).trim();
+            if (model.isEmpty()) {
+                if ("cerebras".equals(upstream)) model = DEFAULT_CEREBRAS_MODEL;
+                else if ("openrouter".equals(upstream)) model = DEFAULT_OPENROUTER_MODEL;
+                else model = DEFAULT_CEREBRAS_MODEL;
+            }
+            if ("openrouter".equals(upstream) && free && !model.endsWith(":free")) {
+                model = model + ":free";
+            }
+            baseUrl = loadProviderApiKey("RELAY_BASE_URL");
+            if (baseUrl == null || baseUrl.isEmpty()) baseUrl = "http://localhost:8787/v1";
+            defaultTimeout = DEFAULT_CLOUD_TIMEOUT_MS;
+            // Stash upstream so the block below picks it up instead of RELAY_PROVIDER env.
+            relayProviderOverride = upstream;
         } else {
             return null; // Not an LLM profile
         }
 
         int effectiveTimeout = (timeoutMs > 0) ? timeoutMs : defaultTimeout;
 
+        // Relay upstream provider and BYO key
+        String relayProvider = null;
+        String userApiKey = null;
+        if ("relay".equals(provider)) {
+            if (relayProviderOverride != null) {
+                relayProvider = relayProviderOverride;
+            } else {
+                relayProvider = loadProviderApiKey("RELAY_PROVIDER");
+                if (relayProvider == null || relayProvider.isEmpty()) relayProvider = "cerebras";
+            }
+            userApiKey = loadProviderApiKey(providerApiKeyEnvVar(relayProvider));
+        }
+
+        // Client-side throttle: Cerebras free tier is 30 RPM.
+        // Apply when using Cerebras directly, or via the relay.
+        int minInterval = 0;
+        if ("cerebras".equals(provider) || "cerebras".equals(relayProvider)) {
+            minInterval = CEREBRAS_MIN_INTERVAL_MS;
+        }
+
+        // D2: enable prompt caching on cloud providers that support Anthropic-style
+        // cache_control markers. Ollama doesn't, so leave it off locally.
+        boolean cachingOn = !"ollama".equals(provider);
+
         return new Builder()
                 .provider(provider)
+                .relayProvider(relayProvider)
+                .userApiKey(userApiKey)
                 .apiBaseUrl(baseUrl)
                 .apiKey(apiKey)
                 .model(model)
                 .temperature(temperature)
                 .timeoutMs(effectiveTimeout)
+                .minIntervalMs(minInterval)
                 .budgetLimit(budgetLimit)
                 .debug(debug)
                 .mode(mode)
+                .promptCaching(cachingOn)
                 .build();
     }
 
@@ -155,7 +237,11 @@ public final class LLMConfig {
     public static boolean isLlmProfile(String profile) {
         if (profile == null) return false;
         String lower = profile.toLowerCase().trim();
-        return lower.startsWith("ollama:") || lower.startsWith("openrouter:") || lower.startsWith("cerebras:");
+        return lower.startsWith("ollama:") || lower.startsWith("openrouter:")
+                || lower.startsWith("cerebras:") || lower.startsWith("relay:")
+                || lower.startsWith("relay-cerebras:") || lower.startsWith("relay-openrouter:")
+                || lower.startsWith("relay-groq:") || lower.startsWith("relay-openai:")
+                || lower.startsWith("relay-anthropic:");
     }
 
     /** Returns true if the profile string is an LLM GUI display name. */
@@ -169,18 +255,22 @@ public final class LLMConfig {
 
     /** Maps a GUI display name to the internal profile string (e.g. "ollama:llama3@light"). */
     public static String toProfileString(String displayName) {
-        if (LLM_LOCAL_DISPLAY.equals(displayName) || LLM_HEAVY_LOCAL_DISPLAY.equals(displayName)) {
-            return "ollama:" + DEFAULT_LOCAL_MODEL + "@heavy";
-        } else if (LLM_LIGHT_LOCAL_DISPLAY.equals(displayName)) {
+        if (LLM_LOCAL_DISPLAY.equals(displayName) || LLM_LIGHT_LOCAL_DISPLAY.equals(displayName)) {
             return "ollama:" + DEFAULT_LOCAL_MODEL + "@light";
-        } else if (LLM_OPENROUTER_DISPLAY.equals(displayName) || LLM_HEAVY_OPENROUTER_DISPLAY.equals(displayName)) {
-            return "openrouter:" + DEFAULT_OPENROUTER_MODEL + "@heavy";
-        } else if (LLM_LIGHT_OPENROUTER_DISPLAY.equals(displayName)) {
-            return "openrouter:" + DEFAULT_OPENROUTER_MODEL + "@light";
-        } else if (LLM_CEREBRAS_DISPLAY.equals(displayName) || LLM_HEAVY_CEREBRAS_DISPLAY.equals(displayName)) {
-            return "cerebras:" + DEFAULT_CEREBRAS_MODEL + "@heavy";
-        } else if (LLM_LIGHT_CEREBRAS_DISPLAY.equals(displayName)) {
-            return "cerebras:" + DEFAULT_CEREBRAS_MODEL + "@light";
+        } else if (LLM_HEAVY_LOCAL_DISPLAY.equals(displayName)) {
+            return "ollama:" + DEFAULT_LOCAL_MODEL + "@heavy";
+        } else if (LLM_OPENROUTER_DISPLAY.equals(displayName) || LLM_LIGHT_OPENROUTER_DISPLAY.equals(displayName)) {
+            return "relay-openrouter:" + DEFAULT_OPENROUTER_MODEL + "@light";
+        } else if (LLM_HEAVY_OPENROUTER_DISPLAY.equals(displayName)) {
+            return "relay-openrouter:" + DEFAULT_OPENROUTER_MODEL + "@heavy";
+        } else if (LLM_CEREBRAS_DISPLAY.equals(displayName) || LLM_LIGHT_CEREBRAS_DISPLAY.equals(displayName)) {
+            String m = loadProviderApiKey("RELAY_MODEL");
+            if (m == null || m.isEmpty()) m = DEFAULT_CEREBRAS_MODEL;
+            return "relay-cerebras:" + m + "@light";
+        } else if (LLM_HEAVY_CEREBRAS_DISPLAY.equals(displayName)) {
+            String m = loadProviderApiKey("RELAY_MODEL");
+            if (m == null || m.isEmpty()) m = DEFAULT_CEREBRAS_MODEL;
+            return "relay-cerebras:" + m + "@heavy";
         }
         return null;
     }
@@ -198,6 +288,22 @@ public final class LLMConfig {
         if (fromDotEnv != null) return fromDotEnv;
         fromDotEnv = loadDotEnvValue("OPENROUTER_API_KEY");
         return fromDotEnv;
+    }
+
+    /**
+     * Maps a relay upstream provider name to its API key env var.
+     * Covers all 5 providers defined in llm-relay.
+     */
+    public static String providerApiKeyEnvVar(String provider) {
+        if (provider == null) return null;
+        switch (provider.toLowerCase()) {
+            case "cerebras":   return "CEREBRAS_API_KEY";
+            case "openrouter": return "OPENROUTER_API_KEY";
+            case "groq":       return "GROQ_API_KEY";
+            case "openai":     return "OPENAI_API_KEY";
+            case "anthropic":  return "ANTHROPIC_API_KEY";
+            default:           return null;
+        }
     }
 
     /** Loads a provider-specific API key from env var or .env file. */
@@ -242,21 +348,29 @@ public final class LLMConfig {
         private String apiKey;
         private String model = DEFAULT_LOCAL_MODEL;
         private String provider = "ollama";
+        private String relayProvider;
+        private String userApiKey;
         private double temperature = 0.2;
         private int timeoutMs = 30000;
+        private int minIntervalMs = 0;
         private boolean debug = false;
         private double budgetLimit = 0;
-        private LLMMode mode = LLMMode.HEAVY;
+        private LLMMode mode = LLMMode.LIGHT;
+        private boolean promptCaching = false;
 
         public Builder apiBaseUrl(String url) { this.apiBaseUrl = url; return this; }
         public Builder apiKey(String key) { this.apiKey = key; return this; }
         public Builder model(String model) { this.model = model; return this; }
         public Builder provider(String provider) { this.provider = provider; return this; }
+        public Builder relayProvider(String rp) { this.relayProvider = rp; return this; }
+        public Builder userApiKey(String k) { this.userApiKey = k; return this; }
         public Builder temperature(double t) { this.temperature = t; return this; }
         public Builder timeoutMs(int ms) { this.timeoutMs = ms; return this; }
+        public Builder minIntervalMs(int ms) { this.minIntervalMs = ms; return this; }
         public Builder debug(boolean d) { this.debug = d; return this; }
         public Builder budgetLimit(double limit) { this.budgetLimit = limit; return this; }
         public Builder mode(LLMMode m) { this.mode = m; return this; }
+        public Builder promptCaching(boolean p) { this.promptCaching = p; return this; }
 
         public LLMConfig build() { return new LLMConfig(this); }
     }

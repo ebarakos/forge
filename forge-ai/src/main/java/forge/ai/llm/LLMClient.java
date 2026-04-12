@@ -25,14 +25,24 @@ public class LLMClient {
     private final LLMConfig config;
     private final Gson gson;
 
+    // Shared rate gate across all LLMClient instances (per JVM). Serialises calls
+    // that target the same upstream provider so parallel games don't burst past RPM limits.
+    private static final Object THROTTLE_LOCK = new Object();
+    private static long lastCallEndNanos = 0L;
+
     // Thread-safe aggregate counters
     private final AtomicInteger totalCalls = new AtomicInteger(0);
     private final AtomicInteger totalFallbacks = new AtomicInteger(0);
     private final AtomicInteger totalInputTokens = new AtomicInteger(0);
     private final AtomicInteger totalOutputTokens = new AtomicInteger(0);
+    private final AtomicInteger totalCacheReadTokens = new AtomicInteger(0);
+    private final AtomicInteger totalCacheCreationTokens = new AtomicInteger(0);
     private final AtomicLong totalLatencyMs = new AtomicLong(0);
     private volatile double estimatedCost = 0.0;
     private final Object costLock = new Object();
+
+    /** D2: if the first caching request is rejected, disable for the rest of the session. */
+    private volatile boolean cachingDisabledForSession = false;
 
     public LLMClient(LLMConfig config) {
         this.config = config;
@@ -77,7 +87,21 @@ public class LLMClient {
         JsonArray messages = new JsonArray();
         JsonObject sysMsg = new JsonObject();
         sysMsg.addProperty("role", "system");
-        sysMsg.addProperty("content", systemPrompt);
+        if (config.isPromptCachingEnabled() && !cachingDisabledForSession) {
+            // D2: Anthropic-style content-block format with cache_control:ephemeral
+            // on the (stable) system prompt so the provider caches it for subsequent calls.
+            JsonArray contentArr = new JsonArray();
+            JsonObject stablePart = new JsonObject();
+            stablePart.addProperty("type", "text");
+            stablePart.addProperty("text", systemPrompt);
+            JsonObject cacheControl = new JsonObject();
+            cacheControl.addProperty("type", "ephemeral");
+            stablePart.add("cache_control", cacheControl);
+            contentArr.add(stablePart);
+            sysMsg.add("content", contentArr);
+        } else {
+            sysMsg.addProperty("content", systemPrompt);
+        }
         messages.add(sysMsg);
 
         JsonObject userMsg = new JsonObject();
@@ -86,6 +110,14 @@ public class LLMClient {
         messages.add(userMsg);
 
         body.add("messages", messages);
+
+        // Inject upstream provider for relay routing (equivalent to relay-fetch body.provider injection)
+        if ("relay".equals(config.getProvider())) {
+            String relayProvider = config.getRelayProvider();
+            if (relayProvider != null && !relayProvider.isEmpty()) {
+                body.addProperty("provider", relayProvider);
+            }
+        }
 
         String url = config.getApiBaseUrl() + "/chat/completions";
         String requestBody = gson.toJson(body);
@@ -100,19 +132,41 @@ public class LLMClient {
         if (config.getApiKey() != null && !config.getApiKey().isEmpty()) {
             reqBuilder.header("Authorization", "Bearer " + config.getApiKey());
         }
+        // Forward BYO key to relay as X-User-Api-Key (takes priority over relay-managed keys)
+        if (config.getUserApiKey() != null && !config.getUserApiKey().isEmpty()) {
+            reqBuilder.header("X-User-Api-Key", config.getUserApiKey());
+        }
 
         HttpRequest request = reqBuilder.build();
 
-        // Execute with one retry
+        // Execute with throttle + retry (exponential backoff on rate-limit / overload).
         long startTime = System.currentTimeMillis();
         HttpResponse<String> response;
         try {
+            throttleBeforeCall();
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() >= 400) {
-                // One retry with backoff
-                Thread.sleep(1000);
+
+            // Up to 3 retries on transient errors; longer backoff for 429/503.
+            int attempt = 0;
+            final int maxRetries = 3;
+            long backoffMs = 2000L;
+            while (response.statusCode() >= 400 && attempt < maxRetries) {
+                int status = response.statusCode();
+                // Relay quota errors (source:"relay") are non-retriable — throw immediately.
+                if (status == 429 && isRelayRateLimit(response.body())) {
+                    throw new LLMException("Relay quota exceeded: "
+                            + response.body().substring(0, Math.min(200, response.body().length())));
+                }
+                boolean rateLimited = (status == 429 || status == 503);
+                long sleepMs = rateLimited ? backoffMs : 1000L;
+                Thread.sleep(sleepMs);
+                if (rateLimited) backoffMs *= 2;
+                attempt++;
+                throttleBeforeCall();
                 response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             }
+        } catch (LLMException e) {
+            throw e;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new LLMException("LLM request interrupted", e);
@@ -124,6 +178,16 @@ public class LLMClient {
         totalLatencyMs.addAndGet(latencyMs);
 
         if (response.statusCode() >= 400) {
+            // D2: disable caching for the session if the provider rejected the
+            // content-block format. Next call will use the legacy string format.
+            if (config.isPromptCachingEnabled() && !cachingDisabledForSession
+                    && (response.statusCode() == 400 || response.statusCode() == 422)) {
+                cachingDisabledForSession = true;
+                if (config.isDebug()) {
+                    System.err.println("[LLM] Prompt caching rejected by provider, disabling for session. Body: "
+                            + response.body().substring(0, Math.min(200, response.body().length())));
+                }
+            }
             throw new LLMException("LLM API error " + response.statusCode()
                     + ": " + response.body().substring(0, Math.min(200, response.body().length())));
         }
@@ -152,6 +216,8 @@ public class LLMClient {
         // Extract token usage if available (some providers omit or null-out usage)
         int inputTokens = 0;
         int outputTokens = 0;
+        int cacheRead = 0;
+        int cacheCreation = 0;
         try {
             if (respJson.has("usage") && respJson.get("usage") != null
                     && respJson.get("usage").isJsonObject()) {
@@ -164,14 +230,35 @@ public class LLMClient {
                     outputTokens = usage.get("completion_tokens").getAsInt();
                     totalOutputTokens.addAndGet(outputTokens);
                 }
+                // D2: cache usage fields (Anthropic via OpenRouter / Cerebras).
+                if (usage.has("cache_read_input_tokens")) {
+                    cacheRead = usage.get("cache_read_input_tokens").getAsInt();
+                    totalCacheReadTokens.addAndGet(cacheRead);
+                } else if (usage.has("prompt_tokens_details")
+                        && usage.get("prompt_tokens_details").isJsonObject()) {
+                    JsonObject details = usage.getAsJsonObject("prompt_tokens_details");
+                    if (details.has("cached_tokens")) {
+                        cacheRead = details.get("cached_tokens").getAsInt();
+                        totalCacheReadTokens.addAndGet(cacheRead);
+                    }
+                }
+                if (usage.has("cache_creation_input_tokens")) {
+                    cacheCreation = usage.get("cache_creation_input_tokens").getAsInt();
+                    totalCacheCreationTokens.addAndGet(cacheCreation);
+                }
             }
         } catch (Exception e) {
             // Non-fatal: usage tracking is best-effort
         }
 
-        // Estimate cost (conservative: $10/MTok input, $30/MTok output)
+        // Estimate cost (conservative: $10/MTok input, $30/MTok output).
+        // D2: cached reads cost ~10% of normal input, cache writes ~125%.
         if (config.getBudgetLimit() > 0) {
-            double callCost = (inputTokens * 10.0 + outputTokens * 30.0) / 1_000_000.0;
+            int uncachedInput = Math.max(0, inputTokens - cacheRead - cacheCreation);
+            double callCost = (uncachedInput * 10.0
+                    + cacheRead * 1.0
+                    + cacheCreation * 12.5
+                    + outputTokens * 30.0) / 1_000_000.0;
             synchronized (costLock) {
                 estimatedCost += callCost;
             }
@@ -184,6 +271,41 @@ public class LLMClient {
         }
 
         return content;
+    }
+
+    /**
+     * Enforces the configured minimum gap between calls. Uses a JVM-wide lock so that
+     * parallel games sharing the same upstream provider don't burst past its RPM limit.
+     */
+    private void throttleBeforeCall() throws InterruptedException {
+        int minIntervalMs = config.getMinIntervalMs();
+        if (minIntervalMs <= 0) return;
+        long sleepMs;
+        synchronized (THROTTLE_LOCK) {
+            long nowNanos = System.nanoTime();
+            long elapsedMs = (nowNanos - lastCallEndNanos) / 1_000_000L;
+            sleepMs = minIntervalMs - elapsedMs;
+            // Reserve the slot BEFORE sleeping so concurrent callers queue up cleanly.
+            lastCallEndNanos = nowNanos + Math.max(0L, sleepMs) * 1_000_000L;
+        }
+        if (sleepMs > 0) {
+            Thread.sleep(sleepMs);
+        }
+    }
+
+    /** Returns true if the 429 body indicates a relay quota error (non-retriable). */
+    private boolean isRelayRateLimit(String body) {
+        try {
+            JsonObject obj = JsonParser.parseString(body).getAsJsonObject();
+            if (obj.has("source") && "relay".equals(obj.get("source").getAsString())) return true;
+            if (obj.has("error") && obj.get("error").isJsonObject()) {
+                JsonObject err = obj.getAsJsonObject("error");
+                if (err.has("source") && "relay".equals(err.get("source").getAsString())) return true;
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void printDebug(int callNum, String playerName, String callLabel,
@@ -212,6 +334,8 @@ public class LLMClient {
     public int getTotalFallbacks() { return totalFallbacks.get(); }
     public int getTotalInputTokens() { return totalInputTokens.get(); }
     public int getTotalOutputTokens() { return totalOutputTokens.get(); }
+    public int getTotalCacheReadTokens() { return totalCacheReadTokens.get(); }
+    public int getTotalCacheCreationTokens() { return totalCacheCreationTokens.get(); }
     public long getTotalLatencyMs() { return totalLatencyMs.get(); }
     public boolean isDebug() { return config.isDebug(); }
     public double getEstimatedCost() {

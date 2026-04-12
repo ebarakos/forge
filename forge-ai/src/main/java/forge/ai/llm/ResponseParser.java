@@ -1,7 +1,9 @@
 package forge.ai.llm;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -227,6 +229,40 @@ public final class ResponseParser {
         while (m.find()) {
             int val = Integer.parseInt(m.group(1));
             if (val >= 0 && val < maxIndex) {
+                result.add(val);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Parse an ordered plan sequence from an LLM response (B1 — MAIN-phase plan batching).
+     * Format: comma-separated indices, optionally followed by "PASS" to terminate
+     * (e.g. "2,0,PASS"). A plain "PASS" or "NONE" returns an empty list. Indices
+     * are returned in source order, duplicates skipped, out-of-range values end
+     * the plan at that point.
+     */
+    public static List<Integer> parsePlanSequence(String response, int numOptions) {
+        List<Integer> result = new ArrayList<>();
+        if (response == null || response.isBlank()) return result;
+
+        String trimmed = response.strip().toUpperCase();
+        if (trimmed.equals("PASS") || trimmed.equals("NONE") || trimmed.equals("N/A")) {
+            return result;
+        }
+
+        // Walk tokens in order, stopping at PASS.
+        Matcher tok = Pattern.compile("\\bPASS\\b|\\b(\\d+)\\b").matcher(trimmed);
+        Set<Integer> seen = new LinkedHashSet<>();
+        while (tok.find()) {
+            if (tok.group(1) == null) {
+                break; // hit PASS
+            }
+            int val = Integer.parseInt(tok.group(1));
+            if (val < 0 || val >= numOptions) {
+                break; // out-of-range — end plan here
+            }
+            if (seen.add(val)) {
                 result.add(val);
             }
         }

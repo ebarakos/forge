@@ -62,14 +62,28 @@ public class LLMFullController extends PlayerControllerAi {
     private final List<String> actionHistory = new ArrayList<>();
     private static final int MAX_HISTORY = 10;
 
+    /** B2: blocking-plan note carried over from the most recent attack LLM call. */
+    private String lastAttackPlan = "";
+
+    /** B1: cached sequence of card names to cast this MAIN phase (from a single plan LLM call). */
+    private final java.util.Deque<String> mainPhasePlan = new java.util.ArrayDeque<>();
+    private PhaseType planPhase = null;
+    private int planTurn = -1;
+    private int planStackSize = 0;
+
+    /** D1: cached serialized game state (stable anchor for the current turn+phase). */
+    private String cachedGameState = null;
+    private int cachedStateTurn = -1;
+    private PhaseType cachedStatePhase = null;
+
     public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client, LLMMode mode) {
         super(game, p, lp);
         this.client = client;
-        this.mode = mode != null ? mode : LLMMode.HEAVY;
+        this.mode = mode != null ? mode : LLMMode.LIGHT;
     }
 
     public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
-        this(game, p, lp, client, LLMMode.HEAVY);
+        this(game, p, lp, client, LLMMode.LIGHT);
     }
 
     /** Returns true if this controller is in LIGHT mode (fewer LLM calls). */
@@ -87,6 +101,24 @@ public class LLMFullController extends PlayerControllerAi {
         }
     }
 
+    /**
+     * B2: pull the "PLAN: ..." line out of an LLM response (one short note
+     * the attack call leaves for the follow-up block call).
+     */
+    private String extractPlanLine(String response) {
+        if (response == null) return "";
+        for (String raw : response.split("\\R")) {
+            String line = raw.strip();
+            int idx = line.toUpperCase().indexOf("PLAN:");
+            if (idx >= 0) {
+                String tail = line.substring(idx + "PLAN:".length()).strip();
+                if (tail.length() > 200) tail = tail.substring(0, 200);
+                return tail;
+            }
+        }
+        return "";
+    }
+
     /** Format the action history section for inclusion in prompts. */
     private String getActionHistoryText() {
         if (actionHistory.isEmpty()) return "";
@@ -97,10 +129,23 @@ public class LLMFullController extends PlayerControllerAi {
         return sb.toString();
     }
 
-    /** Build the game state text with action history appended. */
+    /**
+     * Build the game state text with action history appended.
+     * D1: Caches the serialized game state per (turn, phase). Multiple priority
+     * calls in the same phase reuse the same state string, which both skips
+     * re-serialization CPU and gives the provider prompt cache a byte-stable
+     * prefix across consecutive calls. Action history is appended volatile.
+     */
     private String buildGameStateWithHistory() {
-        return GameStateSerializer.serializeGameState(getPlayer(), getGame())
-                + getActionHistoryText();
+        int currentTurn = getGame().getPhaseHandler().getTurn();
+        PhaseType currentPhase = getGame().getPhaseHandler().getPhase();
+        if (cachedGameState == null || cachedStateTurn != currentTurn
+                || cachedStatePhase != currentPhase) {
+            cachedGameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
+            cachedStateTurn = currentTurn;
+            cachedStatePhase = currentPhase;
+        }
+        return cachedGameState + getActionHistoryText();
     }
 
     // =======================================================================
@@ -116,12 +161,12 @@ public class LLMFullController extends PlayerControllerAi {
     private boolean shouldCallLLMForInstantSpeed() {
         if (isLightMode()) return false;
         try {
-            // Check if there's a reason to respond at instant speed
             boolean hasStackTarget = !getGame().getStack().isEmpty();
             PhaseType phase = getGame().getPhaseHandler().getPhase();
+            // A3: dropped COMBAT_DECLARE_ATTACKERS — we can't usefully respond
+            // before knowing who's attacking. Wait until DECLARE_BLOCKERS / damage.
             boolean isOpponentCombat = !getGame().getPhaseHandler().isPlayerTurn(getPlayer())
-                    && (phase == PhaseType.COMBAT_DECLARE_ATTACKERS
-                        || phase == PhaseType.COMBAT_DECLARE_BLOCKERS
+                    && (phase == PhaseType.COMBAT_DECLARE_BLOCKERS
                         || phase == PhaseType.COMBAT_FIRST_STRIKE_DAMAGE
                         || phase == PhaseType.COMBAT_DAMAGE);
 
@@ -129,19 +174,31 @@ public class LLMFullController extends PlayerControllerAi {
                 return false;
             }
 
-            // Check if we have any affordable instant-speed spells
+            // A3: combat-trick filter — skip when there are no actual attackers.
+            if (isOpponentCombat) {
+                Combat combat = getGame().getCombat();
+                if (combat == null || combat.getAttackers().isEmpty()) {
+                    return false;
+                }
+            }
+
+            // A3: stack/combat response filter — only fire when at least one
+            // affordable candidate can actually be cast right now (cost paid AND
+            // targeting valid). This catches cases where we hold an instant but
+            // it has no legal target on the current stack/board.
             CardCollection cards = ComputerUtilAbility.getAvailableCards(getGame(), getPlayer());
             List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, getPlayer());
             for (SpellAbility sa : candidates) {
                 if (sa.isManaAbility() || sa.isLandAbility()) continue;
                 sa.setActivatingPlayer(getPlayer());
-                if (ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) {
-                    return true; // At least one playable instant-speed spell
+                if (!ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) continue;
+                if (validateAndSetTargets(sa)) {
+                    return true;
                 }
             }
             return false;
         } catch (Exception e) {
-            return false; // On any error, delegate to heuristic
+            return false;
         }
     }
 
@@ -334,40 +391,136 @@ public class LLMFullController extends PlayerControllerAi {
         return sas.get(chosen);
     }
 
+    /**
+     * B3: Single-call batched picker for cards. One LLM call returns all picks
+     * as comma-separated indices. On any failure, fills from the front to satisfy
+     * min and returns.
+     */
     private CardCollection chooseMultipleCards(CardCollectionView sourceList, int min, int max,
                                                 boolean isOptional, String context) {
         CardCollection result = new CardCollection();
-        CardCollection remaining = new CardCollection(sourceList);
+        if (sourceList == null || sourceList.isEmpty()) return result;
 
-        for (int i = 0; i < max && !remaining.isEmpty(); i++) {
-            boolean canStop = isOptional || result.size() >= min;
+        int effectiveMin = isOptional ? 0 : min;
+        int effectiveMax = Math.min(max, sourceList.size());
 
-            List<Card> cardList = new ArrayList<>();
-            for (Card c : remaining) { cardList.add(c); }
+        // Short-circuit: forced to take everything.
+        if (effectiveMin >= sourceList.size()) {
+            for (Card c : sourceList) result.add(c);
+            return result;
+        }
 
-            String gameState = buildGameStateWithHistory();
-            String options = OptionSerializer.serializeCardOptions(cardList, canStop);
-            int numOpts = canStop ? remaining.size() + 1 : remaining.size();
-            String chooseContext = context + " (pick " + (i + 1) + ", need " + min + "-" + max + ")";
-            String prompt = PromptTemplates.chooseCard(gameState, options, chooseContext);
-            int chosen = callLLM(prompt, numOpts, "chooseMultipleCards");
+        List<Card> cardList = new ArrayList<>();
+        for (Card c : sourceList) { cardList.add(c); }
 
-            if (chosen < 0) {
-                // Fallback: fill remaining picks from front
-                while (result.size() < min && !remaining.isEmpty()) {
-                    result.add(remaining.get(0));
-                    remaining.remove(0);
-                }
-                break;
+        String gameState = buildGameStateWithHistory();
+        String options = OptionSerializer.serializeCardOptions(cardList, false);
+        String prompt = PromptTemplates.batchPick(gameState, options, context, effectiveMin, effectiveMax);
+        String response = callLLMRaw(prompt, "chooseMultipleCardsBatched");
+
+        if (response == null) {
+            fillFromFront(result, cardList, effectiveMin);
+            return result;
+        }
+        Set<Integer> picks = ResponseParser.parseBatchIndices(response, cardList.size());
+        // Honour max
+        int taken = 0;
+        for (int idx : picks) {
+            if (taken >= effectiveMax) break;
+            result.add(cardList.get(idx));
+            taken++;
+        }
+        // Honour min — fill from front with items not already picked
+        if (result.size() < effectiveMin) {
+            for (Card c : cardList) {
+                if (result.size() >= effectiveMin) break;
+                if (!result.contains(c)) result.add(c);
             }
-            if (canStop && chosen >= remaining.size()) {
-                break; // chose "done"
+        }
+        return result;
+    }
+
+    /** B3 fallback: fill {@code result} from the front of {@code source} until at least {@code min}. */
+    private void fillFromFront(CardCollection result, List<Card> source, int min) {
+        for (Card c : source) {
+            if (result.size() >= min) break;
+            result.add(c);
+        }
+    }
+
+    /**
+     * B3: Batched picker for generic entities (Cards or Players, etc). One LLM call.
+     */
+    private <T extends GameEntity> List<T> chooseMultipleEntitiesBatched(List<T> sourceList,
+                                                                          int min, int max, String context) {
+        List<T> result = new ArrayList<>();
+        if (sourceList == null || sourceList.isEmpty()) return result;
+
+        int effectiveMax = Math.min(max, sourceList.size());
+        if (min >= sourceList.size()) {
+            result.addAll(sourceList);
+            return result;
+        }
+
+        String gameState = buildGameStateWithHistory();
+        String options = OptionSerializer.serializeEntityOptions(sourceList, false);
+        String prompt = PromptTemplates.batchPick(gameState, options, context, min, effectiveMax);
+        String response = callLLMRaw(prompt, "chooseMultipleEntitiesBatched");
+
+        if (response == null) {
+            for (int i = 0; i < min && i < sourceList.size(); i++) result.add(sourceList.get(i));
+            return result;
+        }
+        Set<Integer> picks = ResponseParser.parseBatchIndices(response, sourceList.size());
+        int taken = 0;
+        for (int idx : picks) {
+            if (taken >= effectiveMax) break;
+            result.add(sourceList.get(idx));
+            taken++;
+        }
+        if (result.size() < min) {
+            for (T e : sourceList) {
+                if (result.size() >= min) break;
+                if (!result.contains(e)) result.add(e);
             }
-            if (chosen >= remaining.size()) {
-                chosen = remaining.size() - 1;
+        }
+        return result;
+    }
+
+    /**
+     * B3: Batched picker for spell abilities. One LLM call.
+     */
+    private List<SpellAbility> chooseMultipleSpellAbilitiesBatched(List<SpellAbility> sourceList,
+                                                                    int num, String context) {
+        List<SpellAbility> result = new ArrayList<>();
+        if (sourceList == null || sourceList.isEmpty()) return result;
+        int take = Math.min(num, sourceList.size());
+        if (take == sourceList.size()) {
+            result.addAll(sourceList);
+            return result;
+        }
+
+        String gameState = buildGameStateWithHistory();
+        String options = OptionSerializer.serializeGenericOptions(sourceList);
+        String prompt = PromptTemplates.batchPick(gameState, options, context, take, take);
+        String response = callLLMRaw(prompt, "chooseMultipleSAsBatched");
+
+        if (response == null) {
+            for (int i = 0; i < take; i++) result.add(sourceList.get(i));
+            return result;
+        }
+        Set<Integer> picks = ResponseParser.parseBatchIndices(response, sourceList.size());
+        int taken = 0;
+        for (int idx : picks) {
+            if (taken >= take) break;
+            result.add(sourceList.get(idx));
+            taken++;
+        }
+        if (result.size() < take) {
+            for (SpellAbility sa : sourceList) {
+                if (result.size() >= take) break;
+                if (!result.contains(sa)) result.add(sa);
             }
-            result.add(remaining.get(chosen));
-            remaining.remove(chosen);
         }
         return result;
     }
@@ -461,9 +614,76 @@ public class LLMFullController extends PlayerControllerAi {
         }
 
         if (playable.isEmpty()) {
+            mainPhasePlan.clear();
             return null;
         }
 
+        // A1: PASS+1 short-circuit. With one option, trust the heuristic's
+        // canPlaySa() answer instead of paying for an LLM call.
+        if (playable.size() == 1) {
+            SpellAbility only = playable.get(0);
+            AiPlayDecision decision;
+            try {
+                decision = getAi().canPlaySa(only);
+            } catch (Exception e) {
+                decision = AiPlayDecision.WillPlay;
+            }
+            if (decision == AiPlayDecision.WillPlay) {
+                recordSpellAction(only, phase);
+                List<SpellAbility> result = new ArrayList<>();
+                result.add(only);
+                return result;
+            }
+            return null; // heuristic refuses → PASS
+        }
+
+        boolean isMainPhase = phase == PhaseType.MAIN1 || phase == PhaseType.MAIN2;
+
+        // B1: MAIN-phase plan batching. Consume a cached plan step if one is
+        // still valid; otherwise issue a fresh plan call.
+        if (isMainPhase) {
+            SpellAbility planned = popValidPlanStep(playable, phase);
+            if (planned != null) {
+                recordSpellAction(planned, phase);
+                List<SpellAbility> result = new ArrayList<>();
+                result.add(planned);
+                return result;
+            }
+
+            // No valid cached plan — request a new one.
+            String gameState = buildGameStateWithHistory();
+            String options = OptionSerializer.serializeSpellOptions(playable);
+            String planPrompt = PromptTemplates.mainPhasePlan(gameState, options);
+            String planResponse = callLLMRaw(planPrompt, "mainPhasePlan");
+
+            if (planResponse != null) {
+                List<Integer> planIndices = ResponseParser.parsePlanSequence(planResponse, playable.size());
+                mainPhasePlan.clear();
+                for (int idx : planIndices) {
+                    Card host = playable.get(idx).getHostCard();
+                    if (host != null) {
+                        mainPhasePlan.addLast(host.getName());
+                    }
+                }
+                planPhase = phase;
+                planTurn = getGame().getPhaseHandler().getTurn();
+                planStackSize = getGame().getStack().size();
+
+                SpellAbility firstStep = popValidPlanStep(playable, phase);
+                if (firstStep != null) {
+                    recordSpellAction(firstStep, phase);
+                    List<SpellAbility> result = new ArrayList<>();
+                    result.add(firstStep);
+                    return result;
+                }
+                // Empty plan or no matches → PASS.
+                return null;
+            }
+            // LLM failure → fall through to heuristic fallback.
+            return super.chooseSpellAbilityToPlay();
+        }
+
+        // Non-MAIN (instant-speed) flow: single one-shot LLM call, unchanged.
         String gameState = buildGameStateWithHistory();
         String options = OptionSerializer.serializeSpellOptions(playable);
         String prompt = PromptTemplates.spellSelection(gameState, options);
@@ -478,8 +698,58 @@ public class LLMFullController extends PlayerControllerAi {
         }
 
         SpellAbility selectedSa = playable.get(chosen);
+        recordSpellAction(selectedSa, phase);
 
-        // Record action for sliding window history
+        List<SpellAbility> result = new ArrayList<>();
+        result.add(selectedSa);
+        return result;
+    }
+
+    /**
+     * B1: Pop the next step from the cached MAIN-phase plan, if the plan is
+     * still valid for the current turn/phase and the planned card still exists
+     * in {@code playable}. Returns null if the plan is stale or empty.
+     */
+    private SpellAbility popValidPlanStep(List<SpellAbility> playable, PhaseType phase) {
+        if (mainPhasePlan.isEmpty()) return null;
+
+        int currentTurn = getGame().getPhaseHandler().getTurn();
+        int currentStackSize = getGame().getStack().size();
+        if (planPhase != phase || planTurn != currentTurn || currentStackSize > planStackSize) {
+            // Phase/turn change or unexpected stack object → conservative invalidation.
+            mainPhasePlan.clear();
+            return null;
+        }
+
+        while (!mainPhasePlan.isEmpty()) {
+            String targetName = mainPhasePlan.pollFirst();
+            SpellAbility match = findByCardName(playable, targetName);
+            if (match == null) continue; // card no longer playable, try next
+            try {
+                AiPlayDecision decision = getAi().canPlaySa(match);
+                if (decision == AiPlayDecision.WillPlay) {
+                    return match;
+                }
+            } catch (Exception e) {
+                // Fall through to next plan step
+            }
+        }
+        return null;
+    }
+
+    private SpellAbility findByCardName(List<SpellAbility> playable, String name) {
+        if (name == null) return null;
+        for (SpellAbility sa : playable) {
+            Card host = sa.getHostCard();
+            if (host != null && name.equals(host.getName())) {
+                return sa;
+            }
+        }
+        return null;
+    }
+
+    /** Record a cast-spell entry in the sliding window history. */
+    private void recordSpellAction(SpellAbility selectedSa, PhaseType phase) {
         String phaseName = phase != null ? phase.toString() : "MAIN";
         int turn = getGame().getPhaseHandler().getTurn();
         Card host = selectedSa.getHostCard();
@@ -487,7 +757,6 @@ public class LLMFullController extends PlayerControllerAi {
         StringBuilder actionSb = new StringBuilder();
         actionSb.append("Turn ").append(turn).append(' ').append(phaseName)
                 .append(": Cast ").append(spellName);
-        // Include target info if available
         if (selectedSa.usesTargeting() && selectedSa.getTargets() != null
                 && !selectedSa.getTargets().isEmpty()) {
             actionSb.append(" targeting ");
@@ -504,10 +773,6 @@ public class LLMFullController extends PlayerControllerAi {
             }
         }
         recordAction(actionSb.toString());
-
-        List<SpellAbility> result = new ArrayList<>();
-        result.add(selectedSa);
-        return result;
     }
 
     // =======================================================================
@@ -516,6 +781,14 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn) {
+        // A4: Auto-keep obvious 7-card hands. 2-4 lands + ≥1 cheap spell is a
+        // standard "keep" for any reasonable player; no need to spend an LLM call.
+        CardCollectionView hand = getPlayer().getCardsIn(ZoneType.Hand);
+        if (hand.size() == 7 && isObviousKeep(hand)) {
+            recordAction("Auto-kept opening hand");
+            return true;
+        }
+
         String gameState = buildGameStateWithHistory();
         String prompt = PromptTemplates.mulligan(gameState);
         int chosen = callLLM(prompt, 2, "mulligan");
@@ -525,6 +798,15 @@ public class LLMFullController extends PlayerControllerAi {
         boolean keep = chosen == 0;
         recordAction(keep ? "Kept opening hand" : "Mulliganed");
         return keep;
+    }
+
+    private boolean isObviousKeep(CardCollectionView hand) {
+        int lands = 0, cheapSpells = 0;
+        for (Card c : hand) {
+            if (c.isLand()) lands++;
+            else if (c.getCMC() <= 3) cheapSpells++;
+        }
+        return lands >= 2 && lands <= 4 && cheapSpells >= 1;
     }
 
     @Override
@@ -576,10 +858,14 @@ public class LLMFullController extends PlayerControllerAi {
         String response = callLLMRaw(prompt, "declareAttackers");
 
         if (response == null) {
+            lastAttackPlan = "";
             // LLM failure — fall back to heuristic attack logic
             super.declareAttackers(attacker, combat);
             return;
         }
+
+        // B2: extract the PLAN: line (if any) for carry-over into declareBlockers.
+        lastAttackPlan = extractPlanLine(response);
 
         Set<Integer> attackIndices = ResponseParser.parseBatchIndices(response, canAttack.size());
         for (int idx : attackIndices) {
@@ -648,9 +934,14 @@ public class LLMFullController extends PlayerControllerAi {
 
         // Single batched LLM call for all block assignments
         String gameState = buildGameStateWithHistory();
+        // B2: prepend the attack-phase plan note if we have one (continuity context).
+        if (!lastAttackPlan.isEmpty()) {
+            gameState = gameState + "\nYOUR PRIOR ATTACK-PLAN NOTE: " + lastAttackPlan + "\n";
+        }
         String options = OptionSerializer.serializeBatchBlockOptions(attackerList, blockerList);
         String prompt = PromptTemplates.batchBlock(gameState, options);
         String response = callLLMRaw(prompt, "declareBlockers");
+        lastAttackPlan = ""; // consume once
 
         if (response == null) {
             super.declareBlockers(defender, combat);
@@ -745,18 +1036,15 @@ public class LLMFullController extends PlayerControllerAi {
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
-
-        List<T> remaining = new ArrayList<>();
-        for (T e : optionList) { remaining.add(e); }
-        List<T> selected = new ArrayList<>();
-        for (int i = 0; i < max && !remaining.isEmpty(); i++) {
-            boolean canStop = selected.size() >= min;
-            forge.util.collect.FCollection<T> fc = new forge.util.collect.FCollection<>(remaining);
-            T choice = chooseFromEntities(fc, title, canStop);
-            if (choice == null) { break; }
-            selected.add(choice);
-            remaining.remove(choice);
+        if (optionList == null || optionList.isEmpty()) {
+            return new ArrayList<>();
         }
+
+        // B3: single batched LLM call instead of per-pick loop.
+        List<T> sourceList = new ArrayList<>();
+        for (T e : optionList) { sourceList.add(e); }
+        List<T> selected = chooseMultipleEntitiesBatched(sourceList, min, max, title);
+
         if (selected.size() < min) {
             return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title, targetedPlayer, params);
         }
@@ -775,14 +1063,8 @@ public class LLMFullController extends PlayerControllerAi {
     public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa,
                                                              String title, int num, Map<String, Object> params) {
         if (isLightMode()) return super.chooseSpellAbilitiesForEffect(spells, sa, title, num, params);
-        List<SpellAbility> remaining = new ArrayList<>(spells);
-        List<SpellAbility> selected = new ArrayList<>();
-        for (int i = 0; i < num && !remaining.isEmpty(); i++) {
-            SpellAbility choice = chooseFromSpellAbilities(remaining, title);
-            if (choice == null) { break; }
-            selected.add(choice);
-            remaining.remove(choice);
-        }
+        // B3: single batched LLM call.
+        List<SpellAbility> selected = chooseMultipleSpellAbilitiesBatched(spells, num, title);
         if (selected.isEmpty()) {
             return super.chooseSpellAbilitiesForEffect(spells, sa, title, num, params);
         }

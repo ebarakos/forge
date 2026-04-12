@@ -131,7 +131,7 @@ public final class GamePlayerUtil {
     }
 
     public static LobbyPlayer createLLMPlayer(String name, LLMClient client) {
-        return createLLMPlayer(name, client, LLMMode.HEAVY);
+        return createLLMPlayer(name, client, LLMMode.LIGHT);
     }
 
     /**
@@ -144,10 +144,14 @@ public final class GamePlayerUtil {
         boolean debug = LLMConfig.isDebugEnabled();
         LLMConfig config = LLMConfig.fromProfileString(profileString, apiKey,
                 0.2, 0, 0, debug);
+        boolean hasAuth = (config.getApiKey() != null && !config.getApiKey().isEmpty())
+                || (config.getUserApiKey() != null && !config.getUserApiKey().isEmpty())
+                || "ollama".equals(config.getProvider());
+        String upstream = config.getRelayProvider() != null ? "→" + config.getRelayProvider() : "";
         System.err.println("[LLM] Creating " + displayProfile + " player '" + name
-                + "' → " + config.getProvider() + ":" + config.getModel()
+                + "' → " + config.getProvider() + upstream + ":" + config.getModel()
                 + " mode=" + config.getMode()
-                + " (apiKey=" + (apiKey != null ? "set" : "MISSING") + ", debug=" + debug + ")");
+                + " (auth=" + (hasAuth ? "ok" : "MISSING") + ", debug=" + debug + ")");
         LLMClient client = new LLMClient(config);
         return createLLMPlayer(name, client, config.getMode());
     }

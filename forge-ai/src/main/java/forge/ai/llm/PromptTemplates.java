@@ -50,9 +50,14 @@ public final class PromptTemplates {
 
     /**
      * Build a user prompt for batch attack declaration (all creatures at once).
+     * B2: also asks for a one-line blocking-plan note on line 2, which is
+     * fed back into the subsequent block decision for continuity.
      */
     public static String batchAttack(String gameState, String attackOptions) {
-        return gameState + "\nDECLARE ATTACKERS\n" + attackOptions;
+        return gameState + "\nDECLARE ATTACKERS\n" + attackOptions
+                + "\n\nLine 1: comma-separated attacker indices (or NONE)."
+                + "\nLine 2 (optional): one short sentence describing your blocking plan"
+                + " if they swing back — begin it with PLAN:.";
     }
 
     /**
@@ -109,5 +114,31 @@ public final class PromptTemplates {
      */
     public static String genericChoice(String gameState, String options, String context) {
         return gameState + "\n" + context + "\n\n" + options;
+    }
+
+    /**
+     * Build a prompt for picking multiple items in one batch call (B3).
+     * Response format: comma-separated indices (e.g. "0,2,3"), or "NONE" when
+     * no items should be picked and {@code min == 0}.
+     */
+    public static String batchPick(String gameState, String options, String context,
+                                    int min, int max) {
+        String noneHint = min == 0 ? " or NONE" : "";
+        return gameState + "\n" + context
+                + "\nPick between " + min + " and " + max + " items."
+                + " Respond with comma-separated indices (e.g. 0,2,3)" + noneHint + ".\n\n"
+                + options;
+    }
+
+    /**
+     * Build a prompt for the MAIN-phase plan batching (B1).
+     * The LLM returns an ordered list of spell indices (or a subset + PASS)
+     * that will be executed in sequence until the plan is invalidated.
+     */
+    public static String mainPhasePlan(String gameState, String options) {
+        return gameState + "\nPLAN YOUR MAIN PHASE.\n"
+                + "List the spell indices to cast in order, comma-separated. "
+                + "End with PASS to stop casting (e.g. 2,0,PASS). "
+                + "If you want to do nothing, reply PASS.\n\n" + options;
     }
 }

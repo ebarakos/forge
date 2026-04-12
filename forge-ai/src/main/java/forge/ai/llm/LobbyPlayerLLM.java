@@ -15,11 +15,11 @@ public class LobbyPlayerLLM extends LobbyPlayerAi {
     public LobbyPlayerLLM(String name, LLMClient client, LLMMode mode) {
         super(name, null);
         this.client = client;
-        this.mode = mode != null ? mode : LLMMode.HEAVY;
+        this.mode = mode != null ? mode : LLMMode.LIGHT;
     }
 
     public LobbyPlayerLLM(String name, LLMClient client) {
-        this(name, client, LLMMode.HEAVY);
+        this(name, client, LLMMode.LIGHT);
     }
 
     @Override
