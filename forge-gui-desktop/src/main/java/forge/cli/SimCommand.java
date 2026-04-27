@@ -322,13 +322,20 @@ public class SimCommand implements Callable<Integer> {
         }
         if (legacy != null) return legacy;
 
-        // Final fallback: FORGE_DEFAULT_PROFILE env var lets a downstream caller
-        // pick a default (e.g. an LLM profile) without passing -P flags. Only
-        // applies to the first two seats — extras stay heuristic.
+        // Final fallback for seats 1-2: derive a default LLM profile from the
+        // shared relay convention (RELAY_PROVIDER, RELAY_MODEL, RELAY_CUSTOM_URL
+        // for the custom upstream). Lets a downstream caller — or any shell
+        // that has sourced this project's .env — opt every match into a relay-
+        // routed LLM player without passing -P flags. Extras stay heuristic.
         if (playerIndex < 2) {
-            String fallback = System.getenv("FORGE_DEFAULT_PROFILE");
-            if (fallback != null && !fallback.trim().isEmpty()) {
-                return fallback.trim();
+            String relayProvider = forge.ai.llm.LLMConfig.loadProviderApiKey("RELAY_PROVIDER");
+            if (relayProvider != null && !relayProvider.trim().isEmpty()) {
+                String relayModel = forge.ai.llm.LLMConfig.loadProviderApiKey("RELAY_MODEL");
+                StringBuilder sb = new StringBuilder("relay-").append(relayProvider.trim()).append(':');
+                if (relayModel != null && !relayModel.trim().isEmpty()) {
+                    sb.append(relayModel.trim());
+                }
+                return sb.toString();
             }
         }
         return null;
