@@ -94,7 +94,11 @@ public class GameCopier {
             newPlayer.setLifeStartedThisTurnWith(origPlayer.getLifeStartedThisTurnWith());
             newPlayer.setDamageReceivedThisTurn(origPlayer.getDamageReceivedThisTurn());
             newPlayer.setLandsPlayedThisTurn(origPlayer.getLandsPlayedThisTurn());
-            newPlayer.setCounters(Maps.newHashMap(origPlayer.getCounters()));
+            // Avoid allocating a fresh HashMap when counters is empty —
+            // the player's default counter map handles the empty case.
+            if (!origPlayer.getCounters().isEmpty()) {
+                newPlayer.setCounters(Maps.newHashMap(origPlayer.getCounters()));
+            }
             newPlayer.setSpeed(origPlayer.getSpeed());
             newPlayer.setBlessing(origPlayer.hasBlessing(), null);
             newPlayer.setDescended(origPlayer.getDescended());
@@ -284,6 +288,21 @@ public class GameCopier {
     private static PaperCard hidden_info_card = new PaperCard(CardRules.fromScript(Lists.newArrayList("Name:hidden", "Types:Artifact", "Oracle:")), "", CardRarity.Common);
     private static final boolean PRUNE_HIDDEN_INFO = false;
     private static final boolean USE_FROM_PAPER_CARD = true;
+    /*
+     * Performance bottleneck (per-card hot path): Card.fromPaperCard at line ~304
+     * re-parses oracle text via CardFactory.getCard for every card on every game
+     * copy — typically 30+ cards × hundreds of copies per AI decision. Profile
+     * with `./run.sh --profile -d a.dck -d b.dck -n 20` and open profile.jfr to
+     * confirm before refactoring.
+     *
+     * Planned next-step (deferred from PR4): cache a parsed-template Card per
+     * PaperCard in a WeakHashMap and clone its already-built static/spell/trigger
+     * ability lists onto a fresh Card instance with the new owner + game id.
+     * Templates are immutable after parse, so the share is safe — but per-card
+     * state baked into ability bodies is a known risk. Validate by running the
+     * existing GameSimulator.ensureGameCopyScoreMatches against a corpus of
+     * mid-game states before flipping the default.
+     */
     private Card createCardCopy(Game newGame, Player newOwner, Card c, Player aiPlayer) {
         if (c.isToken() && !c.isImmutable()) {
             Card result = new TokenInfo(c).makeOneToken(newOwner);

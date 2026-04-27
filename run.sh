@@ -24,6 +24,7 @@ DO_CLEAN=false
 BUILD_ONLY=false
 RUN_ONLY=false
 GUI_MODE=false
+DO_PROFILE=false
 PASSTHROUGH_ARGS=()
 
 for arg in "$@"; do
@@ -32,6 +33,7 @@ for arg in "$@"; do
         --build-only) BUILD_ONLY=true ;;
         --run-only)   RUN_ONLY=true ;;
         --gui)        GUI_MODE=true ;;
+        --profile)    DO_PROFILE=true ;;
         --help|-h)
             echo "Usage: ./run.sh [OPTIONS] [app args...]"
             echo ""
@@ -40,6 +42,7 @@ for arg in "$@"; do
             echo "  --build-only  Build without running"
             echo "  --run-only    Run existing JAR without building"
             echo "  --gui         Launch GUI mode instead of sim"
+            echo "  --profile     Run with Java Flight Recorder enabled (writes profile.jfr)"
             echo "  -h, --help    Show this help"
             echo ""
             echo "Examples:"
@@ -48,11 +51,19 @@ for arg in "$@"; do
             echo "  ./run.sh --gui                    # smart build + run GUI"
             echo "  ./run.sh --clean                  # clean build + run sim"
             echo "  ./run.sh --run-only               # skip build, just run"
+            echo "  ./run.sh --profile -d a.dck -d b.dck -n 20  # JFR profile"
             exit 0
             ;;
         *)            PASSTHROUGH_ARGS+=("$arg") ;;
     esac
 done
+
+# JFR profiling: write profile.jfr in the working directory.
+# Open with `jfr summary profile.jfr` or load in JDK Mission Control.
+if $DO_PROFILE; then
+    JVM_ARGS+=(-XX:+FlightRecorder
+              "-XX:StartFlightRecording=duration=300s,filename=profile.jfr,settings=profile")
+fi
 
 if $BUILD_ONLY && $RUN_ONLY; then
     echo "Error: --build-only and --run-only are mutually exclusive."
