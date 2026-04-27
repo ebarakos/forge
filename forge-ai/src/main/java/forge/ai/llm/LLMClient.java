@@ -160,6 +160,11 @@ public class LLMClient {
         if (config.getUserApiKey() != null && !config.getUserApiKey().isEmpty()) {
             reqBuilder.header("X-User-Api-Key", config.getUserApiKey());
         }
+        // Forward custom upstream URL to the relay as X-Custom-Url (server-side
+        // proxy to a self-hosted OpenAI-compatible endpoint, e.g. LM Studio).
+        if (config.getCustomUrl() != null && !config.getCustomUrl().isEmpty()) {
+            reqBuilder.header("X-Custom-Url", config.getCustomUrl());
+        }
 
         HttpRequest request = reqBuilder.build();
 

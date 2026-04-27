@@ -6,11 +6,14 @@
 #   benchmarks/matrix.sh <profileA> <profileB> [-n N] [-j J] [-B BASE_DIR] [-d deck1.dck -d deck2.dck ...]
 #
 # Examples:
+#   # Heuristic vs LM Studio (custom URL via relay) — recommended default
+#   benchmarks/matrix.sh heuristic "relay-custom:openai/gpt-oss-20b" -n 100
+#
 #   # Heuristic vs LLM Cerebras across 4 deck matchups, 100 games each
 #   benchmarks/matrix.sh heuristic "cerebras:qwen-3-235b-a22b-instruct-2507" -n 100
 #
 #   # Custom deck pairings
-#   benchmarks/matrix.sh "cerebras:qwen-3-235b-a22b-instruct-2507" heuristic \
+#   benchmarks/matrix.sh "relay-custom:openai/gpt-oss-20b" heuristic \
 #       -d "Burn.dck" -d "Dimir Faeries.dck"
 #
 set -euo pipefail

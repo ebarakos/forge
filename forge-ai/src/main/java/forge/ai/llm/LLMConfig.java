@@ -6,6 +6,10 @@ package forge.ai.llm;
 public final class LLMConfig {
 
     // GUI display names for the AI profile dropdown.
+    // LLM_CUSTOM_DISPLAY targets a user-supplied OpenAI-compatible endpoint
+    // (e.g. self-hosted LM Studio) routed through the relay's custom-URL
+    // provider. Set RELAY_CUSTOM_URL to your endpoint to enable it.
+    public static final String LLM_CUSTOM_DISPLAY = "LLM (Custom)";
     public static final String LLM_LOCAL_DISPLAY = "LLM (Local)";
     public static final String LLM_OPENROUTER_DISPLAY = "LLM (OpenRouter)";
     public static final String LLM_CEREBRAS_DISPLAY = "LLM (Cerebras)";
@@ -17,6 +21,11 @@ public final class LLMConfig {
     // accepts on those upstreams as of relay v1.6.8 (2026-04-27).
     private static final String DEFAULT_OPENROUTER_MODEL = "inclusionai/ling-2.6-1t:free";
     private static final String DEFAULT_CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507";
+    // Custom provider — bring-your-own OpenAI-compatible endpoint, proxied by the
+    // relay (X-Custom-Url header) so the Worker fetches it server-side and we
+    // sidestep mixed-content / CORS. The endpoint URL must come from the
+    // RELAY_CUSTOM_URL env var; there is no default.
+    private static final String DEFAULT_CUSTOM_MODEL = "openai/gpt-oss-20b";
 
     // Default timeouts per provider (local models need longer for cold starts / model loading)
     private static final int DEFAULT_LOCAL_TIMEOUT_MS = 300_000;   // 5 minutes (reasoning models are verbose)
@@ -30,8 +39,9 @@ public final class LLMConfig {
     private final String apiKey;          // nullable for local Ollama
     private final String model;
     private final String provider;        // "ollama", "openrouter", "cerebras", or "relay"
-    private final String relayProvider;   // upstream provider when using relay (e.g. "cerebras")
+    private final String relayProvider;   // upstream provider when using relay (e.g. "cerebras", "custom")
     private final String userApiKey;      // BYO key forwarded as X-User-Api-Key when using relay
+    private final String customUrl;       // upstream URL when relayProvider == "custom" (forwarded as X-Custom-Url)
     private final double temperature;
     private final int timeoutMs;
     private final int minIntervalMs;      // minimum gap between calls to respect provider RPM limits
@@ -46,6 +56,7 @@ public final class LLMConfig {
         this.provider = b.provider;
         this.relayProvider = b.relayProvider;
         this.userApiKey = b.userApiKey;
+        this.customUrl = b.customUrl;
         this.temperature = b.temperature;
         this.timeoutMs = b.timeoutMs;
         this.minIntervalMs = b.minIntervalMs;
@@ -61,6 +72,8 @@ public final class LLMConfig {
     public String getRelayProvider() { return relayProvider; }
     /** BYO key forwarded as X-User-Api-Key to the relay. Null if not set. */
     public String getUserApiKey() { return userApiKey; }
+    /** Upstream URL forwarded as X-Custom-Url when relayProvider == "custom". Null otherwise. */
+    public String getCustomUrl() { return customUrl; }
     public double getTemperature() { return temperature; }
     public int getTimeoutMs() { return timeoutMs; }
     /** Minimum milliseconds between LLM calls (client-side throttle). 0 = no throttle. */
@@ -134,7 +147,7 @@ public final class LLMConfig {
             // But honour an explicit key if provided (forwarded as X-User-Api-Key)
         } else if (lower.startsWith("relay-cerebras:") || lower.startsWith("relay-openrouter:")
                 || lower.startsWith("relay-groq:") || lower.startsWith("relay-openai:")
-                || lower.startsWith("relay-anthropic:")) {
+                || lower.startsWith("relay-anthropic:") || lower.startsWith("relay-custom:")) {
             // Per-profile relay upstream: "relay-<upstream>:<model>"
             provider = "relay";
             int colon = profile.indexOf(':');
@@ -143,6 +156,7 @@ public final class LLMConfig {
             if (model.isEmpty()) {
                 if ("cerebras".equals(upstream)) model = DEFAULT_CEREBRAS_MODEL;
                 else if ("openrouter".equals(upstream)) model = DEFAULT_OPENROUTER_MODEL;
+                else if ("custom".equals(upstream)) model = DEFAULT_CUSTOM_MODEL;
                 else model = DEFAULT_CEREBRAS_MODEL;
             }
             if ("openrouter".equals(upstream) && free && !model.endsWith(":free")) {
@@ -162,6 +176,7 @@ public final class LLMConfig {
         // Relay upstream provider and BYO key
         String relayProvider = null;
         String userApiKey = null;
+        String customUrl = null;
         if ("relay".equals(provider)) {
             if (relayProviderOverride != null) {
                 relayProvider = relayProviderOverride;
@@ -170,6 +185,15 @@ public final class LLMConfig {
                 if (relayProvider == null || relayProvider.isEmpty()) relayProvider = "cerebras";
             }
             userApiKey = loadProviderApiKey(providerApiKeyEnvVar(relayProvider));
+            if ("custom".equals(relayProvider)) {
+                customUrl = loadProviderApiKey("RELAY_CUSTOM_URL");
+                if (customUrl == null || customUrl.isEmpty()) {
+                    System.err.println("[LLM] relay-custom: requires RELAY_CUSTOM_URL env var "
+                            + "(URL of an OpenAI-compatible endpoint, e.g. https://your-host/v1). "
+                            + "Falling back to heuristic AI for this seat.");
+                    return null;
+                }
+            }
         }
 
         // Client-side throttle: Cerebras free tier is 30 RPM.
@@ -180,13 +204,15 @@ public final class LLMConfig {
         }
 
         // Enable prompt caching on cloud providers that support Anthropic-style
-        // cache_control markers. Ollama doesn't, so leave it off locally.
-        boolean cachingOn = !"ollama".equals(provider);
+        // cache_control markers. Ollama and the custom (LM Studio) URL don't —
+        // they're OpenAI-compatible plain text without Anthropic content blocks.
+        boolean cachingOn = !"ollama".equals(provider) && !"custom".equals(relayProvider);
 
         return new Builder()
                 .provider(provider)
                 .relayProvider(relayProvider)
                 .userApiKey(userApiKey)
+                .customUrl(customUrl)
                 .apiBaseUrl(baseUrl)
                 .apiKey(apiKey)
                 .model(model)
@@ -212,19 +238,22 @@ public final class LLMConfig {
                 || lower.startsWith("cerebras:") || lower.startsWith("relay:")
                 || lower.startsWith("relay-cerebras:") || lower.startsWith("relay-openrouter:")
                 || lower.startsWith("relay-groq:") || lower.startsWith("relay-openai:")
-                || lower.startsWith("relay-anthropic:");
+                || lower.startsWith("relay-anthropic:") || lower.startsWith("relay-custom:");
     }
 
     /** Returns true if the profile string is an LLM GUI display name. */
     public static boolean isLlmDisplayProfile(String profile) {
-        return LLM_LOCAL_DISPLAY.equals(profile)
+        return LLM_CUSTOM_DISPLAY.equals(profile)
+                || LLM_LOCAL_DISPLAY.equals(profile)
                 || LLM_OPENROUTER_DISPLAY.equals(profile)
                 || LLM_CEREBRAS_DISPLAY.equals(profile);
     }
 
     /** Maps a GUI display name to the internal profile string (e.g. "ollama:llama3"). */
     public static String toProfileString(String displayName) {
-        if (LLM_LOCAL_DISPLAY.equals(displayName)) {
+        if (LLM_CUSTOM_DISPLAY.equals(displayName)) {
+            return "relay-custom:" + DEFAULT_CUSTOM_MODEL;
+        } else if (LLM_LOCAL_DISPLAY.equals(displayName)) {
             return "ollama:" + DEFAULT_LOCAL_MODEL;
         } else if (LLM_OPENROUTER_DISPLAY.equals(displayName)) {
             return "relay-openrouter:" + DEFAULT_OPENROUTER_MODEL;
@@ -269,6 +298,7 @@ public final class LLMConfig {
 
     /** Loads a provider-specific API key from env var or .env file. */
     public static String loadProviderApiKey(String envVarName) {
+        if (envVarName == null || envVarName.isEmpty()) return null;
         String key = System.getenv(envVarName);
         if (key != null && !key.isEmpty()) return key;
         return loadDotEnvValue(envVarName);
@@ -311,6 +341,7 @@ public final class LLMConfig {
         private String provider = "ollama";
         private String relayProvider;
         private String userApiKey;
+        private String customUrl;
         private double temperature = 0.2;
         private int timeoutMs = 30000;
         private int minIntervalMs = 0;
@@ -323,6 +354,7 @@ public final class LLMConfig {
         public Builder provider(String provider) { this.provider = provider; return this; }
         public Builder relayProvider(String rp) { this.relayProvider = rp; return this; }
         public Builder userApiKey(String k) { this.userApiKey = k; return this; }
+        public Builder customUrl(String url) { this.customUrl = url; return this; }
         public Builder temperature(double t) { this.temperature = t; return this; }
         public Builder timeoutMs(int ms) { this.timeoutMs = ms; return this; }
         public Builder minIntervalMs(int ms) { this.minIntervalMs = ms; return this; }

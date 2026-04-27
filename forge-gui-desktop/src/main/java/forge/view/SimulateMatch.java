@@ -137,6 +137,7 @@ public class SimulateMatch {
         ORIGINAL_OUT.println("  or:  -P1 Simulation -P2 Default  (legacy syntax)");
         ORIGINAL_OUT.println();
         ORIGINAL_OUT.println("LLM profiles (use provider:model syntax):");
+        ORIGINAL_OUT.println("  -P1 relay-custom:openai/gpt-oss-20b              Custom URL via relay (default for discovery)");
         ORIGINAL_OUT.println("  -P1 ollama:llama3                                Local Ollama model");
         ORIGINAL_OUT.println("  -P2 openrouter:inclusionai/ling-2.6-1t:free      OpenRouter free model (relay-curated)");
         ORIGINAL_OUT.println("  -P2 cerebras:qwen-3-235b-a22b-instruct-2507      Cerebras (free tier, 30 RPM)");

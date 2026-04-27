@@ -189,6 +189,9 @@ public class AiProfileUtil {
         availableProfiles.add(AI_PROFILE_RANDOM_MATCH);
         availableProfiles.add(AI_PROFILE_RANDOM_DUEL);
         availableProfiles.addAll(getAvailableProfiles());
+        // LLM (Custom) listed first — relay-routed to self-hosted LM Studio, no
+        // catalog gating or RPM limits, the recommended default for discovery.
+        availableProfiles.add(LLMConfig.LLM_CUSTOM_DISPLAY);
         availableProfiles.add(LLMConfig.LLM_LOCAL_DISPLAY);
         availableProfiles.add(LLMConfig.LLM_OPENROUTER_DISPLAY);
         availableProfiles.add(LLMConfig.LLM_CEREBRAS_DISPLAY);
