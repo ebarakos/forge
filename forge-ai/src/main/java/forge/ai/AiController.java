@@ -104,11 +104,6 @@ public class AiController {
         game = game0;
         memory = new AiCardMemory();
         simPicker = new SpellAbilityPicker(game, player);
-        // Inject NN evaluator into search if configured via --nn-eval
-        forge.ai.nn.NNEvaluator nnEval = forge.ai.nn.NNEvaluator.getSharedInstance();
-        if (nnEval != null) {
-            simPicker.setNNEvaluator(nnEval);
-        }
     }
 
     public boolean canCheatShuffle() {
@@ -902,10 +897,6 @@ public class AiController {
     }
 
     public AiPlayDecision canPlaySa(SpellAbility sa) {
-        // If ALWAYS_PASS is enabled, refuse to play any spell (for testing purposes)
-        if (getBoolProperty(AiProps.ALWAYS_PASS)) {
-            return AiPlayDecision.CantPlayAi;
-        }
         if (!checkAiSpecificRestrictions(sa)) {
             return AiPlayDecision.CantPlayAi;
         }
@@ -1366,11 +1357,6 @@ public class AiController {
     }
 
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        // If ALWAYS_PASS is enabled, don't play anything (for testing purposes)
-        if (getBoolProperty(AiProps.ALWAYS_PASS)) {
-            return null;
-        }
-
         // Reset cached predicted combat, as it may be stale. It will be
         // re-created if needed and used for any AI logic that needs it.
         predictedCombat = null;
@@ -1380,7 +1366,7 @@ public class AiController {
         // Reset priority mana reservation that's meant to work for one spell only
         memory.clearMemorySet(AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL);
 
-        if (useSimulation || getBoolProperty(AiProps.MCTS_ENABLED)) {
+        if (useSimulation) {
             return singleSpellAbilityList(simPicker.chooseSpellAbilityToPlay(null));
         }
 

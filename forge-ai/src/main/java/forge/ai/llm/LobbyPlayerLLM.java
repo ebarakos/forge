@@ -10,20 +10,14 @@ import forge.game.player.Player;
 public class LobbyPlayerLLM extends LobbyPlayerAi {
 
     private final LLMClient client;
-    private final LLMMode mode;
-
-    public LobbyPlayerLLM(String name, LLMClient client, LLMMode mode) {
-        super(name, null);
-        this.client = client;
-        this.mode = mode != null ? mode : LLMMode.LIGHT;
-    }
 
     public LobbyPlayerLLM(String name, LLMClient client) {
-        this(name, client, LLMMode.LIGHT);
+        super(name, null);
+        this.client = client;
     }
 
     @Override
     protected PlayerControllerAi createControllerFor(Player ai) {
-        return new LLMFullController(ai.getGame(), ai, this, client, mode);
+        return new LLMFullController(ai.getGame(), ai, this, client);
     }
 }

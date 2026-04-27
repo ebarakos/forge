@@ -135,32 +135,6 @@ public class SimCommand implements Callable<Integer> {
     )
     private boolean csvOutput;
 
-    // === Neural Network Options (deprecated — no trained model exists; flags kept for compatibility) ===
-
-    @Option(names = {"--nn-hybrid"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true)
-    private boolean nnHybrid;
-
-    @Option(names = {"--nn-full"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true)
-    private boolean nnFull;
-
-    @Option(names = {"--nn-model"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, paramLabel = "FILE")
-    private File nnModel;
-
-    @Option(names = {"--nn-random"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true)
-    private boolean nnRandom;
-
-    @Option(names = {"--nn-export"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, paramLabel = "DIR")
-    private File nnExportDir;
-
-    @Option(names = {"--nn-epsilon"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, defaultValue = "0.0", paramLabel = "FLOAT")
-    private float nnEpsilon;
-
-    @Option(names = {"--nn-player"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, defaultValue = "all", paramLabel = "PLAYER")
-    private String nnPlayer;
-
-    @Option(names = {"--nn-eval"}, description = "[DEPRECATED] NN player (no trained model). Hidden.", hidden = true, paramLabel = "FILE")
-    private File nnEvalModel;
-
     // === LLM Options ===
 
     @Option(
@@ -177,14 +151,6 @@ public class SimCommand implements Callable<Integer> {
         paramLabel = "FLOAT"
     )
     private double llmTemperature;
-
-    @Option(
-        names = {"--llm-budget"},
-        description = "Max total LLM spend in dollars per run (0 = unlimited). Default: ${DEFAULT-VALUE}",
-        defaultValue = "0.0",
-        paramLabel = "DOLLARS"
-    )
-    private double llmBudget;
 
     @Option(
         names = {"--llm-timeout"},
@@ -205,14 +171,6 @@ public class SimCommand implements Callable<Integer> {
         description = "Auto-append :free to OpenRouter model names (uses free tier, 50 req/day limit)."
     )
     private boolean llmFree;
-
-    @Option(
-        names = {"--llm-mode"},
-        description = "LLM decision mode: heavy (LLM handles most decisions) or light (LLM handles only spells/mulligan/discard/sacrifice). Overrides per-player @mode suffix.",
-        defaultValue = "",
-        paramLabel = "MODE"
-    )
-    private String llmMode;
 
     // === AI Profile Options ===
 
@@ -321,42 +279,6 @@ public class SimCommand implements Callable<Integer> {
         return listProfiles;
     }
 
-    public boolean isNnHybrid() {
-        return nnHybrid;
-    }
-
-    public boolean isNnFull() {
-        return nnFull;
-    }
-
-    public File getNnModel() {
-        return nnModel;
-    }
-
-    public boolean isNnRandom() {
-        return nnRandom;
-    }
-
-    public File getNnExportDir() {
-        return nnExportDir;
-    }
-
-    public boolean isNnMode() {
-        return nnHybrid || nnFull;
-    }
-
-    public float getNnEpsilon() {
-        return nnEpsilon;
-    }
-
-    public String getNnPlayer() {
-        return nnPlayer;
-    }
-
-    public File getNnEvalModel() {
-        return nnEvalModel;
-    }
-
     // === LLM Getters ===
 
     public String getLlmKey() {
@@ -367,11 +289,9 @@ public class SimCommand implements Callable<Integer> {
     }
 
     public double getLlmTemperature() { return llmTemperature; }
-    public double getLlmBudget() { return llmBudget; }
     public int getLlmTimeout() { return llmTimeout; }
     public boolean isLlmDebug() { return llmDebug; }
     public boolean isLlmFree() { return llmFree; }
-    public String getLlmMode() { return llmMode; }
 
     /**
      * Get the AI profile for a specific player (0-indexed).

@@ -75,7 +75,6 @@ public class SimulationResult {
      * LLM usage statistics for a player across all games.
      */
     public static class LlmUsage {
-        public String mode;
         public String provider;
         public String model;
         public int totalCalls;
@@ -83,7 +82,6 @@ public class SimulationResult {
         public int totalInputTokens;
         public int totalOutputTokens;
         public long totalLatencyMs;
-        public double estimatedCost;
     }
 
     /**

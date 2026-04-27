@@ -38,10 +38,8 @@ public class LLMClient {
     private final AtomicInteger totalCacheReadTokens = new AtomicInteger(0);
     private final AtomicInteger totalCacheCreationTokens = new AtomicInteger(0);
     private final AtomicLong totalLatencyMs = new AtomicLong(0);
-    private volatile double estimatedCost = 0.0;
-    private final Object costLock = new Object();
 
-    /** D2: if the first caching request is rejected, disable for the rest of the session. */
+    /** If the first caching request is rejected, disable for the rest of the session. */
     private volatile boolean cachingDisabledForSession = false;
 
     public LLMClient(LLMConfig config) {
@@ -64,15 +62,6 @@ public class LLMClient {
      */
     public String chatCompletion(String systemPrompt, String userPrompt,
                                   String callLabel, String playerName) throws LLMException {
-        // Check budget before making the call
-        if (config.getBudgetLimit() > 0) {
-            synchronized (costLock) {
-                if (estimatedCost >= config.getBudgetLimit()) {
-                    throw new BudgetExceededException(estimatedCost, config.getBudgetLimit());
-                }
-            }
-        }
-
         int callNum = totalCalls.incrementAndGet();
 
         // Build request JSON
@@ -251,19 +240,6 @@ public class LLMClient {
             // Non-fatal: usage tracking is best-effort
         }
 
-        // Estimate cost (conservative: $10/MTok input, $30/MTok output).
-        // D2: cached reads cost ~10% of normal input, cache writes ~125%.
-        if (config.getBudgetLimit() > 0) {
-            int uncachedInput = Math.max(0, inputTokens - cacheRead - cacheCreation);
-            double callCost = (uncachedInput * 10.0
-                    + cacheRead * 1.0
-                    + cacheCreation * 12.5
-                    + outputTokens * 30.0) / 1_000_000.0;
-            synchronized (costLock) {
-                estimatedCost += callCost;
-            }
-        }
-
         // Debug output
         if (config.isDebug()) {
             printDebug(callNum, playerName, callLabel, systemPrompt, userPrompt,
@@ -338,17 +314,11 @@ public class LLMClient {
     public int getTotalCacheCreationTokens() { return totalCacheCreationTokens.get(); }
     public long getTotalLatencyMs() { return totalLatencyMs.get(); }
     public boolean isDebug() { return config.isDebug(); }
-    public double getEstimatedCost() {
-        synchronized (costLock) {
-            return estimatedCost;
-        }
-    }
 
     /** Record that a fallback to heuristic occurred. */
     public void recordFallback() { totalFallbacks.incrementAndGet(); }
 
     // Config delegate getters for JSON output
-    public LLMMode getMode() { return config.getMode(); }
     public String getModel() { return config.getModel(); }
     public String getProvider() { return config.getProvider(); }
 }

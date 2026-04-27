@@ -192,12 +192,6 @@ public class AiProfileUtil {
         availableProfiles.add(LLMConfig.LLM_LOCAL_DISPLAY);
         availableProfiles.add(LLMConfig.LLM_OPENROUTER_DISPLAY);
         availableProfiles.add(LLMConfig.LLM_CEREBRAS_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_HEAVY_LOCAL_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_LIGHT_LOCAL_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_HEAVY_OPENROUTER_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_LIGHT_OPENROUTER_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_HEAVY_CEREBRAS_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_LIGHT_CEREBRAS_DISPLAY);
 
         return availableProfiles;
     }

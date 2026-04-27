@@ -5,18 +5,10 @@ package forge.ai.llm;
  */
 public final class LLMConfig {
 
-    // GUI display names for AI profile dropdown (legacy — default to HEAVY mode)
+    // GUI display names for the AI profile dropdown.
     public static final String LLM_LOCAL_DISPLAY = "LLM (Local)";
-    public static final String LLM_OPENROUTER_DISPLAY = "LLM (OpenRouter Free)";
+    public static final String LLM_OPENROUTER_DISPLAY = "LLM (OpenRouter)";
     public static final String LLM_CEREBRAS_DISPLAY = "LLM (Cerebras)";
-
-    // Mode-specific GUI display names
-    public static final String LLM_HEAVY_LOCAL_DISPLAY = "LLM Heavy (Local)";
-    public static final String LLM_LIGHT_LOCAL_DISPLAY = "LLM Light (Local)";
-    public static final String LLM_HEAVY_OPENROUTER_DISPLAY = "LLM Heavy (OpenRouter)";
-    public static final String LLM_LIGHT_OPENROUTER_DISPLAY = "LLM Light (OpenRouter)";
-    public static final String LLM_HEAVY_CEREBRAS_DISPLAY = "LLM Heavy (Cerebras)";
-    public static final String LLM_LIGHT_CEREBRAS_DISPLAY = "LLM Light (Cerebras)";
 
     // Default models for each provider
     private static final String DEFAULT_LOCAL_MODEL = "llama3";
@@ -41,11 +33,7 @@ public final class LLMConfig {
     private final int timeoutMs;
     private final int minIntervalMs;      // minimum gap between calls to respect provider RPM limits
     private final boolean debug;
-    private final LLMMode mode;
-
-    // Shared across all LLM players
-    private final double budgetLimit;  // 0 = unlimited
-    /** D2: Anthropic-style prompt caching (cache_control: ephemeral). */
+    /** Anthropic-style prompt caching (cache_control: ephemeral). */
     private final boolean promptCaching;
 
     private LLMConfig(Builder b) {
@@ -59,8 +47,6 @@ public final class LLMConfig {
         this.timeoutMs = b.timeoutMs;
         this.minIntervalMs = b.minIntervalMs;
         this.debug = b.debug;
-        this.budgetLimit = b.budgetLimit;
-        this.mode = b.mode;
         this.promptCaching = b.promptCaching;
     }
 
@@ -77,8 +63,6 @@ public final class LLMConfig {
     /** Minimum milliseconds between LLM calls (client-side throttle). 0 = no throttle. */
     public int getMinIntervalMs() { return minIntervalMs; }
     public boolean isDebug() { return debug; }
-    public double getBudgetLimit() { return budgetLimit; }
-    public LLMMode getMode() { return mode; }
     public boolean isPromptCachingEnabled() { return promptCaching; }
 
     /** Returns true if this model is a thinking/reasoning model that produces chain-of-thought tokens. */
@@ -96,22 +80,8 @@ public final class LLMConfig {
      */
     public static LLMConfig fromProfileString(String profile, String apiKey,
                                                double temperature, int timeoutMs,
-                                               double budgetLimit, boolean debug,
-                                               boolean free) {
+                                               boolean debug, boolean free) {
         if (profile == null) return null;
-
-        // Extract @mode suffix (e.g., "cerebras:llama3.1-8b@heavy"). Default is LIGHT.
-        LLMMode mode = LLMMode.LIGHT;
-        int atIdx = profile.lastIndexOf('@');
-        if (atIdx > 0) {
-            String modeSuffix = profile.substring(atIdx + 1).trim();
-            LLMMode parsed = LLMMode.fromString(modeSuffix);
-            // Only strip if it's a recognized mode (avoid stripping from model names)
-            if ("heavy".equalsIgnoreCase(modeSuffix) || "light".equalsIgnoreCase(modeSuffix)) {
-                mode = parsed;
-                profile = profile.substring(0, atIdx);
-            }
-        }
 
         String lower = profile.toLowerCase().trim();
         String provider;
@@ -206,7 +176,7 @@ public final class LLMConfig {
             minInterval = CEREBRAS_MIN_INTERVAL_MS;
         }
 
-        // D2: enable prompt caching on cloud providers that support Anthropic-style
+        // Enable prompt caching on cloud providers that support Anthropic-style
         // cache_control markers. Ollama doesn't, so leave it off locally.
         boolean cachingOn = !"ollama".equals(provider);
 
@@ -220,9 +190,7 @@ public final class LLMConfig {
                 .temperature(temperature)
                 .timeoutMs(effectiveTimeout)
                 .minIntervalMs(minInterval)
-                .budgetLimit(budgetLimit)
                 .debug(debug)
-                .mode(mode)
                 .promptCaching(cachingOn)
                 .build();
     }
@@ -230,8 +198,8 @@ public final class LLMConfig {
     /** Backward-compatible overload without free flag. */
     public static LLMConfig fromProfileString(String profile, String apiKey,
                                                double temperature, int timeoutMs,
-                                               double budgetLimit, boolean debug) {
-        return fromProfileString(profile, apiKey, temperature, timeoutMs, budgetLimit, debug, false);
+                                               boolean debug) {
+        return fromProfileString(profile, apiKey, temperature, timeoutMs, debug, false);
     }
 
     public static boolean isLlmProfile(String profile) {
@@ -246,31 +214,21 @@ public final class LLMConfig {
 
     /** Returns true if the profile string is an LLM GUI display name. */
     public static boolean isLlmDisplayProfile(String profile) {
-        return LLM_LOCAL_DISPLAY.equals(profile) || LLM_OPENROUTER_DISPLAY.equals(profile)
-                || LLM_CEREBRAS_DISPLAY.equals(profile)
-                || LLM_HEAVY_LOCAL_DISPLAY.equals(profile) || LLM_LIGHT_LOCAL_DISPLAY.equals(profile)
-                || LLM_HEAVY_OPENROUTER_DISPLAY.equals(profile) || LLM_LIGHT_OPENROUTER_DISPLAY.equals(profile)
-                || LLM_HEAVY_CEREBRAS_DISPLAY.equals(profile) || LLM_LIGHT_CEREBRAS_DISPLAY.equals(profile);
+        return LLM_LOCAL_DISPLAY.equals(profile)
+                || LLM_OPENROUTER_DISPLAY.equals(profile)
+                || LLM_CEREBRAS_DISPLAY.equals(profile);
     }
 
-    /** Maps a GUI display name to the internal profile string (e.g. "ollama:llama3@light"). */
+    /** Maps a GUI display name to the internal profile string (e.g. "ollama:llama3"). */
     public static String toProfileString(String displayName) {
-        if (LLM_LOCAL_DISPLAY.equals(displayName) || LLM_LIGHT_LOCAL_DISPLAY.equals(displayName)) {
-            return "ollama:" + DEFAULT_LOCAL_MODEL + "@light";
-        } else if (LLM_HEAVY_LOCAL_DISPLAY.equals(displayName)) {
-            return "ollama:" + DEFAULT_LOCAL_MODEL + "@heavy";
-        } else if (LLM_OPENROUTER_DISPLAY.equals(displayName) || LLM_LIGHT_OPENROUTER_DISPLAY.equals(displayName)) {
-            return "relay-openrouter:" + DEFAULT_OPENROUTER_MODEL + "@light";
-        } else if (LLM_HEAVY_OPENROUTER_DISPLAY.equals(displayName)) {
-            return "relay-openrouter:" + DEFAULT_OPENROUTER_MODEL + "@heavy";
-        } else if (LLM_CEREBRAS_DISPLAY.equals(displayName) || LLM_LIGHT_CEREBRAS_DISPLAY.equals(displayName)) {
+        if (LLM_LOCAL_DISPLAY.equals(displayName)) {
+            return "ollama:" + DEFAULT_LOCAL_MODEL;
+        } else if (LLM_OPENROUTER_DISPLAY.equals(displayName)) {
+            return "relay-openrouter:" + DEFAULT_OPENROUTER_MODEL;
+        } else if (LLM_CEREBRAS_DISPLAY.equals(displayName)) {
             String m = loadProviderApiKey("RELAY_MODEL");
             if (m == null || m.isEmpty()) m = DEFAULT_CEREBRAS_MODEL;
-            return "relay-cerebras:" + m + "@light";
-        } else if (LLM_HEAVY_CEREBRAS_DISPLAY.equals(displayName)) {
-            String m = loadProviderApiKey("RELAY_MODEL");
-            if (m == null || m.isEmpty()) m = DEFAULT_CEREBRAS_MODEL;
-            return "relay-cerebras:" + m + "@heavy";
+            return "relay-cerebras:" + m;
         }
         return null;
     }
@@ -354,8 +312,6 @@ public final class LLMConfig {
         private int timeoutMs = 30000;
         private int minIntervalMs = 0;
         private boolean debug = false;
-        private double budgetLimit = 0;
-        private LLMMode mode = LLMMode.LIGHT;
         private boolean promptCaching = false;
 
         public Builder apiBaseUrl(String url) { this.apiBaseUrl = url; return this; }
@@ -368,8 +324,6 @@ public final class LLMConfig {
         public Builder timeoutMs(int ms) { this.timeoutMs = ms; return this; }
         public Builder minIntervalMs(int ms) { this.minIntervalMs = ms; return this; }
         public Builder debug(boolean d) { this.debug = d; return this; }
-        public Builder budgetLimit(double limit) { this.budgetLimit = limit; return this; }
-        public Builder mode(LLMMode m) { this.mode = m; return this; }
         public Builder promptCaching(boolean p) { this.promptCaching = p; return this; }
 
         public LLMConfig build() { return new LLMConfig(this); }

@@ -6,10 +6,7 @@ import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.llm.LLMClient;
 import forge.ai.llm.LLMConfig;
-import forge.ai.llm.LLMMode;
 import forge.ai.llm.LobbyPlayerLLM;
-import forge.ai.nn.LobbyPlayerNN;
-import forge.ai.nn.NNBridge;
 import forge.gui.GuiBase;
 import forge.gui.util.SOptionPane;
 import forge.localinstance.properties.ForgeNetPreferences;
@@ -103,57 +100,36 @@ public final class GamePlayerUtil {
     }
 
     /**
-     * Create an NN-backed AI player.
-     *
-     * @param name       player display name
-     * @param bridge     NNBridge implementation (RandomBridge or OnnxBridge)
-     * @param exportDir  directory for training data export, or null to disable
-     * @param fullMode   true for full NN control, false for hybrid
-     */
-    public static LobbyPlayer createNNPlayer(String name, NNBridge bridge,
-                                              String exportDir, boolean fullMode) {
-        LobbyPlayerNN player = new LobbyPlayerNN(name, bridge, exportDir, fullMode);
-        player.setAiProfile("Default");
-        return player;
-    }
-
-    /**
      * Create an LLM-backed AI player.
      *
      * @param name   player display name
      * @param client LLMClient instance for API calls
-     * @param mode   LLM decision routing mode (HEAVY or LIGHT)
      */
-    public static LobbyPlayer createLLMPlayer(String name, LLMClient client, LLMMode mode) {
-        LobbyPlayerLLM player = new LobbyPlayerLLM(name, client, mode);
+    public static LobbyPlayer createLLMPlayer(String name, LLMClient client) {
+        LobbyPlayerLLM player = new LobbyPlayerLLM(name, client);
         player.setAiProfile("Default");
         return player;
     }
 
-    public static LobbyPlayer createLLMPlayer(String name, LLMClient client) {
-        return createLLMPlayer(name, client, LLMMode.LIGHT);
-    }
-
     /**
      * Create an LLM-backed AI player from a GUI display profile name
-     * (e.g. "LLM (Local)" or "LLM Heavy (Cerebras)").
+     * (e.g. "LLM (Cerebras)").
      */
     public static LobbyPlayer createLLMPlayerFromProfile(String name, String displayProfile) {
         String profileString = LLMConfig.toProfileString(displayProfile);
         String apiKey = LLMConfig.loadApiKeyFromEnv();
         boolean debug = LLMConfig.isDebugEnabled();
         LLMConfig config = LLMConfig.fromProfileString(profileString, apiKey,
-                0.2, 0, 0, debug);
+                0.2, 0, debug);
         boolean hasAuth = (config.getApiKey() != null && !config.getApiKey().isEmpty())
                 || (config.getUserApiKey() != null && !config.getUserApiKey().isEmpty())
                 || "ollama".equals(config.getProvider());
         String upstream = config.getRelayProvider() != null ? "→" + config.getRelayProvider() : "";
         System.err.println("[LLM] Creating " + displayProfile + " player '" + name
                 + "' → " + config.getProvider() + upstream + ":" + config.getModel()
-                + " mode=" + config.getMode()
                 + " (auth=" + (hasAuth ? "ok" : "MISSING") + ", debug=" + debug + ")");
         LLMClient client = new LLMClient(config);
-        return createLLMPlayer(name, client, config.getMode());
+        return createLLMPlayer(name, client);
     }
 
     public static void setPlayerName() {

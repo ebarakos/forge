@@ -19,13 +19,6 @@ import com.google.gson.GsonBuilder;
 import forge.LobbyPlayer;
 import forge.ai.llm.LLMClient;
 import forge.ai.llm.LLMConfig;
-import forge.ai.llm.LLMMode;
-import forge.ai.nn.EpsilonGreedyBridge;
-import forge.ai.nn.NNBridge;
-import forge.ai.nn.NNFullController;
-import forge.ai.nn.NNHybridController;
-import forge.ai.nn.OnnxBridge;
-import forge.ai.nn.RandomBridge;
 import forge.cli.ExitCode;
 import forge.cli.ProgressBar;
 import forge.cli.SimCommand;
@@ -69,87 +62,6 @@ public class SimulateMatch {
     private static final PrintStream ORIGINAL_ERR = System.err;
 
     /**
-     * Record game outcome and close training data writers for NN controllers.
-     *
-     * <p>When exactly one NN controller has a data writer and the other player is
-     * not an NN controller (heuristic), no mirror file is produced because the
-     * heuristic player makes decisions outside the NN pipeline.
-     *
-     * <p>When exactly two NN controllers are present and both have data writers,
-     * the <em>first</em> controller also writes a mirror file containing the
-     * second player's buffered decisions (encoded from the second player's own
-     * perspective, so no state flip is needed) with the outcome inverted.
-     * The second controller writes only its primary file. This produces three
-     * distinct files per game: P1's perspective, P2's perspective (primary), and
-     * P2's perspective again as P1's mirror — the last two being identical in
-     * content but written by different code paths. In practice the Python data
-     * loader simply loads all JSONL files from the export directory, so the extra
-     * copy is harmless (and can be deduplicated later if desired).
-     *
-     * <p>The mirror data is passed as {@code mirrorDecisions} to
-     * {@link NNFullController#finishGame} / {@link NNHybridController#finishGame},
-     * which delegate to
-     * {@link forge.ai.nn.TrainingDataWriter#recordOutcome(float, int, String, List)}.
-     */
-    private static void finishNNControllers(Game game) {
-        if (game == null || game.getOutcome() == null) return;
-
-        // Gather (controller, player, dataWriter) triples for NN players only.
-        // We need the writer references before any finishGame call closes them.
-        List<forge.game.player.Player> players = new ArrayList<>(game.getRegisteredPlayers());
-        List<Object[]> nnEntries = new ArrayList<>(); // [controller, player, dataWriter]
-        for (forge.game.player.Player p : players) {
-            forge.game.player.PlayerController ctrl = p.getController();
-            forge.ai.nn.TrainingDataWriter dw = null;
-            if (ctrl instanceof NNFullController) {
-                dw = ((NNFullController) ctrl).getDataWriter();
-            } else if (ctrl instanceof NNHybridController) {
-                dw = ((NNHybridController) ctrl).getDataWriter();
-            }
-            if (dw != null) {
-                nnEntries.add(new Object[]{ctrl, p, dw});
-            }
-        }
-
-        // Snapshot each writer's decision buffer before calling finishGame.
-        // finishGame closes the writer, so we must capture buffers first.
-        Map<forge.ai.nn.TrainingDataWriter, List<forge.ai.nn.TrainingDataWriter.DecisionRecord>> buffers
-                = new java.util.IdentityHashMap<>();
-        for (Object[] entry : nnEntries) {
-            forge.ai.nn.TrainingDataWriter dw = (forge.ai.nn.TrainingDataWriter) entry[2];
-            buffers.put(dw, dw.getBuffer());
-        }
-
-        int turns = game.getPhaseHandler().getTurn();
-        String reason = game.getOutcome().getWinCondition().toString();
-
-        for (int i = 0; i < nnEntries.size(); i++) {
-            Object[] entry = nnEntries.get(i);
-            forge.game.player.PlayerController ctrl = (forge.game.player.PlayerController) entry[0];
-            forge.game.player.Player p = (forge.game.player.Player) entry[1];
-
-            boolean won = !game.getOutcome().isDraw() && game.getOutcome().isWinner(p.getLobbyPlayer());
-
-            // Only the first NN controller writes a mirror file, and only when
-            // there is exactly one other NN controller to mirror from.
-            // (If there are 2 NN players, P1 gets P2's buffer as mirror;
-            //  P2 writes only its own primary file — P2's primary IS the mirror.)
-            List<forge.ai.nn.TrainingDataWriter.DecisionRecord> mirrorBuf = null;
-            if (nnEntries.size() == 2 && i == 0) {
-                Object[] opponentEntry = nnEntries.get(1);
-                forge.ai.nn.TrainingDataWriter oppDw = (forge.ai.nn.TrainingDataWriter) opponentEntry[2];
-                mirrorBuf = buffers.get(oppDw);
-            }
-
-            if (ctrl instanceof NNFullController) {
-                ((NNFullController) ctrl).finishGame(won, turns, reason, mirrorBuf);
-            } else if (ctrl instanceof NNHybridController) {
-                ((NNHybridController) ctrl).finishGame(won, turns, reason, mirrorBuf);
-            }
-        }
-    }
-
-    /**
      * Configuration for a player in parallel simulation.
      * Stores the original deck and player info so fresh RegisteredPlayer objects
      * can be created for each parallel game (avoiding thread-safety issues).
@@ -159,13 +71,8 @@ public class SimulateMatch {
         final String name;
         final String aiProfile;
         final GameType gameType;
-        // NN mode fields (null for regular AI players)
-        NNBridge nnBridge;
-        String nnExportDir;
-        boolean nnFullMode;
         // LLM mode fields (null for regular AI players)
         LLMClient llmClient;
-        LLMMode llmMode;
 
         PlayerConfig(Deck deck, String name, String aiProfile, GameType gameType) {
             this.deck = deck;
@@ -182,9 +89,7 @@ public class SimulateMatch {
                 rp = new RegisteredPlayer((Deck) deck.copyTo(deck.getName()));
             }
             if (llmClient != null) {
-                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClient, llmMode));
-            } else if (nnBridge != null) {
-                rp.setPlayer(GamePlayerUtil.createNNPlayer(name, nnBridge, nnExportDir, nnFullMode));
+                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClient));
             } else {
                 rp.setPlayer(GamePlayerUtil.createAiPlayer(name, aiProfile));
             }
@@ -309,75 +214,6 @@ public class SimulateMatch {
             }
         }
 
-        // NN mode setup
-        NNBridge nnBridge = null;
-        String nnExportDir = null;
-        boolean nnFullMode = false;
-
-        if (cmd.isNnMode()) {
-            // Validate NN flags
-            if (cmd.isNnHybrid() && cmd.isNnFull()) {
-                ORIGINAL_ERR.println("Error: Cannot use both --nn-hybrid and --nn-full");
-                return ExitCode.ARGS_ERROR;
-            }
-            if (!cmd.isNnRandom() && cmd.getNnModel() == null) {
-                ORIGINAL_ERR.println("Error: NN mode requires --nn-random or --nn-model FILE");
-                return ExitCode.ARGS_ERROR;
-            }
-
-            nnFullMode = cmd.isNnFull();
-
-            if (cmd.isNnRandom()) {
-                nnBridge = new RandomBridge();
-                ORIGINAL_ERR.println("NN mode: " + (nnFullMode ? "full" : "hybrid") + " with random bridge");
-            } else {
-                File modelFile = cmd.getNnModel();
-                if (!modelFile.exists()) {
-                    ORIGINAL_ERR.println("Error: ONNX model file not found - " + modelFile.getAbsolutePath());
-                    return ExitCode.ARGS_ERROR;
-                }
-                try {
-                    nnBridge = new OnnxBridge(modelFile.getAbsolutePath());
-                    ORIGINAL_ERR.println("NN mode: " + (nnFullMode ? "full" : "hybrid") + " with ONNX model " + modelFile.getName());
-                } catch (Exception e) {
-                    ORIGINAL_ERR.println("Error: Failed to load ONNX model - " + e.getMessage());
-                    return ExitCode.ARGS_ERROR;
-                }
-            }
-
-            if (cmd.getNnExportDir() != null) {
-                nnExportDir = cmd.getNnExportDir().getAbsolutePath();
-                File exportDir = cmd.getNnExportDir();
-                if (!exportDir.exists()) {
-                    exportDir.mkdirs();
-                }
-                ORIGINAL_ERR.println("NN training data export: " + nnExportDir);
-            }
-
-            // Wrap with epsilon-greedy if requested
-            if (cmd.getNnEpsilon() > 0 && nnBridge != null) {
-                nnBridge = new EpsilonGreedyBridge(nnBridge, cmd.getNnEpsilon());
-                ORIGINAL_ERR.println("NN exploration: epsilon=" + cmd.getNnEpsilon());
-            }
-        }
-
-        // NN board evaluator for heuristic search (--nn-eval)
-        if (cmd.getNnEvalModel() != null) {
-            File evalModelFile = cmd.getNnEvalModel();
-            if (!evalModelFile.exists()) {
-                ORIGINAL_ERR.println("Error: NN eval model file not found - " + evalModelFile.getAbsolutePath());
-                return ExitCode.ARGS_ERROR;
-            }
-            try {
-                forge.ai.nn.NNEvaluator nnEval = new forge.ai.nn.NNEvaluator(evalModelFile.getAbsolutePath());
-                forge.ai.nn.NNEvaluator.setSharedInstance(nnEval);
-                ORIGINAL_ERR.println("NN eval: using " + evalModelFile.getName() + " for board evaluation in heuristic search");
-            } catch (Exception e) {
-                ORIGINAL_ERR.println("Error: Failed to load NN eval model - " + e.getMessage());
-                return ExitCode.ARGS_ERROR;
-            }
-        }
-
         // Tournament mode
         if (cmd.getTournamentType() != null) {
             boolean useSnapshot = cmd.isUseSnapshot();
@@ -388,25 +224,17 @@ public class SimulateMatch {
 
         // Build per-player LLM clients (if profile is an LLM profile)
         Map<Integer, LLMClient> llmClients = new HashMap<>();
-        Map<Integer, LLMMode> llmModes = new HashMap<>();
         for (Map.Entry<Integer, String> entry : aiProfiles.entrySet()) {
             String profile = entry.getValue();
             if (LLMConfig.isLlmProfile(profile)) {
                 LLMConfig llmConfig = LLMConfig.fromProfileString(profile,
                         cmd.getLlmKey(), cmd.getLlmTemperature(), cmd.getLlmTimeout(),
-                        cmd.getLlmBudget(), cmd.isLlmDebug(), cmd.isLlmFree());
+                        cmd.isLlmDebug(), cmd.isLlmFree());
                 if (llmConfig != null) {
-                    // Global --llm-mode overrides per-player @mode suffix
-                    LLMMode effectiveMode = llmConfig.getMode();
-                    String globalMode = cmd.getLlmMode();
-                    if (globalMode != null && !globalMode.isEmpty()) {
-                        effectiveMode = LLMMode.fromString(globalMode);
-                    }
                     LLMClient client = new LLMClient(llmConfig);
                     llmClients.put(entry.getKey(), client);
-                    llmModes.put(entry.getKey(), effectiveMode);
                     ORIGINAL_ERR.println("Player " + (entry.getKey() + 1)
-                            + ": LLM " + effectiveMode + " (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")");
+                            + ": LLM (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")");
                 }
             }
         }
@@ -442,16 +270,6 @@ public class SimulateMatch {
             PlayerConfig config = new PlayerConfig(d, name, profile, type);
             if (llmClients.containsKey(i - 1)) {
                 config.llmClient = llmClients.get(i - 1);
-                config.llmMode = llmModes.getOrDefault(i - 1, LLMMode.LIGHT);
-            } else if (nnBridge != null) {
-                String nnPlayerSetting = cmd.getNnPlayer();
-                boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
-                    || String.valueOf(i).equals(nnPlayerSetting);
-                if (thisPlayerGetsNN) {
-                    config.nnBridge = nnBridge;
-                    config.nnExportDir = nnExportDir;
-                    config.nnFullMode = nnFullMode;
-                }
             }
             playerConfigs.add(config);
 
@@ -463,17 +281,7 @@ public class SimulateMatch {
                 rp = new RegisteredPlayer(d);
             }
             if (llmClients.containsKey(i - 1)) {
-                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClients.get(i - 1),
-                        llmModes.getOrDefault(i - 1, LLMMode.LIGHT)));
-            } else if (nnBridge != null) {
-                String nnPlayerSetting = cmd.getNnPlayer();
-                boolean thisPlayerGetsNN = "all".equals(nnPlayerSetting)
-                    || String.valueOf(i).equals(nnPlayerSetting);
-                if (thisPlayerGetsNN) {
-                    rp.setPlayer(GamePlayerUtil.createNNPlayer(name, nnBridge, nnExportDir, nnFullMode));
-                } else {
-                    rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
-                }
+                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClients.get(i - 1)));
             } else {
                 rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
             }
@@ -584,15 +392,18 @@ public class SimulateMatch {
             // Summary already printed by parallel method
         }
 
-        // Print LLM cost summary if any LLM clients were used
+        // Print LLM usage summary if any LLM clients were used
         if (!llmClients.isEmpty()) {
             ORIGINAL_ERR.println();
             for (Map.Entry<Integer, LLMClient> entry : llmClients.entrySet()) {
                 LLMClient c = entry.getValue();
-                ORIGINAL_ERR.printf("LLM Player %d: %d calls, %d+%d tokens, %dms total, est $%.4f%n",
-                        entry.getKey() + 1, c.getTotalCalls(),
+                int calls = c.getTotalCalls();
+                int fallbacks = c.getTotalFallbacks();
+                double fallbackPct = calls > 0 ? (100.0 * fallbacks / calls) : 0.0;
+                ORIGINAL_ERR.printf("LLM Player %d: %d calls (%d fallbacks, %.1f%%), %d+%d tokens, %dms total%n",
+                        entry.getKey() + 1, calls, fallbacks, fallbackPct,
                         c.getTotalInputTokens(), c.getTotalOutputTokens(),
-                        c.getTotalLatencyMs(), c.getEstimatedCost());
+                        c.getTotalLatencyMs());
             }
         }
 
@@ -656,9 +467,6 @@ public class SimulateMatch {
         result.timeMs = sw.getTime();
         result.isDraw = g1.getOutcome().isDraw();
         result.turns = g1.getPhaseHandler().getTurn();
-
-        // Finalize NN training data writers
-        finishNNControllers(g1);
 
         if (!result.isDraw) {
             result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
@@ -798,9 +606,6 @@ public class SimulateMatch {
         result.isDraw = g1.getOutcome().isDraw();
         result.turns = g1.getPhaseHandler().getTurn();
 
-        // Finalize NN training data writers
-        finishNNControllers(g1);
-
         if (!result.isDraw) {
             result.winnerName = g1.getOutcome().getWinningLobbyPlayer().getName();
             result.winnerIndex = determineWinnerIndex(g1, mc);
@@ -855,8 +660,6 @@ public class SimulateMatch {
             if (playerConfigs.get(p).llmClient != null) {
                 LLMClient c = playerConfigs.get(p).llmClient;
                 SimulationResult.LlmUsage usage = new SimulationResult.LlmUsage();
-                usage.mode = playerConfigs.get(p).llmMode != null
-                        ? playerConfigs.get(p).llmMode.name() : "HEAVY";
                 usage.provider = c.getProvider();
                 usage.model = c.getModel();
                 usage.totalCalls = c.getTotalCalls();
@@ -864,7 +667,6 @@ public class SimulateMatch {
                 usage.totalInputTokens = c.getTotalInputTokens();
                 usage.totalOutputTokens = c.getTotalOutputTokens();
                 usage.totalLatencyMs = c.getTotalLatencyMs();
-                usage.estimatedCost = c.getEstimatedCost();
                 ps.llmUsage = usage;
             }
             jsonResult.summary.players.add(ps);
