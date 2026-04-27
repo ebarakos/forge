@@ -1,5 +1,6 @@
 package forge.ai.llm;
 
+import forge.ai.simulation.GameStateEvaluator;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.card.CardCollectionView;
@@ -59,14 +60,18 @@ public final class GameStateSerializer {
         // Available mana
         serializeAvailableMana(sb, me);
 
+        // Clock summary (turns to kill at current damage rates).
+        serializeClock(sb, me, opp);
+
         // Your battlefield
         sb.append("\nYOUR BATTLEFIELD:\n");
-        serializeBattlefield(sb, me.getCardsIn(ZoneType.Battlefield));
+        serializeBattlefield(sb, me.getCardsIn(ZoneType.Battlefield), 0, false);
 
-        // Opponent's battlefield
+        // Opponent's battlefield (with threat tiers for creatures)
         if (opp != null) {
             sb.append("\nOPPONENT'S BATTLEFIELD:\n");
-            serializeBattlefield(sb, opp.getCardsIn(ZoneType.Battlefield));
+            int myLife = me.getLife();
+            serializeBattlefield(sb, opp.getCardsIn(ZoneType.Battlefield), myLife, true);
         }
 
         // Your hand (full details)
@@ -101,6 +106,36 @@ public final class GameStateSerializer {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * Serialize the combat clock for both players: how many turns until each
+     * player dies at current attack rates. Two figures per side: total combat
+     * damage (assuming nothing blocks — optimistic), and evasive-only damage
+     * (lower bound, since evasive creatures are unblockable for this stat).
+     */
+    private static void serializeClock(StringBuilder sb, Player me, Player opp) {
+        if (opp == null) return;
+        int myTotal = GameStateEvaluator.totalCombatDamage(me);
+        int myEvasive = GameStateEvaluator.evasiveDamage(me);
+        int oppTotal = GameStateEvaluator.totalCombatDamage(opp);
+        int oppEvasive = GameStateEvaluator.evasiveDamage(opp);
+        if (myTotal == 0 && oppTotal == 0) return;
+        sb.append("Clock: ");
+        sb.append("you kill them in ").append(turnsLabel(opp.getLife(), myTotal, myEvasive));
+        sb.append("; they kill you in ").append(turnsLabel(me.getLife(), oppTotal, oppEvasive));
+        sb.append('\n');
+    }
+
+    private static String turnsLabel(int life, int total, int evasive) {
+        int totalT = GameStateEvaluator.turnsToKill(life, total);
+        int evasiveT = GameStateEvaluator.turnsToKill(life, evasive);
+        if (total == 0) return "no clock";
+        if (evasive >= total || evasive == 0) {
+            return totalT + (totalT == 1 ? " turn" : " turns")
+                    + " (" + total + " dmg/turn)";
+        }
+        return totalT + " turns unblocked / " + evasiveT + " turns evasive-only";
     }
 
     /**
@@ -178,7 +213,13 @@ public final class GameStateSerializer {
         sb.append(" (").append(total).append(" total)\n");
     }
 
-    private static void serializeBattlefield(StringBuilder sb, CardCollectionView cards) {
+    /**
+     * Serialize one player's battlefield. When {@code annotateThreats} is true,
+     * each opposing creature is tagged with a T1..T4 threat tier based on the
+     * recipient's life total (T1 = lethal-next-turn class).
+     */
+    private static void serializeBattlefield(StringBuilder sb, CardCollectionView cards,
+                                              int recipientLife, boolean annotateThreats) {
         if (cards.isEmpty()) {
             sb.append("  (empty)\n");
             return;
@@ -207,10 +248,41 @@ public final class GameStateSerializer {
             sb.append('\n');
         }
 
-        // Non-lands with details
+        // Non-lands with details (creatures get a threat tier annotation when looking at the opponent)
         for (Card c : nonLands) {
-            sb.append("  - ").append(serializeCardBattlefield(c)).append('\n');
+            sb.append("  - ").append(serializeCardBattlefield(c));
+            if (annotateThreats && c.isCreature()) {
+                String tier = creatureThreatTier(c, recipientLife);
+                if (tier != null) sb.append(' ').append(tier);
+            }
+            sb.append('\n');
         }
+    }
+
+    /**
+     * Tier an opposing creature: T1 = lethal-class (clocks in 1-2 turns), T2 =
+     * fast clock (3 turns), T3 = engine/value, T4 = filler. Tapped/sick/defender
+     * creatures get no tier (they aren't an immediate threat).
+     */
+    private static String creatureThreatTier(Card c, int targetLife) {
+        if (!c.isCreature()) return null;
+        int power = c.getNetCombatDamage();
+        if (power <= 0) {
+            // Not attacking, but may be a value engine.
+            String oracle = c.getOracleText();
+            if (oracle != null && (oracle.toLowerCase().contains("draw") || oracle.toLowerCase().contains("each turn"))) {
+                return "[T3 engine]";
+            }
+            return null;
+        }
+        if (c.isTapped() || c.isSick() || c.hasKeyword(forge.game.keyword.Keyword.DEFENDER)) {
+            return null;
+        }
+        int turns = (Math.max(targetLife, 0) + power - 1) / Math.max(power, 1);
+        if (turns <= 2) return "[T1 lethal in " + turns + "]";
+        if (turns <= 3) return "[T2 kills in " + turns + "]";
+        if (turns <= 5) return "[T3 clock]";
+        return "[T4 filler]";
     }
 
     /**

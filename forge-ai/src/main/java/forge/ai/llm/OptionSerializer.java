@@ -20,11 +20,26 @@ public final class OptionSerializer {
      * Includes a PASS option at the end.
      */
     public static String serializeSpellOptions(List<SpellAbility> spells) {
+        return serializeSpellOptions(spells, null);
+    }
+
+    /**
+     * Serialize a list of SpellAbilities with optional per-option score deltas.
+     * Pass {@code evalDeltas == null} to skip the eval hint annotation. When
+     * provided, the list must be parallel to {@code spells}; nulls within the
+     * list are treated as "no hint for this index".
+     */
+    public static String serializeSpellOptions(List<SpellAbility> spells, List<Integer> evalDeltas) {
         StringBuilder sb = new StringBuilder("OPTIONS:\n");
         for (int i = 0; i < spells.size(); i++) {
             SpellAbility sa = spells.get(i);
             sb.append(i).append(": ");
             serializeSpellAbility(sb, sa);
+            if (evalDeltas != null && i < evalDeltas.size() && evalDeltas.get(i) != null) {
+                int delta = evalDeltas.get(i);
+                String sign = delta >= 0 ? "+" : "";
+                sb.append("  [eval ").append(sign).append(delta).append("]");
+            }
             sb.append('\n');
         }
         sb.append(spells.size()).append(": PASS (do nothing)\n");

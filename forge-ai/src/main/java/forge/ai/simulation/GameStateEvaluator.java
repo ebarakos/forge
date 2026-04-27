@@ -654,6 +654,52 @@ public class GameStateEvaluator {
         cardEvalCache.clear();
     }
 
+    /**
+     * Compute turns until {@code damagePerTurn} kills a player at {@code life}.
+     * Returns {@link Integer#MAX_VALUE} when there is no clock (damage == 0).
+     * Used by the LLM player's threat tiering and by the heuristic evaluator's
+     * clock-advantage bonus.
+     */
+    public static int turnsToKill(int life, int damagePerTurn) {
+        if (damagePerTurn <= 0) return Integer.MAX_VALUE;
+        return (Math.max(life, 0) + damagePerTurn - 1) / damagePerTurn;
+    }
+
+    /**
+     * Sum a player's evasive combat damage from non-sick, untapped, non-defender
+     * creatures with flying or horsemanship (or other unblockable static effects).
+     * The figure is a lower bound on damage they can land next turn.
+     */
+    public static int evasiveDamage(Player p) {
+        int total = 0;
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isCreature() || c.isTapped() || c.isSick()
+                    || c.hasKeyword(Keyword.DEFENDER)) continue;
+            int power = c.getNetCombatDamage();
+            if (power <= 0) continue;
+            if (c.hasKeyword(Keyword.FLYING) || c.hasKeyword(Keyword.HORSEMANSHIP)
+                    || StaticAbilityCantAttackBlock.cantBlockBy(c, null)) {
+                total += power;
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Sum a player's total combat damage from non-sick, untapped, non-defender
+     * creatures (assumes nothing blocks). Optimistic upper bound on the clock.
+     */
+    public static int totalCombatDamage(Player p) {
+        int total = 0;
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isCreature() || c.isTapped() || c.isSick()
+                    || c.hasKeyword(Keyword.DEFENDER)) continue;
+            int power = c.getNetCombatDamage();
+            if (power > 0) total += power;
+        }
+        return total;
+    }
+
     public static int evaluateLand(Card c) {
         int value = 3;
         // for each mana color a land generates for free, increase the value by one

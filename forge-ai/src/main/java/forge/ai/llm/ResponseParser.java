@@ -1,5 +1,10 @@
 package forge.ai.llm;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -65,13 +70,45 @@ public final class ResponseParser {
     }
 
     /**
-     * Parse the LLM response to extract a chosen option index.
-     *
-     * @param response   the raw LLM response text
-     * @param numOptions number of valid options [0, numOptions)
-     * @return chosen index, or -1 if parsing fails
+     * Try to parse the response body as a JSON object and return it. Returns
+     * null if the body isn't a JSON object — the caller should then fall back
+     * to legacy text parsers. Tolerates leading {@code <think>} blocks (already
+     * stripped upstream) and common chatty preambles.
+     */
+    private static JsonObject tryParseJsonObject(String response) {
+        if (response == null) return null;
+        String s = response.strip();
+        if (s.isEmpty()) return null;
+        // Some providers wrap structured output in ```json ... ``` blocks even
+        // with response_format set. Strip a leading code fence if present.
+        if (s.startsWith("```")) {
+            int nl = s.indexOf('\n');
+            if (nl >= 0) s = s.substring(nl + 1);
+            int closing = s.lastIndexOf("```");
+            if (closing >= 0) s = s.substring(0, closing);
+            s = s.strip();
+        }
+        if (!s.startsWith("{")) return null;
+        try {
+            JsonElement el = JsonParser.parseString(s);
+            return el.isJsonObject() ? el.getAsJsonObject() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Extract a chosen option index. Tries JSON {@code {choice: int}} first;
+     * falls back to text parsing for legacy responses.
      */
     public static int parseChoiceIndex(String response, int numOptions) {
+        JsonObject obj = tryParseJsonObject(response);
+        if (obj != null && obj.has("choice")) {
+            try {
+                int v = obj.get("choice").getAsInt();
+                if (v >= 0 && v < numOptions) return v;
+            } catch (Exception ignored) {}
+        }
         if (response == null || response.isBlank()) return -1;
 
         String trimmed = response.strip();
@@ -147,6 +184,30 @@ public final class ResponseParser {
     public static Map<Integer, Set<Integer>> parseBatchBlockAssignments(
             String response, int numAttackers, int numBlockers) {
         Map<Integer, Set<Integer>> result = new LinkedHashMap<>();
+        // Try JSON {blocks: [{attacker:int, blockers:int[]}]} first
+        JsonObject obj = tryParseJsonObject(response);
+        if (obj != null && obj.has("blocks") && obj.get("blocks").isJsonArray()) {
+            JsonArray arr = obj.getAsJsonArray("blocks");
+            for (JsonElement el : arr) {
+                if (!el.isJsonObject()) continue;
+                JsonObject entry = el.getAsJsonObject();
+                if (!entry.has("attacker") || !entry.has("blockers")) continue;
+                int attIdx;
+                try { attIdx = entry.get("attacker").getAsInt(); }
+                catch (Exception ex) { continue; }
+                if (attIdx < 0 || attIdx >= numAttackers) continue;
+                if (!entry.get("blockers").isJsonArray()) continue;
+                Set<Integer> blockers = new LinkedHashSet<>();
+                for (JsonElement b : entry.getAsJsonArray("blockers")) {
+                    try {
+                        int bi = b.getAsInt();
+                        if (bi >= 0 && bi < numBlockers) blockers.add(bi);
+                    } catch (Exception ignored) {}
+                }
+                if (!blockers.isEmpty()) result.put(attIdx, blockers);
+            }
+            if (!result.isEmpty()) return result;
+        }
         if (response == null || response.isBlank()) return result;
 
         String trimmed = response.strip().toUpperCase();
@@ -213,6 +274,17 @@ public final class ResponseParser {
      */
     public static Set<Integer> parseBatchIndices(String response, int maxIndex) {
         Set<Integer> result = new LinkedHashSet<>();
+        // Try JSON {indices: int[]} first
+        JsonObject obj = tryParseJsonObject(response);
+        if (obj != null && obj.has("indices") && obj.get("indices").isJsonArray()) {
+            for (JsonElement el : obj.getAsJsonArray("indices")) {
+                try {
+                    int v = el.getAsInt();
+                    if (v >= 0 && v < maxIndex) result.add(v);
+                } catch (Exception ignored) {}
+            }
+            return result;
+        }
         if (response == null || response.isBlank()) return result;
 
         String trimmed = response.strip().toUpperCase();
@@ -244,6 +316,19 @@ public final class ResponseParser {
      */
     public static List<Integer> parsePlanSequence(String response, int numOptions) {
         List<Integer> result = new ArrayList<>();
+        // Try JSON {plan: int[]} first
+        JsonObject obj = tryParseJsonObject(response);
+        if (obj != null && obj.has("plan") && obj.get("plan").isJsonArray()) {
+            Set<Integer> seen = new LinkedHashSet<>();
+            for (JsonElement el : obj.getAsJsonArray("plan")) {
+                try {
+                    int v = el.getAsInt();
+                    if (v < 0 || v >= numOptions) break; // out-of-range ends plan
+                    if (seen.add(v)) result.add(v);
+                } catch (Exception ex) { break; }
+            }
+            return result;
+        }
         if (response == null || response.isBlank()) return result;
 
         String trimmed = response.strip().toUpperCase();

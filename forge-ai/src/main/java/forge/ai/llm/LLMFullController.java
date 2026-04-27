@@ -74,9 +74,54 @@ public class LLMFullController extends PlayerControllerAi {
     private int cachedStateTurn = -1;
     private PhaseType cachedStatePhase = null;
 
+    /**
+     * Per-option eval hints (PR3.c) — opt-in via {@code FORGE_LLM_EVAL_HINTS=true}.
+     * Off by default because building a fresh {@link forge.ai.simulation.GameSimulator}
+     * per candidate is expensive on the current GameCopier; PR4 makes this cheap.
+     * Capped at {@link #EVAL_HINT_MAX_CANDIDATES} to bound CPU when the hand is wide.
+     */
+    private static final boolean EVAL_HINTS_ENABLED = isTruthy(System.getenv("FORGE_LLM_EVAL_HINTS"));
+    private static final int EVAL_HINT_MAX_CANDIDATES = 6;
+
+    private static boolean isTruthy(String v) {
+        return v != null && !v.isEmpty() && !"false".equalsIgnoreCase(v) && !"0".equals(v);
+    }
+
     public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
         super(game, p, lp);
         this.client = client;
+    }
+
+    /**
+     * Compute one-step lookahead score deltas for each candidate spell. Returns
+     * null when the feature flag is off, the candidate list is too wide, or any
+     * simulation throws. Caller should treat null as "no hint annotation".
+     */
+    private List<Integer> computeEvalDeltas(List<SpellAbility> playable) {
+        if (!EVAL_HINTS_ENABLED) return null;
+        if (playable.isEmpty() || playable.size() > EVAL_HINT_MAX_CANDIDATES) return null;
+        try {
+            // Baseline score is captured by GameSimulator's constructor; reuse one
+            // simulator per candidate (each makes its own GameCopier).
+            List<Integer> deltas = new ArrayList<>(playable.size());
+            for (SpellAbility sa : playable) {
+                forge.ai.simulation.SimulationController ctrl =
+                        new forge.ai.simulation.SimulationController(
+                                new forge.ai.simulation.GameStateEvaluator.Score(0), getPlayer());
+                forge.ai.simulation.GameSimulator sim =
+                        new forge.ai.simulation.GameSimulator(ctrl, getGame(), getPlayer(), null);
+                forge.ai.simulation.GameStateEvaluator.Score before = sim.getScoreForOrigGame();
+                forge.ai.simulation.GameStateEvaluator.Score after = sim.simulateSpellAbility(sa);
+                int delta = after.value - before.value;
+                deltas.add(delta);
+            }
+            return deltas;
+        } catch (Exception e) {
+            if (client.isDebug()) {
+                System.err.println("[LLM] eval hints disabled this call: " + e.getMessage());
+            }
+            return null;
+        }
     }
 
     /** Record an action summary for the sliding window history. */
@@ -199,7 +244,8 @@ public class LLMFullController extends PlayerControllerAi {
         try {
             String response = client.chatCompletion(
                     PromptTemplates.SYSTEM_PROMPT, userPrompt,
-                    callLabel, getPlayer().getName());
+                    callLabel, getPlayer().getName(),
+                    LLMResponseSchema.CHOICE);
             int choice = ResponseParser.parseChoiceIndex(response, numOptions);
             if (choice < 0) {
                 if (client.isDebug()) {
@@ -224,10 +270,15 @@ public class LLMFullController extends PlayerControllerAi {
      * Returns null on failure.
      */
     private String callLLMRaw(String userPrompt, String callLabel) {
+        return callLLMRaw(userPrompt, callLabel, LLMResponseSchema.INDICES);
+    }
+
+    /** Schema-aware variant for batch calls. */
+    private String callLLMRaw(String userPrompt, String callLabel, LLMResponseSchema schema) {
         try {
             return client.chatCompletion(
                     PromptTemplates.SYSTEM_PROMPT, userPrompt,
-                    callLabel, getPlayer().getName());
+                    callLabel, getPlayer().getName(), schema);
         } catch (Exception e) {
             if (client.isDebug()) {
                 System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
@@ -620,9 +671,10 @@ public class LLMFullController extends PlayerControllerAi {
 
             // No valid cached plan — request a new one.
             String gameState = buildGameStateWithHistory();
-            String options = OptionSerializer.serializeSpellOptions(playable);
+            List<Integer> evalDeltas = computeEvalDeltas(playable);
+            String options = OptionSerializer.serializeSpellOptions(playable, evalDeltas);
             String planPrompt = PromptTemplates.mainPhasePlan(gameState, options);
-            String planResponse = callLLMRaw(planPrompt, "mainPhasePlan");
+            String planResponse = callLLMRaw(planPrompt, "mainPhasePlan", LLMResponseSchema.PLAN);
 
             if (planResponse != null) {
                 List<Integer> planIndices = ResponseParser.parsePlanSequence(planResponse, playable.size());
@@ -651,9 +703,10 @@ public class LLMFullController extends PlayerControllerAi {
             return super.chooseSpellAbilityToPlay();
         }
 
-        // Non-MAIN (instant-speed) flow: single one-shot LLM call, unchanged.
+        // Non-MAIN (instant-speed) flow: single one-shot LLM call.
         String gameState = buildGameStateWithHistory();
-        String options = OptionSerializer.serializeSpellOptions(playable);
+        List<Integer> evalDeltas = computeEvalDeltas(playable);
+        String options = OptionSerializer.serializeSpellOptions(playable, evalDeltas);
         String prompt = PromptTemplates.spellSelection(gameState, options);
         int totalOptions = playable.size() + 1; // +1 for PASS
         int chosen = callLLM(prompt, totalOptions, "chooseSpellAbilityToPlay");
@@ -905,7 +958,7 @@ public class LLMFullController extends PlayerControllerAi {
         }
         String options = OptionSerializer.serializeBatchBlockOptions(attackerList, blockerList);
         String prompt = PromptTemplates.batchBlock(gameState, options);
-        String response = callLLMRaw(prompt, "declareBlockers");
+        String response = callLLMRaw(prompt, "declareBlockers", LLMResponseSchema.BLOCKS);
         lastAttackPlan = ""; // consume once
 
         if (response == null) {

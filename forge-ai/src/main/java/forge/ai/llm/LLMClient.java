@@ -41,6 +41,8 @@ public class LLMClient {
 
     /** If the first caching request is rejected, disable for the rest of the session. */
     private volatile boolean cachingDisabledForSession = false;
+    /** If the first structured-output request is rejected, disable for the rest of the session. */
+    private volatile boolean structuredOutputDisabledForSession = false;
 
     public LLMClient(LLMConfig config) {
         this.config = config;
@@ -62,16 +64,49 @@ public class LLMClient {
      */
     public String chatCompletion(String systemPrompt, String userPrompt,
                                   String callLabel, String playerName) throws LLMException {
+        return chatCompletion(systemPrompt, userPrompt, callLabel, playerName, null);
+    }
+
+    /**
+     * Send a chat completion request with an optional response schema. When a
+     * schema is provided, structured output is requested via {@code response_format}
+     * (OpenAI-style) or {@code format} (Ollama). The returned content is the
+     * assistant message — typically valid JSON conforming to the schema, or the
+     * legacy plain-text format if structured output was rejected for the session.
+     */
+    public String chatCompletion(String systemPrompt, String userPrompt,
+                                  String callLabel, String playerName,
+                                  LLMResponseSchema schema) throws LLMException {
         int callNum = totalCalls.incrementAndGet();
 
         // Build request JSON
         JsonObject body = new JsonObject();
         body.addProperty("model", config.getModel());
         body.addProperty("temperature", config.getTemperature());
-        // Set max_tokens to bound token usage. Responses are short (numbers/indices),
-        // but thinking models need room for chain-of-thought reasoning.
-        int maxTokens = config.isThinkingModel() ? 16384 : 512;
+        // Set max_tokens to bound token usage. Responses include a short
+        // reasoning string + the structured payload, plus thinking-model CoT.
+        int maxTokens = config.isThinkingModel() ? 16384 : 1024;
         body.addProperty("max_tokens", maxTokens);
+
+        // Inject structured output (json_schema for cloud / format for ollama)
+        // unless the provider has rejected it earlier this session.
+        if (schema != null && !structuredOutputDisabledForSession) {
+            JsonObject jsonSchema = schema.toJsonSchema();
+            if ("ollama".equals(config.getProvider())) {
+                // Ollama's OpenAI-compatible endpoint accepts response_format too,
+                // but raw schema in `format` is documented and works on older builds.
+                body.add("format", jsonSchema);
+            } else {
+                JsonObject responseFormat = new JsonObject();
+                responseFormat.addProperty("type", "json_schema");
+                JsonObject jsonSchemaWrapper = new JsonObject();
+                jsonSchemaWrapper.addProperty("name", "decision_" + schema.fieldName());
+                jsonSchemaWrapper.add("schema", jsonSchema);
+                jsonSchemaWrapper.addProperty("strict", true);
+                responseFormat.add("json_schema", jsonSchemaWrapper);
+                body.add("response_format", responseFormat);
+            }
+        }
 
         JsonArray messages = new JsonArray();
         JsonObject sysMsg = new JsonObject();
@@ -167,18 +202,33 @@ public class LLMClient {
         totalLatencyMs.addAndGet(latencyMs);
 
         if (response.statusCode() >= 400) {
-            // D2: disable caching for the session if the provider rejected the
+            String errBody = response.body();
+            String errSnippet = errBody.substring(0, Math.min(400, errBody.length()));
+            // Disable caching for the session if the provider rejected the
             // content-block format. Next call will use the legacy string format.
             if (config.isPromptCachingEnabled() && !cachingDisabledForSession
                     && (response.statusCode() == 400 || response.statusCode() == 422)) {
                 cachingDisabledForSession = true;
                 if (config.isDebug()) {
                     System.err.println("[LLM] Prompt caching rejected by provider, disabling for session. Body: "
-                            + response.body().substring(0, Math.min(200, response.body().length())));
+                            + errSnippet);
                 }
             }
-            throw new LLMException("LLM API error " + response.statusCode()
-                    + ": " + response.body().substring(0, Math.min(200, response.body().length())));
+            // Disable structured output for the session if the provider rejected
+            // the response_format / format field. Next call will use plain text.
+            String lower = errSnippet.toLowerCase();
+            boolean schemaRejected = schema != null && !structuredOutputDisabledForSession
+                    && (response.statusCode() == 400 || response.statusCode() == 422)
+                    && (lower.contains("response_format") || lower.contains("json_schema")
+                        || lower.contains("\"format\"") || lower.contains("schema"));
+            if (schemaRejected) {
+                structuredOutputDisabledForSession = true;
+                if (config.isDebug()) {
+                    System.err.println("[LLM] Structured output rejected by provider, disabling for session. Body: "
+                            + errSnippet);
+                }
+            }
+            throw new LLMException("LLM API error " + response.statusCode() + ": " + errSnippet);
         }
 
         // Parse response

@@ -2,36 +2,71 @@ package forge.ai.llm;
 
 /**
  * System and user prompt templates for LLM game play.
+ * The system prompt is doctrine-heavy and stable across calls so
+ * provider prompt-caches stay warm. User prompts carry game state
+ * + numbered options. Format is enforced by JSON schemas at the API
+ * level (see {@link LLMResponseSchema}); the prompts therefore do
+ * NOT instruct the model on output shape.
  */
 public final class PromptTemplates {
     private PromptTemplates() {}
 
     /**
-     * System prompt establishing the LLM's role as an expert MTG player.
+     * System prompt establishing the LLM's role + a competitive doctrine.
+     * Stable byte-for-byte across calls so the provider prompt cache hits.
      */
     public static final String SYSTEM_PROMPT =
-            "You are an expert Magic: The Gathering player. "
-            + "You will be shown the current game state and a list of numbered options. "
-            + "Respond with ONLY the number of your chosen option "
-            + "(or comma-separated numbers for batch decisions like attack declarations). "
-            + "No explanation, no text, just the number(s).\n\n"
-            + "Strategy guidelines:\n"
-            + "- Play lands before casting spells when possible\n"
-            + "- Use removal spells to kill the biggest threats\n"
-            + "- Attack when the damage dealt is worth more than the risk of losing creatures\n"
-            + "- For damage spells: prioritize lethal face damage > killing key creatures > value damage to face\n"
-            + "- Cast creatures in MAIN1 (before combat), save instants/removal for MAIN2 or opponent's turn\n"
-            + "- Hold counterspells for the opponent's most impactful spells\n"
-            + "- Manage your life total as a resource — take damage to preserve tempo\n"
-            + "- Consider card advantage and mana efficiency in every decision\n"
-            + "- If no spell is worth casting this turn, choose PASS";
+            "You are a competitive Magic: The Gathering player making in-game decisions.\n"
+          + "You will see the current game state, a list of numbered OPTIONS, and a structured\n"
+          + "JSON response schema. Your goal is to play to win, not to play impressive cards.\n"
+          + "\n"
+          + "DECISION DOCTRINE\n"
+          + "Tempo, card advantage, and life total are all resources — spend the cheapest one\n"
+          + "to deny the opponent's plan. Take damage to preserve tempo unless lethal is close.\n"
+          + "\n"
+          + "PHASE GUIDANCE\n"
+          + "- MAIN1: cast creatures, planeswalkers, and sorceries that need to attack or be\n"
+          + "  attacked into. Land drops happen automatically — don't worry about them.\n"
+          + "- COMBAT: attack when expected damage > expected losses, accounting for blockers,\n"
+          + "  evasion, and combat tricks the opponent can afford. When defending, only block\n"
+          + "  if a) the attacker would deal lethal or near-lethal, or b) you trade up in mana.\n"
+          + "- MAIN2: cast creatures and equipment now (keep instant-speed mana up in MAIN1\n"
+          + "  for counterspells / removal). Use leftover mana for utility.\n"
+          + "- OPP'S TURN / STACK: counter their highest-impact spell, fire removal at their\n"
+          + "  biggest threat, or hold mana for their attack.\n"
+          + "\n"
+          + "THREAT TIERING\n"
+          + "Rank opposing permanents by tier and answer top-down:\n"
+          + "  T1 lethal next turn   — must remove or block now.\n"
+          + "  T2 kills you in 2-3   — answer when efficient.\n"
+          + "  T3 generates value    — engines, planeswalkers; answer when free.\n"
+          + "  T4 filler             — small bodies; ignore unless lethal.\n"
+          + "\n"
+          + "REMOVAL TRIAGE\n"
+          + "- Always trade your removal up in mana when possible.\n"
+          + "- If multiple T1 threats exist, kill the one with haste / unblockable / evasion.\n"
+          + "- Never burn removal on a body that doesn't change the race.\n"
+          + "- Counterspells: hold for the opponent's best spell, not their first.\n"
+          + "\n"
+          + "MULLIGAN DOCTRINE\n"
+          + "Keep 7-card hands with 2-4 lands and at least one cheap (CMC ≤ 3) spell. Mulligan\n"
+          + "no-land, all-land, and stuck hands. After the first mulligan, lower the bar.\n"
+          + "\n"
+          + "ATTACK DOCTRINE\n"
+          + "When ahead on board: attack everything not needed for defense. When behind:\n"
+          + "attack only if you can race or force an unfavorable block. Always count: if you\n"
+          + "swing, can the opponent kill you next turn?\n"
+          + "\n"
+          + "When in doubt, prefer the option that keeps the most future options open.\n"
+          + "Always provide brief reasoning (1-3 sentences) before committing to a choice.";
 
     /**
      * Build a user prompt for a spell selection decision.
      */
     public static String spellSelection(String gameState, String options) {
         return gameState + "\nChoose a spell or ability to play, or PASS (last option).\n"
-                + "If you have mana available and a good play, prefer acting over passing.\n\n" + options;
+                + "If you have mana available and a good play, prefer acting over passing.\n\n"
+                + options;
     }
 
     /**
@@ -50,14 +85,10 @@ public final class PromptTemplates {
 
     /**
      * Build a user prompt for batch attack declaration (all creatures at once).
-     * B2: also asks for a one-line blocking-plan note on line 2, which is
-     * fed back into the subsequent block decision for continuity.
      */
     public static String batchAttack(String gameState, String attackOptions) {
         return gameState + "\nDECLARE ATTACKERS\n" + attackOptions
-                + "\n\nLine 1: comma-separated attacker indices (or NONE)."
-                + "\nLine 2 (optional): one short sentence describing your blocking plan"
-                + " if they swing back — begin it with PLAN:.";
+                + "\nReturn the indices of the creatures that should attack.";
     }
 
     /**
@@ -71,14 +102,16 @@ public final class PromptTemplates {
      * Build a user prompt for batch block declaration (all attackers/blockers at once).
      */
     public static String batchBlock(String gameState, String blockOptions) {
-        return gameState + "\nDECLARE BLOCKERS\n" + blockOptions;
+        return gameState + "\nDECLARE BLOCKERS\n" + blockOptions
+                + "\nReturn an array of {attacker, blockers[]} entries (gang-blocking allowed).";
     }
 
     /**
      * Build a user prompt for a batched scry/surveil decision.
      */
     public static String batchScry(String gameState, String scryOptions) {
-        return gameState + "\nSCRY/SURVEIL\n" + scryOptions;
+        return gameState + "\nSCRY/SURVEIL\n" + scryOptions
+                + "\nReturn the indices of cards to keep on TOP of your library.";
     }
 
     /**
@@ -117,28 +150,23 @@ public final class PromptTemplates {
     }
 
     /**
-     * Build a prompt for picking multiple items in one batch call (B3).
-     * Response format: comma-separated indices (e.g. "0,2,3"), or "NONE" when
-     * no items should be picked and {@code min == 0}.
+     * Build a prompt for picking multiple items in one batch call.
      */
     public static String batchPick(String gameState, String options, String context,
                                     int min, int max) {
-        String noneHint = min == 0 ? " or NONE" : "";
         return gameState + "\n" + context
-                + "\nPick between " + min + " and " + max + " items."
-                + " Respond with comma-separated indices (e.g. 0,2,3)" + noneHint + ".\n\n"
-                + options;
+                + "\nPick between " + min + " and " + max + " items. "
+                + "Return the indices of the items you choose.\n\n" + options;
     }
 
     /**
-     * Build a prompt for the MAIN-phase plan batching (B1).
-     * The LLM returns an ordered list of spell indices (or a subset + PASS)
-     * that will be executed in sequence until the plan is invalidated.
+     * Build a prompt for the MAIN-phase plan batching.
+     * The LLM returns an ordered list of spell indices to execute in sequence.
      */
     public static String mainPhasePlan(String gameState, String options) {
         return gameState + "\nPLAN YOUR MAIN PHASE.\n"
-                + "List the spell indices to cast in order, comma-separated. "
-                + "End with PASS to stop casting (e.g. 2,0,PASS). "
-                + "If you want to do nothing, reply PASS.\n\n" + options;
+                + "Return an ordered array of spell indices to cast this phase. "
+                + "Empty array = do nothing this phase.\n\n"
+                + options;
     }
 }
