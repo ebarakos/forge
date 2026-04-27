@@ -7,7 +7,7 @@
 #
 # Examples:
 #   benchmarks/mirror.sh heuristic Burn.dck
-#   benchmarks/mirror.sh "cerebras:llama3.1-8b" Burn.dck -n 50 -j 4
+#   benchmarks/mirror.sh "cerebras:qwen-3-235b-a22b-instruct-2507" Burn.dck -n 50 -j 4
 #
 set -euo pipefail
 

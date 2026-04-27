@@ -7,10 +7,10 @@
 #
 # Examples:
 #   # Heuristic vs LLM Cerebras across 4 deck matchups, 100 games each
-#   benchmarks/matrix.sh heuristic "cerebras:llama3.1-8b" -n 100
+#   benchmarks/matrix.sh heuristic "cerebras:qwen-3-235b-a22b-instruct-2507" -n 100
 #
 #   # Custom deck pairings
-#   benchmarks/matrix.sh "cerebras:llama3.1-8b" heuristic \
+#   benchmarks/matrix.sh "cerebras:qwen-3-235b-a22b-instruct-2507" heuristic \
 #       -d "Burn.dck" -d "Dimir Faeries.dck"
 #
 set -euo pipefail

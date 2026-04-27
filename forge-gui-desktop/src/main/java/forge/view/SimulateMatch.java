@@ -137,9 +137,9 @@ public class SimulateMatch {
         ORIGINAL_OUT.println("  or:  -P1 Simulation -P2 Default  (legacy syntax)");
         ORIGINAL_OUT.println();
         ORIGINAL_OUT.println("LLM profiles (use provider:model syntax):");
-        ORIGINAL_OUT.println("  -P1 ollama:llama3              Local Ollama model");
-        ORIGINAL_OUT.println("  -P2 openrouter:google/gemini-2.5-flash:free  OpenRouter free model");
-        ORIGINAL_OUT.println("  -P2 cerebras:llama3.1-8b       Cerebras (1M tokens/day free)");
+        ORIGINAL_OUT.println("  -P1 ollama:llama3                                Local Ollama model");
+        ORIGINAL_OUT.println("  -P2 openrouter:inclusionai/ling-2.6-1t:free      OpenRouter free model (relay-curated)");
+        ORIGINAL_OUT.println("  -P2 cerebras:qwen-3-235b-a22b-instruct-2507      Cerebras (free tier, 30 RPM)");
         return ExitCode.SUCCESS;
     }
 

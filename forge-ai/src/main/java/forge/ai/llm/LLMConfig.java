@@ -12,8 +12,11 @@ public final class LLMConfig {
 
     // Default models for each provider
     private static final String DEFAULT_LOCAL_MODEL = "llama3";
-    private static final String DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash:free";
-    private static final String DEFAULT_CEREBRAS_MODEL = "llama3.1-8b";
+    // Defaults track the llm-relay curated catalog (allowed-models.json).
+    // Both upstream defaults are free-tier and the only models the relay
+    // accepts on those upstreams as of relay v1.6.8 (2026-04-27).
+    private static final String DEFAULT_OPENROUTER_MODEL = "inclusionai/ling-2.6-1t:free";
+    private static final String DEFAULT_CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507";
 
     // Default timeouts per provider (local models need longer for cold starts / model loading)
     private static final int DEFAULT_LOCAL_TIMEOUT_MS = 300_000;   // 5 minutes (reasoning models are verbose)
