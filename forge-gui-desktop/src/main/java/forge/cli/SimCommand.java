@@ -308,17 +308,30 @@ public class SimCommand implements Callable<Integer> {
         }
 
         // Fall back to legacy -P1..-P8 flags
+        String legacy;
         switch (playerIndex) {
-            case 0: return player1Profile;
-            case 1: return player2Profile;
-            case 2: return player3Profile;
-            case 3: return player4Profile;
-            case 4: return player5Profile;
-            case 5: return player6Profile;
-            case 6: return player7Profile;
-            case 7: return player8Profile;
-            default: return null;
+            case 0: legacy = player1Profile; break;
+            case 1: legacy = player2Profile; break;
+            case 2: legacy = player3Profile; break;
+            case 3: legacy = player4Profile; break;
+            case 4: legacy = player5Profile; break;
+            case 5: legacy = player6Profile; break;
+            case 6: legacy = player7Profile; break;
+            case 7: legacy = player8Profile; break;
+            default: legacy = null; break;
         }
+        if (legacy != null) return legacy;
+
+        // Final fallback: FORGE_DEFAULT_PROFILE env var lets a downstream caller
+        // pick a default (e.g. an LLM profile) without passing -P flags. Only
+        // applies to the first two seats — extras stay heuristic.
+        if (playerIndex < 2) {
+            String fallback = System.getenv("FORGE_DEFAULT_PROFILE");
+            if (fallback != null && !fallback.trim().isEmpty()) {
+                return fallback.trim();
+            }
+        }
+        return null;
     }
 
     /**
