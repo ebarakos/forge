@@ -64,5 +64,15 @@ heavy-vs-heuristic.json
 heavy-vs-light.json
 light-vs-heuristic.json
 
+# Generated benchmark output (mirror.sh / matrix.sh harness)
+benchmarks/results/
+
 # Binary JARs (unreadable)
 **/*.jar
+
+# Translation patch files (large card-name dumps)
+forge-gui/tools/cardnames-*-patch.txt
+
+# Binary spreadsheets (unreadable as text)
+**/*.xlsx
+**/*.xls

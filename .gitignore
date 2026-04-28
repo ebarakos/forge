@@ -109,3 +109,8 @@ cache/
 .claude/
 CLAUDE.md
 TODO.md
+LLM-TODOS.md
+
+# Codex - local agent state
+.codex
+.codex/
