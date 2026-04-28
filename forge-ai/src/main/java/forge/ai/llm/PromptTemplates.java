@@ -48,17 +48,34 @@ public final class PromptTemplates {
           + "- Never burn removal on a body that doesn't change the race.\n"
           + "- Counterspells: hold for the opponent's best spell, not their first.\n"
           + "\n"
-          + "MULLIGAN DOCTRINE\n"
-          + "Keep 7-card hands with 2-4 lands and at least one cheap (CMC ≤ 3) spell. Mulligan\n"
-          + "no-land, all-land, and stuck hands. After the first mulligan, lower the bar.\n"
-          + "\n"
-          + "ATTACK DOCTRINE\n"
-          + "When ahead on board: attack everything not needed for defense. When behind:\n"
-          + "attack only if you can race or force an unfavorable block. Always count: if you\n"
-          + "swing, can the opponent kill you next turn?\n"
+          + "RULES YOU MUST NOT GET WRONG\n"
+          + "- Summoning sickness blocks ATTACKING and TAP-ABILITIES only. A summoning-sick\n"
+          + "  creature CAN block normally — never refuse a chump block because it's sick.\n"
+          + "- A tapped creature cannot block. An attacker becomes tapped after attacking.\n"
+          + "- Blockers absorb attacker damage; only UNBLOCKED damage reaches the player.\n"
+          + "- Sorceries (no Flash/Instant) can only be cast on your own main phase with empty stack.\n"
+          + "- Counterspells must be cast in response to a spell already on the stack.\n"
           + "\n"
           + "When in doubt, prefer the option that keeps the most future options open.\n"
-          + "Always provide brief reasoning (1-3 sentences) before committing to a choice.";
+          + "\n"
+          + "OUTPUT DISCIPLINE\n"
+          + "- Reasoning: at most 2 short sentences, under 30 words total. Then commit.\n"
+          + "- Never loop, repeat the same word, pad with ellipses, or write more than 2 sentences.\n"
+          + "- If unsure, pick the most sensible option and stop — partial certainty is fine.\n"
+          + "- Never produce tool-call markers, channels, or anything outside the JSON schema.";
+
+    /** Mulligan-specific guidance. Appended only to mulligan user prompts. */
+    private static final String MULLIGAN_DOCTRINE =
+            "MULLIGAN DOCTRINE\n"
+          + "Keep 7-card hands with 2-4 lands and at least one cheap (CMC ≤ 3) spell. Mulligan\n"
+          + "no-land, all-land, and stuck hands. After the first mulligan, lower the bar.\n";
+
+    /** Attack-specific guidance. Appended only to attack-decision user prompts. */
+    private static final String ATTACK_DOCTRINE =
+            "ATTACK DOCTRINE\n"
+          + "When ahead on board: attack everything not needed for defense. When behind:\n"
+          + "attack only if you can race or force an unfavorable block. Always count: if you\n"
+          + "swing, can the opponent kill you next turn?\n";
 
     /**
      * Build a user prompt for a spell selection decision.
@@ -73,21 +90,22 @@ public final class PromptTemplates {
      * Build a user prompt for a mulligan decision.
      */
     public static String mulligan(String gameState) {
-        return gameState + "\nDo you want to keep this hand?\n\nOPTIONS:\n0: Keep\n1: Mulligan\n";
+        return gameState + "\n" + MULLIGAN_DOCTRINE
+                + "\nDo you want to keep this hand?\n\nOPTIONS:\n0: Keep\n1: Mulligan\n";
     }
 
     /**
      * Build a user prompt for an attack decision (per creature).
      */
     public static String attack(String gameState, String attackOption) {
-        return gameState + "\n" + attackOption;
+        return gameState + "\n" + ATTACK_DOCTRINE + "\n" + attackOption;
     }
 
     /**
      * Build a user prompt for batch attack declaration (all creatures at once).
      */
     public static String batchAttack(String gameState, String attackOptions) {
-        return gameState + "\nDECLARE ATTACKERS\n" + attackOptions
+        return gameState + "\n" + ATTACK_DOCTRINE + "\nDECLARE ATTACKERS\n" + attackOptions
                 + "\nReturn the indices of the creatures that should attack.";
     }
 

@@ -6,6 +6,7 @@ import forge.game.card.CardCollectionView;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.TargetChoices;
+import forge.game.zone.ZoneType;
 
 import java.util.List;
 
@@ -47,12 +48,25 @@ public final class OptionSerializer {
     }
 
     /**
-     * Serialize a list of cards as numbered options.
+     * Serialize a list of cards as numbered options. Duplicate card names
+     * (e.g. 4 copies of the same basic land in a tutor target list) get the
+     * full oracle text only on first occurrence; subsequent duplicates
+     * collapse to a back-reference. Saves significant tokens on
+     * tutor / discard-to-handsize / mulligan-bottom prompts. Generic.
      */
     public static String serializeCardOptions(List<? extends Card> cards, boolean includeNone) {
         StringBuilder sb = new StringBuilder("OPTIONS:\n");
+        java.util.Map<String, Integer> firstSeen = new java.util.HashMap<>();
         for (int i = 0; i < cards.size(); i++) {
-            sb.append(i).append(": ").append(GameStateSerializer.serializeCardFull(cards.get(i))).append('\n');
+            Card c = cards.get(i);
+            String name = c.getName();
+            Integer prev = firstSeen.get(name);
+            if (prev != null) {
+                sb.append(i).append(": ").append(name).append(" (same as ").append(prev).append(")\n");
+            } else {
+                firstSeen.put(name, i);
+                sb.append(i).append(": ").append(GameStateSerializer.serializeCardFull(c)).append('\n');
+            }
         }
         if (includeNone) {
             sb.append(cards.size()).append(": NONE (choose nothing)\n");
@@ -62,14 +76,23 @@ public final class OptionSerializer {
 
     /**
      * Serialize a list of entities (cards, players) as numbered options.
+     * Same dedup pattern as serializeCardOptions for repeat card entries.
      */
     public static <T extends GameEntity> String serializeEntityOptions(List<T> entities, boolean includeNone) {
         StringBuilder sb = new StringBuilder("OPTIONS:\n");
+        java.util.Map<String, Integer> firstSeenCard = new java.util.HashMap<>();
         for (int i = 0; i < entities.size(); i++) {
             T entity = entities.get(i);
             sb.append(i).append(": ");
             if (entity instanceof Card) {
-                sb.append(GameStateSerializer.serializeCardFull((Card) entity));
+                Card c = (Card) entity;
+                Integer prev = firstSeenCard.get(c.getName());
+                if (prev != null) {
+                    sb.append(c.getName()).append(" (same as ").append(prev).append(')');
+                } else {
+                    firstSeenCard.put(c.getName(), i);
+                    sb.append(GameStateSerializer.serializeCardFull(c));
+                }
             } else {
                 sb.append(entity.getName());
             }
@@ -150,9 +173,26 @@ public final class OptionSerializer {
      * Serialize all attackers and available blockers as a single batch prompt.
      * LLM responds with block assignments like "A0:B1, A2:B0,B1" or NONE.
      */
-    public static String serializeBatchBlockOptions(List<Card> attackers, List<Card> blockers) {
+    public static String serializeBatchBlockOptions(List<Card> attackers, List<Card> blockers, int myLife) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Assign blockers to attackers. Format: A0:B1, A2:B0,B1 (gang-block). Use NONE for no blocks.\n\n");
+        // Combat math header — generic computed annotation. Helps the model
+        // notice critical situations (e.g. would die if no block) without
+        // baking in any deck/card-specific knowledge.
+        int totalDamage = 0;
+        int unblockableDamage = 0;
+        for (Card a : attackers) {
+            int p = Math.max(0, a.getNetCombatDamage());
+            totalDamage += p;
+            if (isUnblockableBy(a, blockers)) unblockableDamage += p;
+        }
+        sb.append("COMBAT MATH: opp swings up to ").append(totalDamage).append(" dmg total, ")
+          .append(unblockableDamage).append(" unblockable. You at ").append(myLife).append(" life.");
+        if (unblockableDamage >= myLife && myLife > 0) sb.append(" [LOSS IF NO BLOCK; cannot prevent — race instead]");
+        else if (totalDamage >= myLife && myLife > 0) sb.append(" [FATAL IF NO BLOCK — must block]");
+        sb.append('\n');
+
+        sb.append("Assign blockers to attackers. Format: A0:B1, A2:B0,B1 (gang-block). Use NONE for no blocks.\n");
+        sb.append("Reminder: summoning-sick creatures CAN block. Tapped creatures CANNOT.\n\n");
         sb.append("Attackers:\n");
         for (int i = 0; i < attackers.size(); i++) {
             sb.append("  A").append(i).append(": ")
@@ -164,6 +204,15 @@ public final class OptionSerializer {
               .append(GameStateSerializer.serializeCardBattlefield(blockers.get(i))).append('\n');
         }
         return sb.toString();
+    }
+
+    /** True when no blocker in the list could legally block this attacker (evasion check). */
+    private static boolean isUnblockableBy(Card attacker, List<Card> blockers) {
+        if (blockers.isEmpty()) return true;
+        for (Card b : blockers) {
+            if (forge.game.combat.CombatUtil.canBlock(attacker, b)) return false;
+        }
+        return true;
     }
 
     /**
@@ -195,8 +244,29 @@ public final class OptionSerializer {
      * Serialize all potential attackers as a single batch prompt.
      * The LLM responds with comma-separated indices of creatures to attack with.
      */
-    public static String serializeBatchAttackOptions(List<Card> canAttack) {
+    public static String serializeBatchAttackOptions(List<Card> canAttack, int defenderLife,
+                                                      List<Card> defenderBlockers) {
         StringBuilder sb = new StringBuilder();
+        // Combat math header — totals + lethal flag. Defender blockers list lets
+        // us flag genuinely unblockable damage (flying without flyers, menace
+        // with only 1 blocker, etc.) so the model sees the lethal threshold.
+        int totalSwing = 0;
+        int unblockableSwing = 0;
+        for (Card a : canAttack) {
+            int p = Math.max(0, a.getNetCombatDamage());
+            totalSwing += p;
+            if (defenderBlockers != null && isUnblockableBy(a, defenderBlockers)) unblockableSwing += p;
+        }
+        sb.append("COMBAT MATH: max swing = ").append(totalSwing).append(" dmg");
+        if (defenderBlockers != null) sb.append(" (").append(unblockableSwing).append(" unblockable)");
+        sb.append(". Opp at ").append(defenderLife).append(" life.");
+        if (unblockableSwing >= defenderLife && defenderLife > 0) {
+            sb.append(" [LETHAL via unblockable damage — must include the unblockable attackers]");
+        } else if (totalSwing >= defenderLife && defenderLife > 0) {
+            sb.append(" [POSSIBLE LETHAL if blockers can't cover — count carefully]");
+        }
+        sb.append('\n');
+
         sb.append("Which creatures should attack? Respond with comma-separated numbers (e.g. 0,2) or NONE.\n\n");
         for (int i = 0; i < canAttack.size(); i++) {
             sb.append(i).append(": ").append(GameStateSerializer.serializeCardBattlefield(canAttack.get(i))).append('\n');
@@ -225,25 +295,35 @@ public final class OptionSerializer {
             sb.append(' ').append(host.getNetPower()).append('/').append(host.getNetToughness());
         }
 
-        // Oracle text — most important for LLM understanding
-        String oracle = host.getOracleText();
-        if (oracle != null && !oracle.isEmpty()) {
-            if (oracle.length() > 150) {
-                oracle = oracle.substring(0, 147) + "...";
-            }
-            sb.append(" - \"").append(oracle).append('"');
+        // Oracle text — most important for LLM understanding.
+        // OPTIMIZATION: skip oracle text when the host is in the player's hand,
+        // because GameStateSerializer already lists the full text under YOUR HAND.
+        // Sending it twice wastes ~50 tokens per option × ~5 options × ~33
+        // mainPhasePlan calls per game ≈ 8K tokens / game. Cards on the
+        // battlefield (activated abilities) and other zones keep oracle text
+        // since those zones serialize compactly elsewhere.
+        if (host.isInZone(ZoneType.Hand)) {
+            // No-op: see YOUR HAND in the prompt header.
         } else {
-            // Fall back to SA description if no oracle text
-            String desc = sa.getStackDescription();
-            if (desc != null && !desc.isEmpty()) {
-                sb.append(" - ").append(desc);
+            String oracle = host.getOracleText();
+            if (oracle != null && !oracle.isEmpty()) {
+                if (oracle.length() > 150) {
+                    oracle = oracle.substring(0, 147) + "...";
+                }
+                sb.append(" - \"").append(oracle).append('"');
             } else {
-                String saDesc = sa.getDescription();
-                if (saDesc != null && !saDesc.isEmpty()) {
-                    if (saDesc.length() > 150) {
-                        saDesc = saDesc.substring(0, 147) + "...";
+                // Fall back to SA description if no oracle text
+                String desc = sa.getStackDescription();
+                if (desc != null && !desc.isEmpty()) {
+                    sb.append(" - ").append(desc);
+                } else {
+                    String saDesc = sa.getDescription();
+                    if (saDesc != null && !saDesc.isEmpty()) {
+                        if (saDesc.length() > 150) {
+                            saDesc = saDesc.substring(0, 147) + "...";
+                        }
+                        sb.append(" - \"").append(saDesc).append('"');
                     }
-                    sb.append(" - \"").append(saDesc).append('"');
                 }
             }
         }

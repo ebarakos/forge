@@ -58,7 +58,9 @@ public class LLMFullController extends PlayerControllerAi {
 
     /** Sliding window of recent action summaries for LLM context. */
     private final List<String> actionHistory = new ArrayList<>();
-    private static final int MAX_HISTORY = 10;
+    // 6 entries = roughly 2 turns of action; older history rarely informs the
+    // current decision (board state already reflects it) and just costs tokens.
+    private static final int MAX_HISTORY = 6;
 
     /** B2: blocking-plan note carried over from the most recent attack LLM call. */
     private String lastAttackPlan = "";
@@ -870,9 +872,25 @@ public class LLMFullController extends PlayerControllerAi {
             return;
         }
 
-        // Single batched LLM call for all attack decisions
+        // Single batched LLM call for all attack decisions.
+        // Pass defender life + their potential blockers so OptionSerializer
+        // can stamp lethal/race math into the prompt header. Defender may
+        // be a Player (typical) or a Planeswalker; pull life from whichever.
         String gameState = buildGameStateWithHistory();
-        String options = OptionSerializer.serializeBatchAttackOptions(canAttack);
+        List<Card> defBlockers = new ArrayList<>();
+        int defLife = 0;
+        if (defaultDefender instanceof forge.game.player.Player) {
+            forge.game.player.Player defPlayer = (forge.game.player.Player) defaultDefender;
+            defLife = defPlayer.getLife();
+            for (Card c : defPlayer.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+                if (c.isCreature() && !c.isTapped()) defBlockers.add(c);
+            }
+        } else if (defaultDefender instanceof Card) {
+            // Planeswalker — its loyalty acts as life total for combat math.
+            defLife = ((Card) defaultDefender).getCurrentLoyalty();
+        }
+        String options = OptionSerializer.serializeBatchAttackOptions(
+                canAttack, defLife, defBlockers);
         String prompt = PromptTemplates.batchAttack(gameState, options);
         String response = callLLMRaw(prompt, "declareAttackers");
 
@@ -956,7 +974,7 @@ public class LLMFullController extends PlayerControllerAi {
         if (!lastAttackPlan.isEmpty()) {
             gameState = gameState + "\nYOUR PRIOR ATTACK-PLAN NOTE: " + lastAttackPlan + "\n";
         }
-        String options = OptionSerializer.serializeBatchBlockOptions(attackerList, blockerList);
+        String options = OptionSerializer.serializeBatchBlockOptions(attackerList, blockerList, getPlayer().getLife());
         String prompt = PromptTemplates.batchBlock(gameState, options);
         String response = callLLMRaw(prompt, "declareBlockers", LLMResponseSchema.BLOCKS);
         lastAttackPlan = ""; // consume once
@@ -1390,6 +1408,27 @@ public class LLMFullController extends PlayerControllerAi {
                                   boolean isOptional) {
         List<String> types = new ArrayList<>(validTypes);
         if (types.isEmpty()) { return ""; }
+        // Generic prompt-size guard: when valid type list is huge (e.g. ALL ~200
+        // creature types from cards like Distant Melody / Cavern of Souls), narrow
+        // to types that actually appear on either player's battlefield, hand, or
+        // graveyard. The relevant choice is almost always one of those. Fall back
+        // to the full list if nothing matches.
+        if (types.size() > 30 && "Creature".equalsIgnoreCase(kindOfType)) {
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            for (Player p : getGame().getPlayers()) {
+                for (forge.game.zone.ZoneType z : new forge.game.zone.ZoneType[]{
+                        forge.game.zone.ZoneType.Battlefield,
+                        forge.game.zone.ZoneType.Hand,
+                        forge.game.zone.ZoneType.Graveyard}) {
+                    for (Card c : p.getCardsIn(z)) {
+                        for (String t : c.getType().getCreatureTypes()) seen.add(t);
+                    }
+                }
+            }
+            List<String> filtered = new ArrayList<>();
+            for (String t : types) if (seen.contains(t)) filtered.add(t);
+            if (!filtered.isEmpty()) types = filtered;
+        }
         String result = chooseFromStringList(types, "Choose a " + kindOfType);
         return result != null ? result : types.get(0);
     }

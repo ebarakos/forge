@@ -74,22 +74,59 @@ public final class GameStateSerializer {
             serializeBattlefield(sb, opp.getCardsIn(ZoneType.Battlefield), myLife, true);
         }
 
-        // Your hand (full details)
+        // Your hand (full details). Duplicate cards are collapsed with an "Nx"
+        // prefix so an aggro hand of {Lightning Bolt, Lightning Bolt, Mountain,
+        // Mountain, Mountain} prints 2 lines instead of 5. The model still sees
+        // each card's full text exactly once.
         sb.append("\nYOUR HAND:\n");
         CardCollectionView hand = me.getCardsIn(ZoneType.Hand);
         if (hand.isEmpty()) {
             sb.append("  (empty)\n");
         } else {
+            LinkedHashMap<String, int[]> grouped = new LinkedHashMap<>();
+            LinkedHashMap<String, Card> firstSeen = new LinkedHashMap<>();
             for (Card c : hand) {
-                sb.append("  - ").append(serializeCardFull(c)).append('\n');
+                String key = c.getName();
+                grouped.computeIfAbsent(key, k -> new int[]{0})[0]++;
+                firstSeen.putIfAbsent(key, c);
+            }
+            for (Map.Entry<String, int[]> entry : grouped.entrySet()) {
+                int count = entry.getValue()[0];
+                sb.append("  - ");
+                if (count > 1) sb.append(count).append("x ");
+                sb.append(serializeCardFull(firstSeen.get(entry.getKey()))).append('\n');
             }
         }
 
-        // Stack
+        // Stack — flag spell vs triggered/activated ability and counterability so
+        // the LLM does not waste a counterspell on a trigger (a real bug we
+        // observed on gpt-oss-20b). Generic: works for any deck.
         if (!game.getStack().isEmpty()) {
             sb.append("\nSTACK:\n");
             for (SpellAbilityStackInstance si : game.getStack()) {
-                sb.append("  - ").append(si.getStackDescription()).append('\n');
+                SpellAbility sa = si.getSpellAbility();
+                Card source = si.getSourceCard();
+                Player controller = sa != null ? sa.getActivatingPlayer() : null;
+                String tag;
+                String counterTag;
+                if (sa != null && sa.isSpell()) {
+                    tag = "[spell]";
+                    // Spells are counterable unless host card has the keyword.
+                    counterTag = (source != null && source.hasKeyword("CARDNAME can't be countered."))
+                            ? " [uncounterable]" : " [counterable]";
+                } else if (sa != null && sa.isTrigger()) {
+                    tag = "[triggered ability — counterspells DO NOT work]";
+                    counterTag = "";
+                } else {
+                    tag = "[activated ability — counterspells DO NOT work]";
+                    counterTag = "";
+                }
+                String who = controller != null
+                        ? (controller == me ? "yours" : "opponent's")
+                        : "?";
+                sb.append("  - ").append(tag).append(counterTag)
+                  .append(" (").append(who).append(") ")
+                  .append(si.getStackDescription()).append('\n');
             }
         }
 
@@ -248,15 +285,52 @@ public final class GameStateSerializer {
             sb.append('\n');
         }
 
-        // Non-lands with details (creatures get a threat tier annotation when looking at the opponent)
+        // Non-lands with details. Creatures stay individual (combat math depends
+        // on per-creature P/T, tap, sickness, counters). Other permanents that
+        // share an identical board state — same name AND no distinguishing
+        // counters/attachments/tapped state — are collapsed to "Nx <name>" so
+        // a board with three Journey to Nowhere or four Clue Tokens emits one
+        // oracle line, not three. Generic: works for any deck.
+        List<Card> creatures = new ArrayList<>();
+        List<Card> nonCreaturePermanents = new ArrayList<>();
         for (Card c : nonLands) {
+            if (c.isCreature()) creatures.add(c);
+            else nonCreaturePermanents.add(c);
+        }
+        for (Card c : creatures) {
             sb.append("  - ").append(serializeCardBattlefield(c));
-            if (annotateThreats && c.isCreature()) {
+            if (annotateThreats) {
                 String tier = creatureThreatTier(c, recipientLife);
                 if (tier != null) sb.append(' ').append(tier);
             }
             sb.append('\n');
         }
+        // Group by (name, stateKey). Stateful copies stay separate.
+        LinkedHashMap<String, int[]> counts = new LinkedHashMap<>();
+        LinkedHashMap<String, Card> firstByKey = new LinkedHashMap<>();
+        for (Card c : nonCreaturePermanents) {
+            String key = c.getName() + "|" + permanentStateKey(c);
+            counts.computeIfAbsent(key, k -> new int[]{0})[0]++;
+            firstByKey.putIfAbsent(key, c);
+        }
+        for (Map.Entry<String, int[]> entry : counts.entrySet()) {
+            int n = entry.getValue()[0];
+            sb.append("  - ");
+            if (n > 1) sb.append(n).append("x ");
+            sb.append(serializeCardBattlefield(firstByKey.get(entry.getKey()))).append('\n');
+        }
+    }
+
+    /** Stable identity for collapsing identical-state permanents. Empty when
+     *  the permanent has any distinguishing state, which forces individual
+     *  emission. */
+    private static String permanentStateKey(Card c) {
+        if (c.isTapped() || c.hasCounters() || c.isEquipped() || c.isEnchanted()) {
+            // Use a per-card UID so identical-named-but-differently-stated
+            // permanents do not collapse together.
+            return "id:" + c.getId();
+        }
+        return "clean";
     }
 
     /**
@@ -391,10 +465,21 @@ public final class GameStateSerializer {
 
     private static void appendZoneCompact(StringBuilder sb, String label, CardCollectionView cards) {
         if (cards.isEmpty()) return;
+        // Dedupe identical names with "Nx" prefix so a graveyard with four
+        // Lightning Bolts emits "4x Lightning Bolt" instead of repeating the
+        // name. Order preserved by first-seen. Generic: works for any deck.
+        LinkedHashMap<String, int[]> counts = new LinkedHashMap<>();
+        for (Card c : cards) {
+            counts.computeIfAbsent(c.getName(), k -> new int[]{0})[0]++;
+        }
         sb.append('\n').append(label).append(": ");
-        for (int i = 0; i < cards.size(); i++) {
-            if (i > 0) sb.append(", ");
-            sb.append(cards.get(i).getName());
+        boolean first = true;
+        for (Map.Entry<String, int[]> entry : counts.entrySet()) {
+            if (!first) sb.append(", ");
+            first = false;
+            int n = entry.getValue()[0];
+            if (n > 1) sb.append(n).append("x ");
+            sb.append(entry.getKey());
         }
         sb.append('\n');
     }
