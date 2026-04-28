@@ -89,6 +89,27 @@ public final class LLMConfig {
     }
 
     /**
+     * Small/cheap models (e.g. local gpt-oss-20b, llama-3.1-8b) whose
+     * "reasoning" output is mostly truncated filler ("The?…..??………………") and
+     * actively harms decision quality. For these we drop the reasoning field
+     * from the JSON schema and force the model to commit to a choice directly.
+     * Override via {@code FORGE_LLM_OMIT_REASONING=1|0} env var.
+     */
+    public boolean omitReasoning() {
+        String override = System.getenv("FORGE_LLM_OMIT_REASONING");
+        if (override != null && !override.isEmpty()) {
+            return !"0".equals(override) && !"false".equalsIgnoreCase(override);
+        }
+        if (isThinkingModel()) return false;  // thinking models benefit from CoT
+        if (model == null) return false;
+        String lower = model.toLowerCase();
+        // Known small/weak models where the reasoning field hurts more than it helps.
+        return lower.contains("gpt-oss-20b") || lower.contains("llama-3.1-8b")
+                || lower.contains("llama3.1-8b") || lower.contains("gemma-3-4b")
+                || lower.contains("phi-3-mini") || lower.contains("phi3-mini");
+    }
+
+    /**
      * Parse a profile string like "ollama:llama3" or "openrouter:deepseek/deepseek-chat"
      * into an LLMConfig. Returns null if the string is not an LLM profile.
      *

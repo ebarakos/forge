@@ -91,7 +91,7 @@ public class LLMClient {
         // Inject structured output (json_schema for cloud / format for ollama)
         // unless the provider has rejected it earlier this session.
         if (schema != null && !structuredOutputDisabledForSession) {
-            JsonObject jsonSchema = schema.toJsonSchema();
+            JsonObject jsonSchema = schema.toJsonSchema(!config.omitReasoning());
             if ("ollama".equals(config.getProvider())) {
                 // Ollama's OpenAI-compatible endpoint accepts response_format too,
                 // but raw schema in `format` is documented and works on older builds.

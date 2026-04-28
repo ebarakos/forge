@@ -79,11 +79,28 @@ public final class PromptTemplates {
 
     /**
      * Build a user prompt for a spell selection decision.
+     * Phase-aware: at instant speed (non-MAIN) we drop the "prefer acting"
+     * push and add an explicit timing reminder, because passing is usually
+     * correct outside main phases — we observed gpt-oss-20b casting sorceries
+     * in COMBAT_DAMAGE because the prompt biased it toward action.
      */
+    public static String spellSelection(String gameState, String options, boolean isMainPhase) {
+        StringBuilder sb = new StringBuilder(gameState);
+        if (isMainPhase) {
+            sb.append("\nChoose a spell or ability to play, or PASS (last option).\n");
+            sb.append("If you have mana available and a good play, prefer acting over passing.\n\n");
+        } else {
+            sb.append("\n[INSTANT SPEED — only flash/instants and activated abilities are listed.]\n");
+            sb.append("Choose a spell or ability to play, or PASS (last option).\n");
+            sb.append("Passing is usually correct unless you can counter, remove, or set up a combat trick.\n\n");
+        }
+        sb.append(options);
+        return sb.toString();
+    }
+
+    /** Backwards-compatible overload — assumes main phase. */
     public static String spellSelection(String gameState, String options) {
-        return gameState + "\nChoose a spell or ability to play, or PASS (last option).\n"
-                + "If you have mana available and a good play, prefer acting over passing.\n\n"
-                + options;
+        return spellSelection(gameState, options, true);
     }
 
     /**

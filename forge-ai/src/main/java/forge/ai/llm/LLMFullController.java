@@ -21,7 +21,6 @@ import forge.game.card.CardCollectionView;
 import forge.game.card.CardState;
 import forge.game.card.CounterType;
 import forge.game.combat.Combat;
-import forge.game.combat.CombatUtil;
 import forge.game.cost.CostPart;
 import forge.game.keyword.KeywordInterface;
 import forge.game.mana.Mana;
@@ -54,7 +53,8 @@ import java.util.function.Predicate;
  */
 public class LLMFullController extends PlayerControllerAi {
 
-    private final LLMClient client;
+    /** Package-private so {@link LLMSpellSelection} and {@link LLMCombat} can call it. */
+    final LLMClient client;
 
     /** Sliding window of recent action summaries for LLM context. */
     private final List<String> actionHistory = new ArrayList<>();
@@ -62,14 +62,16 @@ public class LLMFullController extends PlayerControllerAi {
     // current decision (board state already reflects it) and just costs tokens.
     private static final int MAX_HISTORY = 6;
 
-    /** B2: blocking-plan note carried over from the most recent attack LLM call. */
-    private String lastAttackPlan = "";
+    /** B2: blocking-plan note carried over from the most recent attack LLM call.
+     *  Package-private so {@link LLMCombat} can read/clear it. */
+    String lastAttackPlan = "";
 
-    /** B1: cached sequence of card names to cast this MAIN phase (from a single plan LLM call). */
-    private final java.util.Deque<String> mainPhasePlan = new java.util.ArrayDeque<>();
-    private PhaseType planPhase = null;
-    private int planTurn = -1;
-    private int planStackSize = 0;
+    /** B1: cached sequence of card names to cast this MAIN phase (from a single plan LLM call).
+     *  Package-private so {@link LLMSpellSelection} can mutate it. */
+    final java.util.Deque<String> mainPhasePlan = new java.util.ArrayDeque<>();
+    PhaseType planPhase = null;
+    int planTurn = -1;
+    int planStackSize = 0;
 
     /** D1: cached serialized game state (stable anchor for the current turn+phase). */
     private String cachedGameState = null;
@@ -82,74 +84,72 @@ public class LLMFullController extends PlayerControllerAi {
      * per candidate is expensive on the current GameCopier; PR4 makes this cheap.
      * Capped at {@link #EVAL_HINT_MAX_CANDIDATES} to bound CPU when the hand is wide.
      */
-    private static final boolean EVAL_HINTS_ENABLED = isTruthy(System.getenv("FORGE_LLM_EVAL_HINTS"));
-    private static final int EVAL_HINT_MAX_CANDIDATES = 6;
+    static final boolean EVAL_HINTS_ENABLED = isTruthy(System.getenv("FORGE_LLM_EVAL_HINTS"));
+    static final int EVAL_HINT_MAX_CANDIDATES = 6;
+
+    /**
+     * Heuristic-prior pruning: cap the number of spell options shown to the
+     * LLM and sort heuristic-preferred candidates first. Set
+     * {@code FORGE_LLM_TOPK=0} to disable; defaults to 8. Lower = cheaper
+     * prompts + tighter LLM attention; higher = more freedom for the LLM to
+     * disagree with the heuristic.
+     */
+    static final int HEURISTIC_TOPK = parseIntEnv("FORGE_LLM_TOPK", 8);
+
+    /**
+     * Heuristic-prior verdict annotation: tag each option with the heuristic
+     * AI's own opinion (WillPlay / WaitForMain2 / Removal / …). Off by default
+     * because tags add ~10 tokens per option; flip on for tuning runs.
+     * Pruning of hopeless candidates still happens regardless of this flag.
+     */
+    static final boolean VERDICT_TAGS_ENABLED = isTruthy(System.getenv("FORGE_LLM_VERDICT_TAGS"));
+
+    /**
+     * Shadow mode: log heuristic vs LLM divergence per call to stderr without
+     * changing behaviour. Useful for offline analysis from mtg-discovery
+     * transcripts. Opt-in via {@code FORGE_LLM_SHADOW=1}.
+     */
+    static final boolean SHADOW_MODE = isTruthy(System.getenv("FORGE_LLM_SHADOW"));
+
+    /**
+     * Set true around heuristic feasibility checks (canPayCost, validateAndSetTargets)
+     * so cost-paying callbacks like {@link #chooseCardsToDelve} can short-circuit
+     * with a heuristic pick instead of burning an LLM call. Per-thread because the
+     * engine is not multi-threaded per match but parallel matches each run on their
+     * own controller.
+     */
+    static final ThreadLocal<Boolean> IN_FEASIBILITY = ThreadLocal.withInitial(() -> false);
+
+    /** Spell-selection delegate (heuristic prior, plan caching, choose ability). */
+    private final LLMSpellSelection spellSelection;
+
+    /** Combat delegate (declare attackers/blockers with heuristic baselines). */
+    private final LLMCombat combat;
 
     private static boolean isTruthy(String v) {
         return v != null && !v.isEmpty() && !"false".equalsIgnoreCase(v) && !"0".equals(v);
     }
 
+    private static int parseIntEnv(String name, int fallback) {
+        String v = System.getenv(name);
+        if (v == null || v.isEmpty()) return fallback;
+        try { return Integer.parseInt(v.trim()); }
+        catch (NumberFormatException e) { return fallback; }
+    }
+
     public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
         super(game, p, lp);
         this.client = client;
-    }
-
-    /**
-     * Compute one-step lookahead score deltas for each candidate spell. Returns
-     * null when the feature flag is off, the candidate list is too wide, or any
-     * simulation throws. Caller should treat null as "no hint annotation".
-     */
-    private List<Integer> computeEvalDeltas(List<SpellAbility> playable) {
-        if (!EVAL_HINTS_ENABLED) return null;
-        if (playable.isEmpty() || playable.size() > EVAL_HINT_MAX_CANDIDATES) return null;
-        try {
-            // Baseline score is captured by GameSimulator's constructor; reuse one
-            // simulator per candidate (each makes its own GameCopier).
-            List<Integer> deltas = new ArrayList<>(playable.size());
-            for (SpellAbility sa : playable) {
-                forge.ai.simulation.SimulationController ctrl =
-                        new forge.ai.simulation.SimulationController(
-                                new forge.ai.simulation.GameStateEvaluator.Score(0), getPlayer());
-                forge.ai.simulation.GameSimulator sim =
-                        new forge.ai.simulation.GameSimulator(ctrl, getGame(), getPlayer(), null);
-                forge.ai.simulation.GameStateEvaluator.Score before = sim.getScoreForOrigGame();
-                forge.ai.simulation.GameStateEvaluator.Score after = sim.simulateSpellAbility(sa);
-                int delta = after.value - before.value;
-                deltas.add(delta);
-            }
-            return deltas;
-        } catch (Exception e) {
-            if (client.isDebug()) {
-                System.err.println("[LLM] eval hints disabled this call: " + e.getMessage());
-            }
-            return null;
-        }
+        this.spellSelection = new LLMSpellSelection(this);
+        this.combat = new LLMCombat(this);
     }
 
     /** Record an action summary for the sliding window history. */
-    private void recordAction(String summary) {
+    void recordAction(String summary) {
         actionHistory.add(summary);
         if (actionHistory.size() > MAX_HISTORY) {
             actionHistory.remove(0);
         }
-    }
-
-    /**
-     * B2: pull the "PLAN: ..." line out of an LLM response (one short note
-     * the attack call leaves for the follow-up block call).
-     */
-    private String extractPlanLine(String response) {
-        if (response == null) return "";
-        for (String raw : response.split("\\R")) {
-            String line = raw.strip();
-            int idx = line.toUpperCase().indexOf("PLAN:");
-            if (idx >= 0) {
-                String tail = line.substring(idx + "PLAN:".length()).strip();
-                if (tail.length() > 200) tail = tail.substring(0, 200);
-                return tail;
-            }
-        }
-        return "";
     }
 
     /** Format the action history section for inclusion in prompts. */
@@ -169,7 +169,7 @@ public class LLMFullController extends PlayerControllerAi {
      * re-serialization CPU and gives the provider prompt cache a byte-stable
      * prefix across consecutive calls. Action history is appended volatile.
      */
-    private String buildGameStateWithHistory() {
+    String buildGameStateWithHistory() {
         int currentTurn = getGame().getPhaseHandler().getTurn();
         PhaseType currentPhase = getGame().getPhaseHandler().getPhase();
         if (cachedGameState == null || cachedStateTurn != currentTurn
@@ -191,7 +191,7 @@ public class LLMFullController extends PlayerControllerAi {
      * or it's the opponent's combat phase (combat trick opportunity),
      * AND the player has affordable instant-speed spells in hand.
      */
-    private boolean shouldCallLLMForInstantSpeed() {
+    boolean shouldCallLLMForInstantSpeed() {
         try {
             boolean hasStackTarget = !getGame().getStack().isEmpty();
             PhaseType phase = getGame().getPhaseHandler().getPhase();
@@ -220,16 +220,23 @@ public class LLMFullController extends PlayerControllerAi {
             // it has no legal target on the current stack/board.
             CardCollection cards = ComputerUtilAbility.getAvailableCards(getGame(), getPlayer());
             List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, getPlayer());
-            for (SpellAbility sa : candidates) {
-                if (sa.isManaAbility() || sa.isLandAbility()) continue;
-                sa.setActivatingPlayer(getPlayer());
-                if (!ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) continue;
-                if (validateAndSetTargets(sa)) {
-                    return true;
+            IN_FEASIBILITY.set(true);
+            try {
+                for (SpellAbility sa : candidates) {
+                    if (sa.isManaAbility() || sa.isLandAbility()) continue;
+                    sa.setActivatingPlayer(getPlayer());
+                    if (!sa.canCastTiming(getPlayer())) continue;
+                    if (!ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) continue;
+                    if (validateAndSetTargets(sa)) {
+                        return true;
+                    }
                 }
+            } finally {
+                IN_FEASIBILITY.set(false);
             }
             return false;
         } catch (Exception e) {
+            IN_FEASIBILITY.set(false);
             return false;
         }
     }
@@ -242,7 +249,7 @@ public class LLMFullController extends PlayerControllerAi {
      * Call the LLM with game state, options, and context.
      * Returns the chosen option index, or -1 on failure (caller falls back to heuristic).
      */
-    private int callLLM(String userPrompt, int numOptions, String callLabel) {
+    int callLLM(String userPrompt, int numOptions, String callLabel) {
         try {
             String response = client.chatCompletion(
                     PromptTemplates.SYSTEM_PROMPT, userPrompt,
@@ -271,12 +278,12 @@ public class LLMFullController extends PlayerControllerAi {
      * Call the LLM and return the raw response text (not parsed as a single index).
      * Returns null on failure.
      */
-    private String callLLMRaw(String userPrompt, String callLabel) {
+    String callLLMRaw(String userPrompt, String callLabel) {
         return callLLMRaw(userPrompt, callLabel, LLMResponseSchema.INDICES);
     }
 
     /** Schema-aware variant for batch calls. */
-    private String callLLMRaw(String userPrompt, String callLabel, LLMResponseSchema schema) {
+    String callLLMRaw(String userPrompt, String callLabel, LLMResponseSchema schema) {
         try {
             return client.chatCompletion(
                     PromptTemplates.SYSTEM_PROMPT, userPrompt,
@@ -295,7 +302,7 @@ public class LLMFullController extends PlayerControllerAi {
      * Use the heuristic AI's targeting logic to set up targets on the given SA.
      * Returns true if targeting succeeded (or no targeting is needed).
      */
-    private boolean validateAndSetTargets(SpellAbility sa) {
+    boolean validateAndSetTargets(SpellAbility sa) {
         if (!sa.usesTargeting()) {
             return true;
         }
@@ -586,217 +593,14 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        // Use LLM for MAIN phases always; for non-MAIN phases, only when there's
-        // a meaningful instant-speed decision (e.g., counterspell opportunity, combat trick)
-        PhaseType phase = getGame().getPhaseHandler().getPhase();
-        if (phase != PhaseType.MAIN1 && phase != PhaseType.MAIN2) {
-            if (!shouldCallLLMForInstantSpeed()) {
-                return super.chooseSpellAbilityToPlay();
-            }
-            // Fall through to normal spell selection — getSpellAbilities() already
-            // filters to only instant-speed playable spells during non-MAIN phases
-        }
-
-        // Delegate land drops to heuristic (no benefit from LLM deciding which basic to play),
-        // but ONLY the land drop — don't let heuristic also choose spells.
-        // After the land resolves, the engine loops and calls us again for spell decisions.
-        CardCollection landsWannaPlay = ComputerUtilAbility.getAvailableLandsToPlay(getGame(), getPlayer());
-        if (landsWannaPlay != null && !landsWannaPlay.isEmpty()) {
-            List<SpellAbility> heuristicChoice = super.chooseSpellAbilityToPlay();
-            if (heuristicChoice != null && !heuristicChoice.isEmpty()
-                    && heuristicChoice.get(0).isLandAbility()) {
-                return heuristicChoice; // Play just the land; engine will call us again for spells
-            }
-            // Heuristic decided not to play a land (e.g., holding for MAIN2) — fall through to LLM
-        }
-
-        CardCollection cards = ComputerUtilAbility.getAvailableCards(getGame(), getPlayer());
-        List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, getPlayer());
-
-        List<SpellAbility> playable = new ArrayList<>();
-        for (SpellAbility sa : candidates) {
-            // Filter out mana abilities and land abilities — engine handles these automatically
-            if (sa.isManaAbility() || sa.isLandAbility()) {
-                continue;
-            }
-            sa.setActivatingPlayer(getPlayer());
-            try {
-                if (!ComputerUtilCost.canPayCost(sa, getPlayer(), sa.isTrigger())) {
-                    continue;
-                }
-                // Pre-validate targeting: only show spells that can actually target
-                if (!validateAndSetTargets(sa)) {
-                    continue;
-                }
-                playable.add(sa);
-            } catch (Exception e) {
-                // Skip
-            }
-        }
-
-        if (playable.isEmpty()) {
-            mainPhasePlan.clear();
-            return null;
-        }
-
-        // A1: PASS+1 short-circuit. With one option, trust the heuristic's
-        // canPlaySa() answer instead of paying for an LLM call.
-        if (playable.size() == 1) {
-            SpellAbility only = playable.get(0);
-            AiPlayDecision decision;
-            try {
-                decision = getAi().canPlaySa(only);
-            } catch (Exception e) {
-                decision = AiPlayDecision.WillPlay;
-            }
-            if (decision == AiPlayDecision.WillPlay) {
-                recordSpellAction(only, phase);
-                List<SpellAbility> result = new ArrayList<>();
-                result.add(only);
-                return result;
-            }
-            return null; // heuristic refuses → PASS
-        }
-
-        boolean isMainPhase = phase == PhaseType.MAIN1 || phase == PhaseType.MAIN2;
-
-        // B1: MAIN-phase plan batching. Consume a cached plan step if one is
-        // still valid; otherwise issue a fresh plan call.
-        if (isMainPhase) {
-            SpellAbility planned = popValidPlanStep(playable, phase);
-            if (planned != null) {
-                recordSpellAction(planned, phase);
-                List<SpellAbility> result = new ArrayList<>();
-                result.add(planned);
-                return result;
-            }
-
-            // No valid cached plan — request a new one.
-            String gameState = buildGameStateWithHistory();
-            List<Integer> evalDeltas = computeEvalDeltas(playable);
-            String options = OptionSerializer.serializeSpellOptions(playable, evalDeltas);
-            String planPrompt = PromptTemplates.mainPhasePlan(gameState, options);
-            String planResponse = callLLMRaw(planPrompt, "mainPhasePlan", LLMResponseSchema.PLAN);
-
-            if (planResponse != null) {
-                List<Integer> planIndices = ResponseParser.parsePlanSequence(planResponse, playable.size());
-                mainPhasePlan.clear();
-                for (int idx : planIndices) {
-                    Card host = playable.get(idx).getHostCard();
-                    if (host != null) {
-                        mainPhasePlan.addLast(host.getName());
-                    }
-                }
-                planPhase = phase;
-                planTurn = getGame().getPhaseHandler().getTurn();
-                planStackSize = getGame().getStack().size();
-
-                SpellAbility firstStep = popValidPlanStep(playable, phase);
-                if (firstStep != null) {
-                    recordSpellAction(firstStep, phase);
-                    List<SpellAbility> result = new ArrayList<>();
-                    result.add(firstStep);
-                    return result;
-                }
-                // Empty plan or no matches → PASS.
-                return null;
-            }
-            // LLM failure → fall through to heuristic fallback.
-            return super.chooseSpellAbilityToPlay();
-        }
-
-        // Non-MAIN (instant-speed) flow: single one-shot LLM call.
-        String gameState = buildGameStateWithHistory();
-        List<Integer> evalDeltas = computeEvalDeltas(playable);
-        String options = OptionSerializer.serializeSpellOptions(playable, evalDeltas);
-        String prompt = PromptTemplates.spellSelection(gameState, options);
-        int totalOptions = playable.size() + 1; // +1 for PASS
-        int chosen = callLLM(prompt, totalOptions, "chooseSpellAbilityToPlay");
-
-        if (chosen < 0) {
-            return super.chooseSpellAbilityToPlay();
-        }
-        if (chosen >= playable.size()) {
-            return null; // PASS
-        }
-
-        SpellAbility selectedSa = playable.get(chosen);
-        recordSpellAction(selectedSa, phase);
-
-        List<SpellAbility> result = new ArrayList<>();
-        result.add(selectedSa);
-        return result;
+        return spellSelection.chooseSpellAbilityToPlay();
     }
 
-    /**
-     * B1: Pop the next step from the cached MAIN-phase plan, if the plan is
-     * still valid for the current turn/phase and the planned card still exists
-     * in {@code playable}. Returns null if the plan is stale or empty.
-     */
-    private SpellAbility popValidPlanStep(List<SpellAbility> playable, PhaseType phase) {
-        if (mainPhasePlan.isEmpty()) return null;
-
-        int currentTurn = getGame().getPhaseHandler().getTurn();
-        int currentStackSize = getGame().getStack().size();
-        if (planPhase != phase || planTurn != currentTurn || currentStackSize > planStackSize) {
-            // Phase/turn change or unexpected stack object → conservative invalidation.
-            mainPhasePlan.clear();
-            return null;
-        }
-
-        while (!mainPhasePlan.isEmpty()) {
-            String targetName = mainPhasePlan.pollFirst();
-            SpellAbility match = findByCardName(playable, targetName);
-            if (match == null) continue; // card no longer playable, try next
-            try {
-                AiPlayDecision decision = getAi().canPlaySa(match);
-                if (decision == AiPlayDecision.WillPlay) {
-                    return match;
-                }
-            } catch (Exception e) {
-                // Fall through to next plan step
-            }
-        }
-        return null;
+    /** Default heuristic spell selection — exposed so {@link LLMSpellSelection} can fall back to it. */
+    List<SpellAbility> defaultChooseSpellAbilityToPlay() {
+        return super.chooseSpellAbilityToPlay();
     }
 
-    private SpellAbility findByCardName(List<SpellAbility> playable, String name) {
-        if (name == null) return null;
-        for (SpellAbility sa : playable) {
-            Card host = sa.getHostCard();
-            if (host != null && name.equals(host.getName())) {
-                return sa;
-            }
-        }
-        return null;
-    }
-
-    /** Record a cast-spell entry in the sliding window history. */
-    private void recordSpellAction(SpellAbility selectedSa, PhaseType phase) {
-        String phaseName = phase != null ? phase.toString() : "MAIN";
-        int turn = getGame().getPhaseHandler().getTurn();
-        Card host = selectedSa.getHostCard();
-        String spellName = host != null ? host.getName() : selectedSa.toString();
-        StringBuilder actionSb = new StringBuilder();
-        actionSb.append("Turn ").append(turn).append(' ').append(phaseName)
-                .append(": Cast ").append(spellName);
-        if (selectedSa.usesTargeting() && selectedSa.getTargets() != null
-                && !selectedSa.getTargets().isEmpty()) {
-            actionSb.append(" targeting ");
-            boolean first = true;
-            for (Card tc : selectedSa.getTargets().getTargetCards()) {
-                if (!first) actionSb.append(", ");
-                first = false;
-                actionSb.append(tc.getName());
-            }
-            for (Player tp : selectedSa.getTargets().getTargetPlayers()) {
-                if (!first) actionSb.append(", ");
-                first = false;
-                actionSb.append(tp.getName());
-            }
-        }
-        recordAction(actionSb.toString());
-    }
 
     // =======================================================================
     // Mulligan
@@ -854,172 +658,22 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public void declareAttackers(Player attacker, Combat combat) {
-        CardCollection potentialAttackers = attacker.getCreaturesInPlay();
-        List<GameEntity> defenders = new ArrayList<>(combat.getDefenders());
-        GameEntity defaultDefender = defenders.isEmpty() ? null : defenders.get(0);
-
-        if (potentialAttackers.isEmpty() || defaultDefender == null) {
-            return;
-        }
-
-        List<Card> canAttack = new ArrayList<>();
-        for (Card c : potentialAttackers) {
-            if (CombatUtil.canAttack(c, defaultDefender)) {
-                canAttack.add(c);
-            }
-        }
-        if (canAttack.isEmpty()) {
-            return;
-        }
-
-        // Single batched LLM call for all attack decisions.
-        // Pass defender life + their potential blockers so OptionSerializer
-        // can stamp lethal/race math into the prompt header. Defender may
-        // be a Player (typical) or a Planeswalker; pull life from whichever.
-        String gameState = buildGameStateWithHistory();
-        List<Card> defBlockers = new ArrayList<>();
-        int defLife = 0;
-        if (defaultDefender instanceof forge.game.player.Player) {
-            forge.game.player.Player defPlayer = (forge.game.player.Player) defaultDefender;
-            defLife = defPlayer.getLife();
-            for (Card c : defPlayer.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
-                if (c.isCreature() && !c.isTapped()) defBlockers.add(c);
-            }
-        } else if (defaultDefender instanceof Card) {
-            // Planeswalker — its loyalty acts as life total for combat math.
-            defLife = ((Card) defaultDefender).getCurrentLoyalty();
-        }
-        String options = OptionSerializer.serializeBatchAttackOptions(
-                canAttack, defLife, defBlockers);
-        String prompt = PromptTemplates.batchAttack(gameState, options);
-        String response = callLLMRaw(prompt, "declareAttackers");
-
-        if (response == null) {
-            lastAttackPlan = "";
-            // LLM failure — fall back to heuristic attack logic
-            super.declareAttackers(attacker, combat);
-            return;
-        }
-
-        // B2: extract the PLAN: line (if any) for carry-over into declareBlockers.
-        lastAttackPlan = extractPlanLine(response);
-
-        Set<Integer> attackIndices = ResponseParser.parseBatchIndices(response, canAttack.size());
-        for (int idx : attackIndices) {
-            combat.addAttacker(canAttack.get(idx), defaultDefender);
-        }
-
-        if (!CombatUtil.validateAttackers(combat)) {
-            combat.clearAttackers();
-            super.declareAttackers(attacker, combat);
-        }
-
-        // Record attack action
-        if (!attackIndices.isEmpty()) {
-            int turn = getGame().getPhaseHandler().getTurn();
-            StringBuilder actionSb = new StringBuilder();
-            actionSb.append("Turn ").append(turn).append(" COMBAT: Attacked with ");
-            boolean first = true;
-            for (int idx : attackIndices) {
-                if (!first) actionSb.append(", ");
-                first = false;
-                Card c = canAttack.get(idx);
-                actionSb.append(c.getName());
-                if (c.isCreature()) {
-                    actionSb.append(" (").append(c.getNetPower()).append('/')
-                            .append(c.getNetToughness()).append(')');
-                }
-            }
-            recordAction(actionSb.toString());
-        }
+        this.combat.declareAttackers(attacker, combat);
     }
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
-        CardCollection attackers = combat.getAttackers();
-        if (attackers.isEmpty()) {
-            return;
-        }
+        this.combat.declareBlockers(defender, combat);
+    }
 
-        CardCollection potentialBlockers = defender.getCreaturesInPlay();
-        CardCollection availableBlockers = new CardCollection();
-        for (Card b : potentialBlockers) {
-            if (CombatUtil.canBlock(b, combat)) {
-                availableBlockers.add(b);
-            }
-        }
-        if (availableBlockers.isEmpty()) {
-            return;
-        }
+    /** Default heuristic attackers — exposed so {@link LLMCombat} can fall back to it. */
+    void defaultDeclareAttackers(Player attacker, Combat combat) {
+        super.declareAttackers(attacker, combat);
+    }
 
-        // Build lists of attackers that have at least one legal blocker
-        List<Card> attackerList = new ArrayList<>();
-        for (Card att : attackers) {
-            for (Card b : availableBlockers) {
-                if (CombatUtil.canBlock(att, b, combat)) {
-                    attackerList.add(att);
-                    break;
-                }
-            }
-        }
-        if (attackerList.isEmpty()) {
-            return;
-        }
-
-        List<Card> blockerList = new ArrayList<>(availableBlockers);
-
-        // Single batched LLM call for all block assignments
-        String gameState = buildGameStateWithHistory();
-        // B2: prepend the attack-phase plan note if we have one (continuity context).
-        if (!lastAttackPlan.isEmpty()) {
-            gameState = gameState + "\nYOUR PRIOR ATTACK-PLAN NOTE: " + lastAttackPlan + "\n";
-        }
-        String options = OptionSerializer.serializeBatchBlockOptions(attackerList, blockerList, getPlayer().getLife());
-        String prompt = PromptTemplates.batchBlock(gameState, options);
-        String response = callLLMRaw(prompt, "declareBlockers", LLMResponseSchema.BLOCKS);
-        lastAttackPlan = ""; // consume once
-
-        if (response == null) {
-            super.declareBlockers(defender, combat);
-            return;
-        }
-
-        Map<Integer, Set<Integer>> assignments = ResponseParser.parseBatchBlockAssignments(
-                response, attackerList.size(), blockerList.size());
-
-        for (Map.Entry<Integer, Set<Integer>> entry : assignments.entrySet()) {
-            int attIdx = entry.getKey();
-            if (attIdx < 0 || attIdx >= attackerList.size()) continue;
-            Card att = attackerList.get(attIdx);
-            for (int bIdx : entry.getValue()) {
-                if (bIdx < 0 || bIdx >= blockerList.size()) continue;
-                Card blocker = blockerList.get(bIdx);
-                if (CombatUtil.canBlock(att, blocker, combat)) {
-                    combat.addBlocker(att, blocker);
-                }
-            }
-        }
-
-        // Record block action
-        if (!assignments.isEmpty()) {
-            int turn = getGame().getPhaseHandler().getTurn();
-            StringBuilder actionSb = new StringBuilder();
-            actionSb.append("Turn ").append(turn).append(" COMBAT: Blocked ");
-            boolean first = true;
-            for (Map.Entry<Integer, Set<Integer>> entry2 : assignments.entrySet()) {
-                if (!first) actionSb.append("; ");
-                first = false;
-                Card att = attackerList.get(entry2.getKey());
-                actionSb.append(att.getName()).append(" with ");
-                boolean firstB = true;
-                for (int bIdx : entry2.getValue()) {
-                    if (!firstB) actionSb.append("+");
-                    firstB = false;
-                    actionSb.append(blockerList.get(bIdx).getName());
-                }
-            }
-            recordAction(actionSb.toString());
-        }
+    /** Default heuristic blockers — exposed so {@link LLMCombat} can fall back to it. */
+    void defaultDeclareBlockers(Player defender, Combat combat) {
+        super.declareBlockers(defender, combat);
     }
 
     // exertAttackers: delegated to heuristic (combat-phase decision, handled by AI logic)
@@ -1159,6 +813,19 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public CardCollectionView chooseCardsToDelve(int genericAmount, CardCollection grave) {
+        // During heuristic feasibility checks (canPayCost / canCastTiming for
+        // every delve card in hand) the engine asks "can you pay?" — the LLM
+        // shouldn't burn a call answering it. ~22% of all calls in transcripts
+        // were speculative delve prompts where the spell was never cast. Use
+        // the heuristic pick (cheapest cards first by simple grave order) for
+        // feasibility; the real LLM call still fires when the spell actually
+        // resolves and the choice matters.
+        if (IN_FEASIBILITY.get()) {
+            int take = Math.min(genericAmount, grave.size());
+            CardCollection picked = new CardCollection();
+            for (int i = 0; i < take; i++) picked.add(grave.get(i));
+            return picked;
+        }
         return chooseMultipleCards(grave, 0, genericAmount, true, "Choose cards to delve");
     }
 

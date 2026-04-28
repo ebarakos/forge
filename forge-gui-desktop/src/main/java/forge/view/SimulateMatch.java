@@ -340,7 +340,12 @@ public class SimulateMatch {
         // - quiet mode: suppress all output
         // - json/csv mode: suppress to prevent debug prints from corrupting structured output
         // - Exception: --llm-debug keeps stderr open for LLM debug trace
-        boolean keepStderr = cmd.isLlmDebug();
+        // - Exception: FORGE_LLM_SHADOW=1 keeps stderr open for "[LLM SHADOW]" divergence lines
+        //   (much lighter than --llm-debug; emits one short line per spell-selection call).
+        String shadowEnv = System.getenv("FORGE_LLM_SHADOW");
+        boolean shadowMode = shadowEnv != null && !shadowEnv.isEmpty()
+                && !"false".equalsIgnoreCase(shadowEnv) && !"0".equals(shadowEnv);
+        boolean keepStderr = cmd.isLlmDebug() || shadowMode;
         if (quietMode || structuredOutput) {
             System.setOut(NULL_PRINT_STREAM);
             if (!keepStderr) {
@@ -401,9 +406,16 @@ public class SimulateMatch {
                 int calls = c.getTotalCalls();
                 int fallbacks = c.getTotalFallbacks();
                 double fallbackPct = calls > 0 ? (100.0 * fallbacks / calls) : 0.0;
-                ORIGINAL_ERR.printf("LLM Player %d: %d calls (%d fallbacks, %.1f%%), %d+%d tokens, %dms total%n",
+                int inTok = c.getTotalInputTokens();
+                int cacheRead = c.getTotalCacheReadTokens();
+                // cache_read_input_tokens is reported separately on Anthropic and
+                // included inside prompt_tokens on OpenAI-style providers; treat
+                // hit% as cacheRead / inTok so it stays meaningful on either.
+                double cachePct = inTok > 0 ? (100.0 * cacheRead / inTok) : 0.0;
+                ORIGINAL_ERR.printf("LLM Player %d: %d calls (%d fallbacks, %.1f%%), %d+%d tokens (cache hit %.1f%%, %d/%d), %dms total%n",
                         entry.getKey() + 1, calls, fallbacks, fallbackPct,
-                        c.getTotalInputTokens(), c.getTotalOutputTokens(),
+                        inTok, c.getTotalOutputTokens(),
+                        cachePct, cacheRead, inTok,
                         c.getTotalLatencyMs());
             }
         }
@@ -667,6 +679,8 @@ public class SimulateMatch {
                 usage.totalFallbacks = c.getTotalFallbacks();
                 usage.totalInputTokens = c.getTotalInputTokens();
                 usage.totalOutputTokens = c.getTotalOutputTokens();
+                usage.totalCacheReadTokens = c.getTotalCacheReadTokens();
+                usage.totalCacheCreationTokens = c.getTotalCacheCreationTokens();
                 usage.totalLatencyMs = c.getTotalLatencyMs();
                 ps.llmUsage = usage;
             }

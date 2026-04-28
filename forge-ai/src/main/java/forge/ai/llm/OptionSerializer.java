@@ -21,21 +21,35 @@ public final class OptionSerializer {
      * Includes a PASS option at the end.
      */
     public static String serializeSpellOptions(List<SpellAbility> spells) {
-        return serializeSpellOptions(spells, null);
+        return serializeSpellOptions(spells, null, null);
     }
 
     /**
-     * Serialize a list of SpellAbilities with optional per-option score deltas.
-     * Pass {@code evalDeltas == null} to skip the eval hint annotation. When
-     * provided, the list must be parallel to {@code spells}; nulls within the
-     * list are treated as "no hint for this index".
+     * Backwards-compatible overload — eval deltas only, no heuristic verdicts.
      */
     public static String serializeSpellOptions(List<SpellAbility> spells, List<Integer> evalDeltas) {
+        return serializeSpellOptions(spells, evalDeltas, null);
+    }
+
+    /**
+     * Serialize a list of SpellAbilities with optional per-option score deltas
+     * and heuristic verdict tags. Both auxiliary lists, when provided, must be
+     * parallel to {@code spells}; nulls within either list are treated as
+     * "no annotation for this index". Verdict tags surface the heuristic AI's
+     * own opinion (WillPlay / WaitForMain2 / Removal / etc.) so the LLM can
+     * use a battle-tested prior alongside its own judgement.
+     */
+    public static String serializeSpellOptions(List<SpellAbility> spells,
+                                                List<Integer> evalDeltas,
+                                                List<String> verdictTags) {
         StringBuilder sb = new StringBuilder("OPTIONS:\n");
         for (int i = 0; i < spells.size(); i++) {
             SpellAbility sa = spells.get(i);
             sb.append(i).append(": ");
             serializeSpellAbility(sb, sa);
+            if (verdictTags != null && i < verdictTags.size() && verdictTags.get(i) != null) {
+                sb.append("  [").append(verdictTags.get(i)).append(']');
+            }
             if (evalDeltas != null && i < evalDeltas.size() && evalDeltas.get(i) != null) {
                 int delta = evalDeltas.get(i);
                 String sign = delta >= 0 ? "+" : "";
@@ -174,6 +188,18 @@ public final class OptionSerializer {
      * LLM responds with block assignments like "A0:B1, A2:B0,B1" or NONE.
      */
     public static String serializeBatchBlockOptions(List<Card> attackers, List<Card> blockers, int myLife) {
+        return serializeBatchBlockOptions(attackers, blockers, myLife, null);
+    }
+
+    /**
+     * As above, but stamps a heuristic baseline assignment ("Heuristic baseline:
+     * A0:B2, A1:none, …") into the prompt header. Useful as a policy prior:
+     * the LLM sees what AiBlockController would do and only diverges when it
+     * has reason to. {@code heuristicAssignment} maps attacker index →
+     * blocker indices; null skips the annotation.
+     */
+    public static String serializeBatchBlockOptions(List<Card> attackers, List<Card> blockers, int myLife,
+                                                     java.util.Map<Integer, java.util.Set<Integer>> heuristicAssignment) {
         StringBuilder sb = new StringBuilder();
         // Combat math header — generic computed annotation. Helps the model
         // notice critical situations (e.g. would die if no block) without
@@ -191,6 +217,28 @@ public final class OptionSerializer {
         else if (totalDamage >= myLife && myLife > 0) sb.append(" [FATAL IF NO BLOCK — must block]");
         sb.append('\n');
 
+        if (heuristicAssignment != null) {
+            sb.append("Heuristic baseline: ");
+            if (heuristicAssignment.isEmpty()) {
+                sb.append("NONE");
+            } else {
+                boolean first = true;
+                for (int ai = 0; ai < attackers.size(); ai++) {
+                    java.util.Set<Integer> bs = heuristicAssignment.get(ai);
+                    if (bs == null || bs.isEmpty()) continue;
+                    if (!first) sb.append(", ");
+                    first = false;
+                    sb.append("A").append(ai).append(':');
+                    boolean firstB = true;
+                    for (int bi : bs) {
+                        if (!firstB) sb.append('+');
+                        firstB = false;
+                        sb.append('B').append(bi);
+                    }
+                }
+            }
+            sb.append(". Diverge from this only with reason.\n");
+        }
         sb.append("Assign blockers to attackers. Format: A0:B1, A2:B0,B1 (gang-block). Use NONE for no blocks.\n");
         sb.append("Reminder: summoning-sick creatures CAN block. Tapped creatures CANNOT.\n\n");
         sb.append("Attackers:\n");
@@ -246,10 +294,20 @@ public final class OptionSerializer {
      */
     public static String serializeBatchAttackOptions(List<Card> canAttack, int defenderLife,
                                                       List<Card> defenderBlockers) {
+        return serializeBatchAttackOptions(canAttack, defenderLife, defenderBlockers, null);
+    }
+
+    /**
+     * As {@link #serializeBatchAttackOptions(List, int, List)} but also stamps
+     * each option with the heuristic AI's recommendation when {@code heuristicAttackIdx}
+     * is non-null. {@code heuristicAttackIdx} contains the option indices the
+     * heuristic would attack with — used as a policy prior. Annotation is a
+     * compact "[heur: ATTACK]" / "[heur: HOLD]" suffix.
+     */
+    public static String serializeBatchAttackOptions(List<Card> canAttack, int defenderLife,
+                                                      List<Card> defenderBlockers,
+                                                      java.util.Set<Integer> heuristicAttackIdx) {
         StringBuilder sb = new StringBuilder();
-        // Combat math header — totals + lethal flag. Defender blockers list lets
-        // us flag genuinely unblockable damage (flying without flyers, menace
-        // with only 1 blocker, etc.) so the model sees the lethal threshold.
         int totalSwing = 0;
         int unblockableSwing = 0;
         for (Card a : canAttack) {
@@ -267,9 +325,29 @@ public final class OptionSerializer {
         }
         sb.append('\n');
 
+        if (heuristicAttackIdx != null) {
+            sb.append("Heuristic baseline: attack with ");
+            if (heuristicAttackIdx.isEmpty()) {
+                sb.append("NONE");
+            } else {
+                boolean first = true;
+                for (int i = 0; i < canAttack.size(); i++) {
+                    if (!heuristicAttackIdx.contains(i)) continue;
+                    if (!first) sb.append(", ");
+                    first = false;
+                    sb.append(i);
+                }
+            }
+            sb.append(". Diverge from this only with reason.\n");
+        }
+
         sb.append("Which creatures should attack? Respond with comma-separated numbers (e.g. 0,2) or NONE.\n\n");
         for (int i = 0; i < canAttack.size(); i++) {
-            sb.append(i).append(": ").append(GameStateSerializer.serializeCardBattlefield(canAttack.get(i))).append('\n');
+            sb.append(i).append(": ").append(GameStateSerializer.serializeCardBattlefield(canAttack.get(i)));
+            if (heuristicAttackIdx != null) {
+                sb.append(heuristicAttackIdx.contains(i) ? "  [heur: ATTACK]" : "  [heur: HOLD]");
+            }
+            sb.append('\n');
         }
         return sb.toString();
     }

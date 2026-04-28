@@ -81,6 +81,10 @@ public class SimulationResult {
         public int totalFallbacks;
         public int totalInputTokens;
         public int totalOutputTokens;
+        /** Tokens served from provider prompt cache (D2). 0 if provider doesn't report. */
+        public int totalCacheReadTokens;
+        /** Tokens written to provider prompt cache. 0 if provider doesn't report. */
+        public int totalCacheCreationTokens;
         public long totalLatencyMs;
     }
 
