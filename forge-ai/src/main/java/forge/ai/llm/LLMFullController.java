@@ -616,13 +616,32 @@ public class LLMFullController extends PlayerControllerAi {
             return true;
         }
 
+        // Heuristic prior: surface ComputerUtil.wantMulligan()'s verdict as a
+        // baseline annotation in the prompt — symmetric counterpart to the
+        // attack/block priors. Failure → no annotation, prompt runs as before.
+        Boolean heuristicKeep = null;
+        try {
+            heuristicKeep = !forge.ai.ComputerUtil.wantMulligan(getPlayer(), cardsToReturn);
+        } catch (Exception e) {
+            if (client.isDebug()) {
+                System.err.println("[LLM] mulligan heuristic prior failed: " + e.getMessage());
+            }
+        }
+
         String gameState = buildGameStateWithHistory();
-        String prompt = PromptTemplates.mulligan(gameState);
+        String prompt = PromptTemplates.mulligan(gameState, heuristicKeep);
         int chosen = callLLM(prompt, 2, "mulligan");
         if (chosen < 0) {
             return super.mulliganKeepHand(firstPlayer, cardsToReturn);
         }
         boolean keep = chosen == 0;
+        if (SHADOW_MODE && heuristicKeep != null) {
+            boolean agree = keep == heuristicKeep;
+            System.err.println("[LLM SHADOW] mulligan heuristic="
+                    + (heuristicKeep ? "KEEP" : "MULLIGAN")
+                    + " llm=" + (keep ? "KEEP" : "MULLIGAN")
+                    + (agree ? " AGREE" : " DIVERGE"));
+        }
         recordAction(keep ? "Kept opening hand" : "Mulliganed");
         return keep;
     }

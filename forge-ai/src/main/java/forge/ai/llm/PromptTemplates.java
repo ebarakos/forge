@@ -103,12 +103,26 @@ public final class PromptTemplates {
         return spellSelection(gameState, options, true);
     }
 
-    /**
-     * Build a user prompt for a mulligan decision.
-     */
+    /** Backwards-compatible overload — no heuristic prior. */
     public static String mulligan(String gameState) {
-        return gameState + "\n" + MULLIGAN_DOCTRINE
-                + "\nDo you want to keep this hand?\n\nOPTIONS:\n0: Keep\n1: Mulligan\n";
+        return mulligan(gameState, null);
+    }
+
+    /**
+     * Build a user prompt for a mulligan decision. When {@code heuristicKeep}
+     * is non-null, surfaces the heuristic AI's verdict as a policy prior
+     * ("Heuristic baseline: KEEP / MULLIGAN. Diverge only with reason.") —
+     * the symmetric counterpart to the attack/block heuristic priors.
+     */
+    public static String mulligan(String gameState, Boolean heuristicKeep) {
+        StringBuilder sb = new StringBuilder(gameState);
+        sb.append('\n').append(MULLIGAN_DOCTRINE);
+        if (heuristicKeep != null) {
+            sb.append("Heuristic baseline: ").append(heuristicKeep ? "KEEP" : "MULLIGAN")
+              .append(". Diverge only with reason.\n");
+        }
+        sb.append("\nDo you want to keep this hand?\n\nOPTIONS:\n0: Keep\n1: Mulligan\n");
+        return sb.toString();
     }
 
     /**
