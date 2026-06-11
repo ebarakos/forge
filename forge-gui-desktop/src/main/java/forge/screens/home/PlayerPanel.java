@@ -1,6 +1,7 @@
 package forge.screens.home;
 
 import forge.deckchooser.FDeckChooser;
+import java.awt.Frame;
 import java.awt.Graphics;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
@@ -15,12 +16,15 @@ import java.util.function.Predicate;
 import javax.swing.ButtonGroup;
 import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JPopupMenu;
+import javax.swing.SwingUtilities;
 
 import org.apache.commons.lang3.StringUtils;
 
 import com.google.common.collect.ImmutableSet;
 
 import forge.ai.AiProfileUtil;
+import forge.ai.llm.LLMConfig;
+import forge.gui.llm.LlmConfigDialog;
 import forge.Singletons;
 import forge.ai.AIOption;
 import forge.deck.DeckSection;
@@ -82,6 +86,10 @@ public class PlayerPanel extends FPanel {
     private final FComboBoxWrapper<Object> aeTeamComboBox = new FComboBoxWrapper<>();
     private final FComboBoxWrapper<String> aiProfileComboBox = new FComboBoxWrapper<>();
     private FLabel aiProfileLabel;
+    /** Last accepted profile selection — used to revert if the LLM dialog is cancelled. */
+    private String lastAcceptedAiProfile = "";
+    /** Re-entrancy guard for the aiProfileComboBox action listener. */
+    private boolean handlingAiProfileChange = false;
 
     private final FLabel closeBtn;
     private final FLabel deckBtn = new FLabel.ButtonBuilder().text(localizer.getMessage("lblSelectaDeck")).build();
@@ -166,7 +174,13 @@ public class PlayerPanel extends FPanel {
         for (String profile : AiProfileUtil.getProfilesDisplayList()) {
             aiProfileComboBox.addItem(profile);
         }
-        aiProfileComboBox.addActionListener(e -> lobby.firePlayerChangeListener(index));
+        // Seed the "previous selection" snapshot so a Cancel from the LLM
+        // dialog on first selection can revert sensibly.
+        if (aiProfileComboBox.getItemCount() > 0) {
+            Object initial = aiProfileComboBox.getSelectedItem();
+            lastAcceptedAiProfile = initial == null ? "" : initial.toString();
+        }
+        aiProfileComboBox.addActionListener(this::onAiProfileChanged);
         this.add(aiProfileLabel, variantBtnConstraints + ", cell 4 1, ax right, hidemode 3");
         aiProfileComboBox.addTo(this, variantBtnConstraints + ", cell 5 1, pushx, growx, hidemode 3");
 
@@ -485,7 +499,62 @@ public class PlayerPanel extends FPanel {
     public void setAiProfile(final String profile) {
         if (profile != null && !profile.isEmpty()) {
             aiProfileComboBox.setSelectedItem(profile);
+            lastAcceptedAiProfile = profile;
         }
+    }
+
+    /**
+     * Combo-box listener for the AI profile dropdown. When the user picks the
+     * synthetic {@code LLM…} entry we open {@link LlmConfigDialog} for a
+     * canonical profile string, then either commit that choice as a new
+     * dropdown entry or revert to the previous selection on cancel. Already-
+     * canonical LLM profile strings (recognised by
+     * {@link LLMConfig#isLlmProfile(String)}) are treated as configured seats
+     * and don't reopen the dialog.
+     */
+    private void onAiProfileChanged(final ActionEvent e) {
+        if (handlingAiProfileChange) {
+            return;
+        }
+        Object selected = aiProfileComboBox.getSelectedItem();
+        String pick = selected == null ? "" : selected.toString();
+
+        if (LLMConfig.LLM_DIALOG_DISPLAY.equals(pick)) {
+            handlingAiProfileChange = true;
+            try {
+                Frame owner = (Frame) SwingUtilities.getWindowAncestor(this);
+                String previousLlm = LLMConfig.isLlmProfile(lastAcceptedAiProfile)
+                        ? lastAcceptedAiProfile : null;
+                String result = LlmConfigDialog.show(owner,
+                        localizer.getMessage("lblPlayer") + " " + (index + 1),
+                        previousLlm);
+                if (result == null) {
+                    // Cancel — revert to the previous accepted selection.
+                    aiProfileComboBox.setSelectedItem(lastAcceptedAiProfile);
+                } else {
+                    // Make sure the canonical string is in the dropdown so the
+                    // chosen profile shows up as the current selection.
+                    if (!comboContainsItem(result)) {
+                        aiProfileComboBox.addItem(result);
+                    }
+                    aiProfileComboBox.setSelectedItem(result);
+                    lastAcceptedAiProfile = result;
+                }
+            } finally {
+                handlingAiProfileChange = false;
+            }
+        } else {
+            lastAcceptedAiProfile = pick;
+        }
+        lobby.firePlayerChangeListener(index);
+    }
+
+    private boolean comboContainsItem(final String item) {
+        if (item == null) return false;
+        for (int i = 0; i < aiProfileComboBox.getItemCount(); i++) {
+            if (item.equals(aiProfileComboBox.getItemAt(i))) return true;
+        }
+        return false;
     }
 
     public boolean isArchenemy() {

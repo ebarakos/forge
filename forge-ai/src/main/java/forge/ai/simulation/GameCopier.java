@@ -60,6 +60,10 @@ public class GameCopier {
     }
 
     public Game getCopiedGame() {
+        // Snapshot-based copying never builds gameObjectMap; the copy lives in the snapshot.
+        if (snapshot != null) {
+            return snapshot.getNewGame();
+        }
         return gameObjectMap.getGame();
     }
 
@@ -161,8 +165,15 @@ public class GameCopier {
         }
 
         // Undo effects first before calculating them below, to avoid them applying twice.
+        // Lenient mapping: a static effect can reference cards no longer in any copied
+        // zone (LKI, tokens that ceased to exist). There is nothing to un-apply on the
+        // copy for those, so they map to null and StaticEffect skips them.
+        IEntityMap lenientMap = new IEntityMap() {
+            @Override public Game getGame() { return gameObjectMap.getGame(); }
+            @Override public GameObject map(GameObject o) { return findOrNull(o); }
+        };
         for (StaticEffect effect : origGame.getStaticEffects().getEffects()) {
-            effect.removeMapped(gameObjectMap);
+            effect.removeMapped(lenientMap);
         }
 
         if (origPhaseHandler.getCombat() != null) {
@@ -492,26 +503,28 @@ public class GameCopier {
         }
     }
 
+    /** Like {@link #find(GameObject)} but returns null instead of throwing for unmappable objects. */
+    public GameObject findOrNull(GameObject o) {
+        if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {
+            return snapshot.find(o);
+        }
+        if (o instanceof Card) {
+            return cardMap.get(o);
+        }
+        if (o instanceof Player) {
+            return playerMap.get(o);
+        }
+        return null;
+    }
+
     public GameObject find(GameObject o) {
         if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {
             return snapshot.find(o);
         }
-
-        GameObject result = null;
-        if (o instanceof Card) {
-            result = cardMap.get(o);
-            if (result != null) {
-                return result;
-            } else {
-                System.out.println("Couldn't map " + o + "/" + System.identityHashCode(o));
-            }
-        } else if (o instanceof Player) {
-            result = playerMap.get(o);
-            if (result != null)
-                return result;
-        }
-        if (o != null)
+        GameObject result = findOrNull(o);
+        if (result == null && o != null) {
             throw new RuntimeException("Couldn't map " + o + "/" + System.identityHashCode(o));
+        }
         return result;
     }
     public GameObject reverseFind(GameObject o) {

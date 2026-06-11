@@ -5,14 +5,12 @@ package forge.ai.llm;
  */
 public final class LLMConfig {
 
-    // GUI display names for the AI profile dropdown.
-    // LLM_CUSTOM_DISPLAY targets a user-supplied OpenAI-compatible endpoint
-    // (e.g. self-hosted LM Studio) routed through the relay's custom-URL
-    // provider. Set RELAY_CUSTOM_URL to your endpoint to enable it.
-    public static final String LLM_CUSTOM_DISPLAY = "LLM (Custom)";
-    public static final String LLM_LOCAL_DISPLAY = "LLM (Local)";
-    public static final String LLM_OPENROUTER_DISPLAY = "LLM (OpenRouter)";
-    public static final String LLM_CEREBRAS_DISPLAY = "LLM (Cerebras)";
+    /**
+     * Single GUI dropdown entry that opens the {@code LlmConfigDialog} for
+     * per-seat provider/model selection. Replaces the four legacy
+     * {@code "LLM (Provider)"} entries removed in Phase 2.
+     */
+    public static final String LLM_DIALOG_DISPLAY = "LLM…"; // "LLM…"
 
     // Default models for each provider
     private static final String DEFAULT_LOCAL_MODEL = "llama3";
@@ -21,10 +19,8 @@ public final class LLMConfig {
     // accepts on those upstreams as of relay v1.6.8 (2026-04-27).
     private static final String DEFAULT_OPENROUTER_MODEL = "inclusionai/ling-2.6-1t:free";
     private static final String DEFAULT_CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507";
-    // Custom provider — bring-your-own OpenAI-compatible endpoint, proxied by the
-    // relay (X-Custom-Url header) so the Worker fetches it server-side and we
-    // sidestep mixed-content / CORS. The endpoint URL must come from the
-    // RELAY_CUSTOM_URL env var; there is no default.
+    // OpenAI-compatible endpoint default — points at the model name; the URL
+    // itself comes from OPENAI_COMPAT_URL (no default endpoint URL).
     private static final String DEFAULT_CUSTOM_MODEL = "openai/gpt-oss-20b";
 
     // Default timeouts per provider (local models need longer for cold starts / model loading)
@@ -35,10 +31,17 @@ public final class LLMConfig {
     // Cerebras free tier = 30 RPM → 2100ms per call (with 5% safety margin).
     private static final int CEREBRAS_MIN_INTERVAL_MS = 2100;
 
+    // Provider canonical names used in the profile grammar `<provider>:<model>`.
+    private static final java.util.Set<String> SUPPORTED_PROVIDERS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "cerebras", "openrouter", "groq", "openai", "anthropic", "ollama", "openai-compat"));
+
+    // Print each one-shot deprecation warning at most once per JVM run.
+    private static final java.util.Set<String> WARNED_DEPRECATIONS = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
     private final String apiBaseUrl;
     private final String apiKey;          // nullable for local Ollama
     private final String model;
-    private final String provider;        // "ollama", "openrouter", "cerebras", or "relay"
+    private final String provider;        // "ollama", "openrouter", "cerebras", "groq", "openai", "anthropic", "openai-compat", or "relay"
     private final String relayProvider;   // upstream provider when using relay (e.g. "cerebras", "custom")
     private final String userApiKey;      // BYO key forwarded as X-User-Api-Key when using relay
     private final String customUrl;       // upstream URL when relayProvider == "custom" (forwarded as X-Custom-Url)
@@ -110,8 +113,45 @@ public final class LLMConfig {
     }
 
     /**
-     * Parse a profile string like "ollama:llama3" or "openrouter:deepseek/deepseek-chat"
-     * into an LLMConfig. Returns null if the string is not an LLM profile.
+     * Whether LLM traffic should default to going through the local llm-relay
+     * gateway. Reads {@code LLM_VIA_RELAY} (preferred) then {@code RELAY} from
+     * env / .env, defaulting to {@code true} when unset. Any value other than
+     * {@code 0} / {@code false} (case-insensitive) is treated as truthy.
+     */
+    public static boolean isRelayDefault() {
+        String v = loadProviderApiKey("LLM_VIA_RELAY");
+        if (v == null || v.isEmpty()) {
+            v = loadProviderApiKey("RELAY");
+        }
+        if (v == null || v.isEmpty()) return true;
+        String t = v.trim();
+        return !"0".equals(t) && !"false".equalsIgnoreCase(t);
+    }
+
+    /**
+     * Build the canonical (unprefixed) profile string for a provider/model
+     * pair. Routing is decided at parse time by {@link #isRelayDefault()}; the
+     * caller can prepend {@code relay:} or {@code direct:} to force a specific
+     * path.
+     */
+    public static String canonicalProfileString(String provider, String model) {
+        if (provider == null || provider.isEmpty()) return null;
+        if (model == null) model = "";
+        return provider + ":" + model;
+    }
+
+    /**
+     * Parse a profile string into an LLMConfig. Returns null if the string is
+     * not an LLM profile or required env vars are missing.
+     *
+     * <p>Grammar (Phase 1):
+     * <ul>
+     *   <li>{@code <provider>:<model>} — routing decided by {@link #isRelayDefault()}</li>
+     *   <li>{@code relay:<provider>:<model>} — force relay routing</li>
+     *   <li>{@code direct:<provider>:<model>} — force direct upstream call</li>
+     *   <li>Backwards-compat aliases (deprecated, one cycle): {@code relay-<provider>:<model>},
+     *       {@code relay:<model>} (env-driven upstream).</li>
+     * </ul>
      *
      * @param free if true and provider is openrouter, auto-append ":free" to model name
      */
@@ -119,123 +159,222 @@ public final class LLMConfig {
                                                double temperature, int timeoutMs,
                                                boolean debug, boolean free) {
         if (profile == null) return null;
+        String trimmed = profile.trim();
+        if (trimmed.isEmpty()) return null;
+        String lower = trimmed.toLowerCase();
 
-        String lower = profile.toLowerCase().trim();
-        String provider;
-        String model;
-        String baseUrl;
-        String relayProviderOverride = null;
+        // 1. Backwards-compat aliases: relay-<provider>:<model>.
+        //    relay-custom:* maps to the new openai-compat name, but routes via
+        //    the relay's "custom" upstream (X-Custom-Url) under the hood.
+        if (lower.startsWith("relay-")) {
+            int firstColon = trimmed.indexOf(':');
+            if (firstColon > 0) {
+                String upstream = trimmed.substring("relay-".length(), firstColon).toLowerCase();
+                String rest = trimmed.substring(firstColon + 1);
+                String newProviderName = "custom".equals(upstream) ? "openai-compat" : upstream;
+                warnOnce("relay-" + upstream,
+                        "[LLM] DEPRECATED: 'relay-" + upstream + ":' → use 'relay:" + newProviderName
+                                + ":' or '" + newProviderName + ":' (with LLM_VIA_RELAY=true)");
+                return fromProfileString("relay:" + newProviderName + ":" + rest,
+                        apiKey, temperature, timeoutMs, debug, free);
+            }
+        }
 
-        int defaultTimeout;
-        if (lower.startsWith("ollama:")) {
-            provider = "ollama";
-            model = profile.substring("ollama:".length()).trim();
-            if (model.isEmpty()) model = DEFAULT_LOCAL_MODEL;
-            baseUrl = "http://localhost:11434/v1";
-            defaultTimeout = DEFAULT_LOCAL_TIMEOUT_MS;
-        } else if (lower.startsWith("openrouter:")) {
-            provider = "openrouter";
-            model = profile.substring("openrouter:".length()).trim();
-            if (model.isEmpty()) model = DEFAULT_OPENROUTER_MODEL;
-            baseUrl = "https://openrouter.ai/api/v1";
-            defaultTimeout = DEFAULT_CLOUD_TIMEOUT_MS;
-            // Auto-append :free when --llm-free is set
-            if (free && !model.endsWith(":free")) {
-                model = model + ":free";
-            }
-        } else if (lower.startsWith("cerebras:")) {
-            provider = "cerebras";
-            model = profile.substring("cerebras:".length()).trim();
-            if (model.isEmpty()) model = DEFAULT_CEREBRAS_MODEL;
-            baseUrl = "https://api.cerebras.ai/v1";
-            defaultTimeout = DEFAULT_CLOUD_TIMEOUT_MS;
-            // Always prefer Cerebras-specific key (generic key from another provider won't work)
-            String cerebrasKey = loadProviderApiKey("CEREBRAS_API_KEY");
-            if (cerebrasKey != null && !cerebrasKey.isEmpty()) {
-                apiKey = cerebrasKey;
-            }
-        } else if (lower.startsWith("relay:")) {
-            provider = "relay";
-            model = profile.substring("relay:".length()).trim();
+        // 2. Bare relay:<model> — env-driven upstream. Deprecated; route via
+        //    triple-segment form using RELAY_PROVIDER (default "cerebras").
+        if (lower.startsWith("relay:") && trimmed.indexOf(':', "relay:".length()) < 0) {
+            String model = trimmed.substring("relay:".length()).trim();
+            String upstream = loadProviderApiKey("RELAY_PROVIDER");
+            if (upstream == null || upstream.isEmpty()) upstream = "cerebras";
+            // Map the relay's "custom" upstream to the new provider name.
+            String newProviderName = "custom".equalsIgnoreCase(upstream) ? "openai-compat" : upstream.toLowerCase();
+            warnOnce("relay-bare",
+                    "[LLM] DEPRECATED: bare 'relay:<model>' → use 'relay:" + newProviderName
+                            + ":<model>' or '" + newProviderName + ":<model>' (with LLM_VIA_RELAY=true)");
             if (model.isEmpty()) {
                 model = loadProviderApiKey("RELAY_MODEL");
                 if (model == null || model.isEmpty()) model = DEFAULT_CEREBRAS_MODEL;
             }
-            baseUrl = loadProviderApiKey("RELAY_BASE_URL");
-            if (baseUrl == null || baseUrl.isEmpty()) baseUrl = "http://localhost:8787/v1";
-            defaultTimeout = DEFAULT_CLOUD_TIMEOUT_MS;
-            // Relay doesn't need an API key — it manages keys centrally
-            // But honour an explicit key if provided (forwarded as X-User-Api-Key)
-        } else if (lower.startsWith("relay-cerebras:") || lower.startsWith("relay-openrouter:")
-                || lower.startsWith("relay-groq:") || lower.startsWith("relay-openai:")
-                || lower.startsWith("relay-anthropic:") || lower.startsWith("relay-custom:")) {
-            // Per-profile relay upstream: "relay-<upstream>:<model>"
-            provider = "relay";
-            int colon = profile.indexOf(':');
-            String upstream = profile.substring("relay-".length(), colon).toLowerCase();
-            model = profile.substring(colon + 1).trim();
-            if (model.isEmpty()) {
-                if ("cerebras".equals(upstream)) model = DEFAULT_CEREBRAS_MODEL;
-                else if ("openrouter".equals(upstream)) model = DEFAULT_OPENROUTER_MODEL;
-                else if ("custom".equals(upstream)) model = DEFAULT_CUSTOM_MODEL;
-                else model = DEFAULT_CEREBRAS_MODEL;
-            }
-            if ("openrouter".equals(upstream) && free && !model.endsWith(":free")) {
-                model = model + ":free";
-            }
-            baseUrl = loadProviderApiKey("RELAY_BASE_URL");
-            if (baseUrl == null || baseUrl.isEmpty()) baseUrl = "http://localhost:8787/v1";
-            defaultTimeout = DEFAULT_CLOUD_TIMEOUT_MS;
-            // Stash upstream so the block below picks it up instead of RELAY_PROVIDER env.
-            relayProviderOverride = upstream;
-        } else {
-            return null; // Not an LLM profile
+            return fromProfileString("relay:" + newProviderName + ":" + model,
+                    apiKey, temperature, timeoutMs, debug, free);
         }
 
+        // 3. Triple-segment override forms: relay:<provider>:<model> / direct:<provider>:<model>.
+        boolean forceRelay = lower.startsWith("relay:");
+        boolean forceDirect = lower.startsWith("direct:");
+        String providerName;
+        String model;
+        boolean useRelay;
+        if (forceRelay || forceDirect) {
+            String prefix = forceRelay ? "relay:" : "direct:";
+            String rest = trimmed.substring(prefix.length());
+            int colon = rest.indexOf(':');
+            if (colon < 0) {
+                System.err.println("[LLM] Invalid profile '" + profile + "': expected '"
+                        + prefix + "<provider>:<model>'");
+                return null;
+            }
+            providerName = rest.substring(0, colon).toLowerCase().trim();
+            model = rest.substring(colon + 1).trim();
+            useRelay = forceRelay;
+        } else {
+            // 4. Two-segment canonical form <provider>:<model>.
+            int colon = trimmed.indexOf(':');
+            if (colon <= 0) return null;
+            providerName = trimmed.substring(0, colon).toLowerCase().trim();
+            model = trimmed.substring(colon + 1).trim();
+            if (!SUPPORTED_PROVIDERS.contains(providerName)) {
+                return null;
+            }
+            useRelay = isRelayDefault();
+        }
+
+        if (!SUPPORTED_PROVIDERS.contains(providerName)) {
+            System.err.println("[LLM] Unknown provider '" + providerName + "' in profile '" + profile
+                    + "'. Supported: " + SUPPORTED_PROVIDERS);
+            return null;
+        }
+
+        // Ollama is local-only; relay path is meaningless. Warn and fall back to direct.
+        if ("ollama".equals(providerName) && useRelay) {
+            warnOnce("ollama-relay",
+                    "[LLM] 'ollama' is local-only; ignoring relay routing and calling http://localhost:11434/v1 directly");
+            useRelay = false;
+        }
+
+        // Anthropic direct path is unsupported in Phase 1 — LLMClient only
+        // speaks the OpenAI-compatible variant (Authorization: Bearer), and
+        // Anthropic's native API uses the x-api-key header + a different
+        // request schema. Routing direct would 401 silently. Either route via
+        // relay (relay translates the schema) or return null with a clear
+        // diagnostic.
+        if ("anthropic".equals(providerName) && !useRelay) {
+            System.err.println("[LLM] 'anthropic' direct path is not implemented yet "
+                    + "(LLMClient only speaks OpenAI-compatible chat/completions). "
+                    + "Use 'relay:anthropic:<model>' or set LLM_VIA_RELAY=true.");
+            return null;
+        }
+
+        int defaultTimeout = "ollama".equals(providerName) ? DEFAULT_LOCAL_TIMEOUT_MS : DEFAULT_CLOUD_TIMEOUT_MS;
         int effectiveTimeout = (timeoutMs > 0) ? timeoutMs : defaultTimeout;
 
-        // Relay upstream provider and BYO key
-        String relayProvider = null;
-        String userApiKey = null;
-        String customUrl = null;
-        if ("relay".equals(provider)) {
-            if (relayProviderOverride != null) {
-                relayProvider = relayProviderOverride;
-            } else {
-                relayProvider = loadProviderApiKey("RELAY_PROVIDER");
-                if (relayProvider == null || relayProvider.isEmpty()) relayProvider = "cerebras";
+        // Apply provider-specific defaults / model fallbacks.
+        if (model.isEmpty()) {
+            switch (providerName) {
+                case "ollama":         model = DEFAULT_LOCAL_MODEL; break;
+                case "openrouter":     model = DEFAULT_OPENROUTER_MODEL; break;
+                case "cerebras":       model = DEFAULT_CEREBRAS_MODEL; break;
+                case "openai-compat":  model = DEFAULT_CUSTOM_MODEL; break;
+                default:               // openai / anthropic / groq have no sensible default
+                    System.err.println("[LLM] Profile '" + profile + "' is missing the model name");
+                    return null;
             }
-            userApiKey = loadProviderApiKey(providerApiKeyEnvVar(relayProvider));
+        }
+        if ("openrouter".equals(providerName) && free && !model.endsWith(":free")) {
+            model = model + ":free";
+        }
+
+        // Build config based on routing.
+        if (useRelay) {
+            String baseUrl = loadProviderApiKey("RELAY_BASE_URL");
+            if (baseUrl == null || baseUrl.isEmpty()) baseUrl = "http://localhost:8787/v1";
+
+            // Relay upstream uses "custom" for openai-compat (X-Custom-Url path).
+            String relayProvider = "openai-compat".equals(providerName) ? "custom" : providerName;
+            String userApiKey = loadProviderApiKey(providerApiKeyEnvVar(relayProvider));
+            String customUrl = null;
             if ("custom".equals(relayProvider)) {
-                customUrl = loadProviderApiKey("RELAY_CUSTOM_URL");
+                customUrl = loadProviderApiKey("OPENAI_COMPAT_URL");
                 if (customUrl == null || customUrl.isEmpty()) {
-                    System.err.println("[LLM] relay-custom: requires RELAY_CUSTOM_URL env var "
-                            + "(URL of an OpenAI-compatible endpoint, e.g. https://your-host/v1). "
-                            + "Falling back to heuristic AI for this seat.");
+                    // Back-compat: legacy RELAY_CUSTOM_URL still honoured.
+                    customUrl = loadProviderApiKey("RELAY_CUSTOM_URL");
+                }
+                if (customUrl == null || customUrl.isEmpty()) {
+                    System.err.println("[LLM] '" + providerName + "' (via relay) requires OPENAI_COMPAT_URL "
+                            + "(URL of an OpenAI-compatible endpoint). Falling back to heuristic AI for this seat.");
                     return null;
                 }
             }
+
+            int minInterval = "cerebras".equals(relayProvider) ? CEREBRAS_MIN_INTERVAL_MS : 0;
+            // Anthropic-style cache_control is supported by the cloud upstreams
+            // we proxy, but not by openai-compat (LM Studio / vLLM speak plain
+            // OpenAI without content-block cache hints).
+            boolean cachingOn = !"custom".equals(relayProvider);
+
+            return new Builder()
+                    .provider("relay")
+                    .relayProvider(relayProvider)
+                    .userApiKey(userApiKey)
+                    .customUrl(customUrl)
+                    .apiBaseUrl(baseUrl)
+                    .apiKey(apiKey)
+                    .model(model)
+                    .temperature(temperature)
+                    .timeoutMs(effectiveTimeout)
+                    .minIntervalMs(minInterval)
+                    .debug(debug)
+                    .promptCaching(cachingOn)
+                    .build();
         }
 
-        // Client-side throttle: Cerebras free tier is 30 RPM.
-        // Apply when using Cerebras directly, or via the relay.
-        int minInterval = 0;
-        if ("cerebras".equals(provider) || "cerebras".equals(relayProvider)) {
-            minInterval = CEREBRAS_MIN_INTERVAL_MS;
+        // Direct path — provider-specific base URL + key.
+        String baseUrl;
+        String directKey = apiKey;
+        switch (providerName) {
+            case "ollama":
+                baseUrl = "http://localhost:11434/v1";
+                directKey = null; // local, no auth
+                break;
+            case "openrouter":
+                baseUrl = "https://openrouter.ai/api/v1";
+                String orKey = loadProviderApiKey("OPENROUTER_API_KEY");
+                if (orKey != null && !orKey.isEmpty()) directKey = orKey;
+                break;
+            case "cerebras":
+                baseUrl = "https://api.cerebras.ai/v1";
+                String cbKey = loadProviderApiKey("CEREBRAS_API_KEY");
+                if (cbKey != null && !cbKey.isEmpty()) directKey = cbKey;
+                break;
+            case "groq":
+                baseUrl = "https://api.groq.com/openai/v1";
+                String gqKey = loadProviderApiKey("GROQ_API_KEY");
+                if (gqKey != null && !gqKey.isEmpty()) directKey = gqKey;
+                break;
+            case "openai":
+                baseUrl = "https://api.openai.com/v1";
+                String oaKey = loadProviderApiKey("OPENAI_API_KEY");
+                if (oaKey != null && !oaKey.isEmpty()) directKey = oaKey;
+                break;
+            case "openai-compat":
+                baseUrl = loadProviderApiKey("OPENAI_COMPAT_URL");
+                if (baseUrl == null || baseUrl.isEmpty()) {
+                    System.err.println("[LLM] 'openai-compat' (direct) requires OPENAI_COMPAT_URL "
+                            + "(e.g. http://localhost:1234/v1). Falling back to heuristic AI for this seat.");
+                    return null;
+                }
+                String compatKey = loadProviderApiKey("OPENAI_COMPAT_API_KEY");
+                if (compatKey != null && !compatKey.isEmpty()) directKey = compatKey;
+                break;
+            default:
+                // anthropic already short-circuited above; nothing else to handle.
+                System.err.println("[LLM] Unsupported direct provider: " + providerName);
+                return null;
         }
 
-        // Enable prompt caching on cloud providers that support Anthropic-style
-        // cache_control markers. Ollama and the custom (LM Studio) URL don't —
-        // they're OpenAI-compatible plain text without Anthropic content blocks.
-        boolean cachingOn = !"ollama".equals(provider) && !"custom".equals(relayProvider);
+        int minInterval = "cerebras".equals(providerName) ? CEREBRAS_MIN_INTERVAL_MS : 0;
+        // Direct calls: caching off for ollama / openai-compat (local OpenAI-clone
+        // backends typically don't honour Anthropic-style cache_control), on for
+        // hosted providers that do (cerebras/openrouter/openai).
+        boolean cachingOn = !"ollama".equals(providerName) && !"openai-compat".equals(providerName);
 
         return new Builder()
-                .provider(provider)
-                .relayProvider(relayProvider)
-                .userApiKey(userApiKey)
-                .customUrl(customUrl)
+                .provider(providerName)
+                .relayProvider(null)
+                .userApiKey(null)
+                .customUrl(null)
                 .apiBaseUrl(baseUrl)
-                .apiKey(apiKey)
+                .apiKey(directKey)
                 .model(model)
                 .temperature(temperature)
                 .timeoutMs(effectiveTimeout)
@@ -254,36 +393,39 @@ public final class LLMConfig {
 
     public static boolean isLlmProfile(String profile) {
         if (profile == null) return false;
-        String lower = profile.toLowerCase().trim();
-        return lower.startsWith("ollama:") || lower.startsWith("openrouter:")
-                || lower.startsWith("cerebras:") || lower.startsWith("relay:")
-                || lower.startsWith("relay-cerebras:") || lower.startsWith("relay-openrouter:")
-                || lower.startsWith("relay-groq:") || lower.startsWith("relay-openai:")
-                || lower.startsWith("relay-anthropic:") || lower.startsWith("relay-custom:");
-    }
+        String trimmed = profile.trim();
+        if (trimmed.isEmpty()) return false;
+        String lower = trimmed.toLowerCase();
 
-    /** Returns true if the profile string is an LLM GUI display name. */
-    public static boolean isLlmDisplayProfile(String profile) {
-        return LLM_CUSTOM_DISPLAY.equals(profile)
-                || LLM_LOCAL_DISPLAY.equals(profile)
-                || LLM_OPENROUTER_DISPLAY.equals(profile)
-                || LLM_CEREBRAS_DISPLAY.equals(profile);
-    }
-
-    /** Maps a GUI display name to the internal profile string (e.g. "ollama:llama3"). */
-    public static String toProfileString(String displayName) {
-        if (LLM_CUSTOM_DISPLAY.equals(displayName)) {
-            return "relay-custom:" + DEFAULT_CUSTOM_MODEL;
-        } else if (LLM_LOCAL_DISPLAY.equals(displayName)) {
-            return "ollama:" + DEFAULT_LOCAL_MODEL;
-        } else if (LLM_OPENROUTER_DISPLAY.equals(displayName)) {
-            return "relay-openrouter:" + DEFAULT_OPENROUTER_MODEL;
-        } else if (LLM_CEREBRAS_DISPLAY.equals(displayName)) {
-            String m = loadProviderApiKey("RELAY_MODEL");
-            if (m == null || m.isEmpty()) m = DEFAULT_CEREBRAS_MODEL;
-            return "relay-cerebras:" + m;
+        // Triple-segment overrides.
+        if (lower.startsWith("relay:") || lower.startsWith("direct:")) {
+            int firstColon = trimmed.indexOf(':');
+            String rest = trimmed.substring(firstColon + 1);
+            int secondColon = rest.indexOf(':');
+            if (secondColon > 0) {
+                String upstream = rest.substring(0, secondColon).toLowerCase();
+                if (SUPPORTED_PROVIDERS.contains(upstream)) return true;
+            }
+            // Bare relay:<model> — accept as deprecated form.
+            return lower.startsWith("relay:");
         }
-        return null;
+
+        // Backwards-compat relay-<provider>: prefixes.
+        if (lower.startsWith("relay-")) {
+            int colon = trimmed.indexOf(':');
+            if (colon > "relay-".length()) {
+                String upstream = trimmed.substring("relay-".length(), colon).toLowerCase();
+                return SUPPORTED_PROVIDERS.contains(upstream)
+                        || "custom".equals(upstream); // legacy alias for openai-compat
+            }
+            return false;
+        }
+
+        // Two-segment <provider>:<model>.
+        int colon = trimmed.indexOf(':');
+        if (colon <= 0) return false;
+        String provider = trimmed.substring(0, colon).toLowerCase();
+        return SUPPORTED_PROVIDERS.contains(provider);
     }
 
     /** Loads API key from environment variables, then falls back to .env file. */
@@ -317,9 +459,18 @@ public final class LLMConfig {
         }
     }
 
-    /** Loads a provider-specific API key from env var or .env file. */
+    /**
+     * Loads a value (typically an API key, but also routing flags) from env
+     * var, then falls back to a {@code .env} file in the working directory and
+     * each parent up to the filesystem root.
+     */
     public static String loadProviderApiKey(String envVarName) {
         if (envVarName == null || envVarName.isEmpty()) return null;
+        // System-property override channel ("forge.llm.env.<VAR>"): GUI dialogs
+        // cannot modify process env, so this is how in-app configuration (e.g.
+        // LlmConfigDialog's openai-compat URL) takes effect for the session.
+        String prop = System.getProperty("forge.llm.env." + envVarName);
+        if (prop != null && !prop.isEmpty()) return prop;
         String key = System.getenv(envVarName);
         if (key != null && !key.isEmpty()) return key;
         return loadDotEnvValue(envVarName);
@@ -335,24 +486,39 @@ public final class LLMConfig {
         return dotEnv != null && !dotEnv.isEmpty() && !"false".equalsIgnoreCase(dotEnv) && !"0".equals(dotEnv);
     }
 
-    /** Read a single value from .env file in the working directory. */
+    /**
+     * Read a single value from a {@code .env} file, walking up from the
+     * working directory through each parent. Returns the first match.
+     */
     private static String loadDotEnvValue(String key) {
-        java.io.File envFile = new java.io.File(".env");
-        if (!envFile.exists()) return null;
         String prefix = key + "=";
-        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(envFile))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.startsWith("#") || line.isEmpty()) continue;
-                if (line.startsWith(prefix)) {
-                    return line.substring(prefix.length()).trim();
+        java.io.File dir = new java.io.File("").getAbsoluteFile();
+        while (dir != null) {
+            java.io.File envFile = new java.io.File(dir, ".env");
+            if (envFile.exists()) {
+                try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(envFile))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        line = line.trim();
+                        if (line.startsWith("#") || line.isEmpty()) continue;
+                        if (line.startsWith(prefix)) {
+                            return line.substring(prefix.length()).trim();
+                        }
+                    }
+                } catch (java.io.IOException e) {
+                    // Ignore — fall through to parent dir.
                 }
             }
-        } catch (java.io.IOException e) {
-            // Ignore
+            dir = dir.getParentFile();
         }
         return null;
+    }
+
+    /** Print a deprecation/info warning at most once per JVM run. */
+    private static void warnOnce(String tag, String msg) {
+        if (WARNED_DEPRECATIONS.add(tag)) {
+            System.err.println(msg);
+        }
     }
 
     public static class Builder {

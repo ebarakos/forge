@@ -16,6 +16,7 @@ public class Plan {
     private int nextChoice;
     private Decision selectedDecision;
     private PhaseType startPhase;
+    private int startPhaseTurn;
 
     public Plan(ArrayList<Decision> decisions, Score finalScore) {
         this.decisions = decisions;
@@ -28,6 +29,16 @@ public class Plan {
 
     public PhaseType getStartPhase() {
         return startPhase;
+    }
+
+    public int getStartPhaseTurn() {
+        return startPhaseTurn;
+    }
+
+    /** Sets the deferred start phase and the turn number it was created on. */
+    public void setStartPhase(PhaseType phase, int turn) {
+        this.startPhase = phase;
+        this.startPhaseTurn = turn;
     }
 
     public List<Decision> getDecisions() {

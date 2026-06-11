@@ -12,6 +12,7 @@ import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.TargetChoices;
+import forge.util.MyRandom;
 import forge.util.collect.FCollectionView;
 
 import java.util.*;
@@ -38,46 +39,64 @@ public class GameSimulator {
         eval.setComboStateBonusFromProfile(aiPlayer);
 
         origLines = new ArrayList<>();
-        debugLines = origLines;
+        debugLinesTL.set(origLines);
 
-        debugPrint = false;
-        origScore = eval.getScoreForGameState(origGame, origAiPlayer);
+        debugPrintTL.set(false);
+        // The eval embeds an upcoming-combat simulation whose block/attack choices
+        // draw from MyRandom. The copy-sanity check compares two separate evals,
+        // so both must see an identical RNG stream or they diverge spuriously
+        // (observed: opponent life off by one between orig and copy eval).
+        // Restore the caller's Random afterwards: direct constructions (e.g.
+        // LLMSpellSelection.computeEvalDeltas) must not leak the fixed seed
+        // into the rest of the game on this thread.
+        Random callerRandom = MyRandom.getRandom();
+        try {
+            MyRandom.setRandom(new Random(EVAL_SANITY_SEED));
+            origScore = eval.getScoreForGameState(origGame, origAiPlayer);
 
-        if (advanceToPhase == null) {
-            ensureGameCopyScoreMatches(origGame, origAiPlayer);
+            if (advanceToPhase == null) {
+                ensureGameCopyScoreMatches(origGame, origAiPlayer);
+            }
+
+            // If the stack on the original game is not empty, resolve it
+            // first and get the updated eval score, since this is what we'll
+            // want to compare to the eval score after simulating.
+            if (COPY_STACK && !origGame.getStackZone().isEmpty()) {
+                origLines = new ArrayList<>();
+                debugLinesTL.set(origLines);
+                Game copyOrigGame = copier.makeCopy();
+                Player copyOrigAiPlayer = copyOrigGame.getPlayers().get(1);
+                resolveStack(copyOrigGame, copyOrigGame.getPlayers().get(0));
+                origScore = eval.getScoreForGameState(copyOrigGame, copyOrigAiPlayer);
+            }
+        } finally {
+            MyRandom.setRandom(callerRandom);
         }
 
-        // If the stack on the original game is not empty, resolve it
-        // first and get the updated eval score, since this is what we'll
-        // want to compare to the eval score after simulating.
-        if (COPY_STACK && !origGame.getStackZone().isEmpty()) {
-            origLines = new ArrayList<>();
-            debugLines = origLines;
-            Game copyOrigGame = copier.makeCopy();
-            Player copyOrigAiPlayer = copyOrigGame.getPlayers().get(1);
-            resolveStack(copyOrigGame, copyOrigGame.getPlayers().get(0));
-            origScore = eval.getScoreForGameState(copyOrigGame, copyOrigAiPlayer);
-        }
-
-        debugPrint = false;
-        debugLines = null;
+        debugPrintTL.set(false);
+        debugLinesTL.set(null);
     }
 
     private void ensureGameCopyScoreMatches(Game origGame, Player origAiPlayer) {
         eval.setDebugging(true);
         List<String> simLines = new ArrayList<>();
-        debugLines = simLines;
+        debugLinesTL.set(simLines);
+        MyRandom.setRandom(new Random(EVAL_SANITY_SEED));
         Score simScore = eval.getScoreForGameState(simGame, aiPlayer);
         if (!simScore.equals(origScore)) {
             // Re-eval orig with debug printing.
             origLines = new ArrayList<>();
-            debugLines = origLines;
+            debugLinesTL.set(origLines);
+            MyRandom.setRandom(new Random(EVAL_SANITY_SEED));
             eval.getScoreForGameState(origGame, origAiPlayer);
             // Print debug info.
             printDiff(origLines, simLines);
             // make sure it gets printed
             System.out.flush();
-            throw new RuntimeException("Game copy error. See diff output above for details.");
+            // Carry the diff in the exception too: in parallel sim runs stdout is
+            // nulled, so the message is the only place the diff survives.
+            throw new RuntimeException("Game copy error (orig=" + origScore.value + " copy=" + simScore.value
+                    + "). Diff: " + diffSummary(origLines, simLines));
         }
         eval.setDebugging(false);
     }
@@ -85,6 +104,25 @@ public class GameSimulator {
     public void setInterceptor(SpellAbilityChoicesIterator interceptor) {
         this.interceptor = interceptor;
         ((PlayerControllerAi) aiPlayer.getController()).getAi().getSimulationPicker().setInterceptor(interceptor);
+    }
+
+
+    /** Bounded one-line diff (orig-only lines as -x, copy-only as +x) for exception messages. */
+    private static String diffSummary(List<String> lines1, List<String> lines2) {
+        List<String> a = new ArrayList<>(lines1);
+        List<String> b = new ArrayList<>(lines2);
+        Collections.sort(a);
+        Collections.sort(b);
+        StringBuilder sb = new StringBuilder();
+        int i = 0, j = 0, shown = 0;
+        while ((i < a.size() || j < b.size()) && shown < 12) {
+            int cmp = i >= a.size() ? 1 : j >= b.size() ? -1 : a.get(i).compareTo(b.get(j));
+            if (cmp == 0) { i++; j++; continue; }
+            if (cmp < 0) { sb.append(" -").append(a.get(i++)); }
+            else { sb.append(" +").append(b.get(j++)); }
+            shown++;
+        }
+        return sb.length() == 0 ? "(no line diff; score-only divergence)" : sb.toString();
     }
 
     private void printDiff(List<String> lines1, List<String> lines2) {
@@ -114,16 +152,22 @@ public class GameSimulator {
         }
     }
 
-    public static boolean debugPrint;
-    public static List<String> debugLines;
+    // ThreadLocal: parallel games each run a GameSimulator on their own thread;
+    // shared static debug state raced (concurrent ArrayList.add -> AIOOBE).
+    private static final ThreadLocal<Boolean> debugPrintTL = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<List<String>> debugLinesTL = new ThreadLocal<>();
     public static void debugPrint(String str) {
-        if (debugPrint) {
+        if (debugPrintTL.get()) {
             System.out.println(str);
         }
-        if (debugLines != null) {
-            debugLines.add(str);
+        List<String> lines = debugLinesTL.get();
+        if (lines != null) {
+            lines.add(str);
         }
     }
+
+    // Fixed seed for the paired sanity-check evals; the value is arbitrary.
+    private static final long EVAL_SANITY_SEED = 0x5EEDC0DEL;
 
     private SpellAbility findSaInSimGame(final SpellAbility sa) {
         // is already an ability from sim game
@@ -203,7 +247,7 @@ public class GameSimulator {
                 saOrSubSa = saOrSubSa.getSubAbility();
             } while (saOrSubSa != null);
 
-            if (debugPrint && !sa.getAllTargetChoices().isEmpty()) {
+            if (debugPrintTL.get() && !sa.getAllTargetChoices().isEmpty()) {
                 debugPrint("Targets: ");
                 for (TargetChoices target : sa.getAllTargetChoices()) {
                     System.out.print(target);
@@ -234,16 +278,16 @@ public class GameSimulator {
         // we should simulate how combat will resolve and evaluate that
         // state instead!
         List<String> simLines = null;
-        if (debugPrint) {
+        if (debugPrintTL.get()) {
             debugPrint("SimGame:");
             simLines = new ArrayList<>();
-            debugLines = simLines;
-            debugPrint = false;
+            debugLinesTL.set(simLines);
+            debugPrintTL.set(false);
         }
         Score score = eval.getScoreForGameState(simGame, aiPlayer);
         if (simLines != null) {
-            debugLines = null;
-            debugPrint = true;
+            debugLinesTL.set(null);
+            debugPrintTL.set(true);
             printDiff(origLines, simLines);
         }
         controller.possiblyCacheResult(score, origSa);

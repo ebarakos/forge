@@ -163,7 +163,10 @@ public enum AiProps { /** */
     // Enable alpha-beta style pruning (soft beta cutoff at depth >= 2 + futility pruning)
     ALPHA_BETA_PRUNING ("false"),
     // Futility margin: skip recursion if base score is this far below current best
-    FUTILITY_MARGIN ("300");
+    FUTILITY_MARGIN ("300"), /** */
+    SIM_EVAL_LIFE_PRESSURE_WEIGHT ("20"), /** */
+    // Tolerance for plan-continuation: abandon plan only when live score is worse than planned by more than this
+    SIM_PLAN_SCORE_TOLERANCE ("80");
 
 
     private final String strDefaultVal;

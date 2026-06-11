@@ -105,13 +105,13 @@ public class SimCommand implements Callable<Integer> {
 
     @Option(
         names = {"-s", "--snapshot"},
-        description = "Enable snapshot restore for faster AI simulation (enabled by default in sim mode)."
+        description = "EXPERIMENTAL: snapshot-restore game copying (faster, but copies can desync static abilities; off by default)."
     )
     private boolean useSnapshot;
 
     @Option(
         names = {"--no-snapshot"},
-        description = "Disable snapshot restore (overrides default)."
+        description = "Disable snapshot restore (default; kept for backward compatibility)."
     )
     private boolean noSnapshot;
 
@@ -176,7 +176,7 @@ public class SimCommand implements Callable<Integer> {
 
     @Option(
         names = {"-P", "--profile"},
-        description = "AI profile assignment as N:PROFILE (e.g. 1:Simulation 2:Default). LLM profiles: ollama:MODEL, openrouter:MODEL, or cerebras:MODEL. Can be repeated.",
+        description = "AI profile assignment as N:PROFILE (e.g. 1:Ascended 2:Default). Prefix sim: enables the simulation engine for that seat (e.g. 1:sim:Simulation, or bare 1:sim). LLM profiles: ollama:MODEL, openrouter:MODEL, or cerebras:MODEL. Can be repeated.",
         paramLabel = "N:PROFILE"
     )
     private List<String> profileAssignments = new ArrayList<>();
@@ -256,11 +256,14 @@ public class SimCommand implements Callable<Integer> {
     }
 
     public boolean isUseSnapshot() {
-        // Snapshot is enabled by default in sim mode; --no-snapshot disables it
+        // Snapshot copying is opt-in: GameSnapshot copies are not yet faithful
+        // (static abilities can desync, which trips the sim engine's
+        // copy-sanity check and aborts the game). Fix fidelity before
+        // re-enabling by default.
         if (noSnapshot) {
             return false;
         }
-        return true; // default on, -s flag is now a no-op (kept for backward compat)
+        return useSnapshot;
     }
 
     public boolean isQuiet() {
@@ -323,19 +326,20 @@ public class SimCommand implements Callable<Integer> {
         if (legacy != null) return legacy;
 
         // Final fallback for seats 1-2: derive a default LLM profile from the
-        // shared relay convention (RELAY_PROVIDER, RELAY_MODEL, RELAY_CUSTOM_URL
-        // for the custom upstream). Lets a downstream caller — or any shell
-        // that has sourced this project's .env — opt every match into a relay-
-        // routed LLM player without passing -P flags. Extras stay heuristic.
+        // env (RELAY_PROVIDER, RELAY_MODEL). Emits the new canonical form
+        // <provider>:<model>; the LLM_VIA_RELAY env flag (parsed in
+        // LLMConfig.fromProfileString) decides whether the call routes through
+        // the local relay gateway or directly to the provider. Extras stay
+        // heuristic.
         if (playerIndex < 2) {
             String relayProvider = forge.ai.llm.LLMConfig.loadProviderApiKey("RELAY_PROVIDER");
             if (relayProvider != null && !relayProvider.trim().isEmpty()) {
+                String upstream = relayProvider.trim().toLowerCase();
+                // Legacy "custom" upstream is now exposed as the openai-compat provider.
+                if ("custom".equals(upstream)) upstream = "openai-compat";
                 String relayModel = forge.ai.llm.LLMConfig.loadProviderApiKey("RELAY_MODEL");
-                StringBuilder sb = new StringBuilder("relay-").append(relayProvider.trim()).append(':');
-                if (relayModel != null && !relayModel.trim().isEmpty()) {
-                    sb.append(relayModel.trim());
-                }
-                return sb.toString();
+                String model = (relayModel == null) ? "" : relayModel.trim();
+                return forge.ai.llm.LLMConfig.canonicalProfileString(upstream, model);
             }
         }
         return null;

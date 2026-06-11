@@ -114,3 +114,9 @@ LLM-TODOS.md
 # Codex - local agent state
 .codex
 .codex/
+
+# Generated sweep profiles (benchmarks/sweep.sh)
+forge-gui/res/ai/Sweep_*.ai
+
+# Local utility scripts (not part of the fork)
+scripts/

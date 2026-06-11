@@ -59,7 +59,20 @@ final class LLMCombat {
         // we just skip the annotation; the LLM runs unannotated as before.
         Set<Integer> heuristicAttackIdx = computeHeuristicAttackPrior(attacker, canAttack);
 
-        // Single batched LLM call for all attack decisions.
+        // FORGE_LLM_COMBAT=heuristic (default): trust the prior outright —
+        // skip the prompt build + LLM call entirely. Null prior (heuristic
+        // threw) falls back the same way an LLM failure would.
+        if ("heuristic".equals(LLMFullController.COMBAT_MODE)) {
+            ctrl.lastAttackPlan = "";
+            if (heuristicAttackIdx == null) {
+                ctrl.defaultDeclareAttackers(attacker, combat);
+                return;
+            }
+            applyAttackIndices(combat, attacker, defaultDefender, canAttack, heuristicAttackIdx);
+            return;
+        }
+
+        // "llm" / "shadow": single batched LLM call for all attack decisions.
         String gameState = ctrl.buildGameStateWithHistory();
         List<Card> defBlockers = new ArrayList<>();
         int defLife = 0;
@@ -75,13 +88,21 @@ final class LLMCombat {
         }
         String options = OptionSerializer.serializeBatchAttackOptions(
                 canAttack, defLife, defBlockers, heuristicAttackIdx);
-        String prompt = PromptTemplates.batchAttack(gameState, options);
+        // D2: doctrine + action history go into the cached stable prefix;
+        // game state + options stay in the volatile tail.
+        PromptTemplates.PromptParts prompt = PromptTemplates.batchAttack(
+                ctrl.getActionHistoryText(), gameState, options);
         String response = ctrl.callLLMRaw(prompt, "declareAttackers", LLMResponseSchema.INDICES);
 
         if (response == null) {
             ctrl.lastAttackPlan = "";
-            // LLM failure — fall back to heuristic attack logic
-            ctrl.defaultDeclareAttackers(attacker, combat);
+            if ("shadow".equals(LLMFullController.COMBAT_MODE) && heuristicAttackIdx != null) {
+                // Shadow applies the heuristic anyway; the LLM consult just failed.
+                applyAttackIndices(combat, attacker, defaultDefender, canAttack, heuristicAttackIdx);
+            } else {
+                // LLM failure — fall back to heuristic attack logic
+                ctrl.defaultDeclareAttackers(attacker, combat);
+            }
             return;
         }
 
@@ -90,6 +111,24 @@ final class LLMCombat {
 
         Set<Integer> attackIndices = ResponseParser.parseBatchIndices(response, canAttack.size());
         logCombatShadow("declareAttackers", canAttack, heuristicAttackIdx, attackIndices);
+
+        // Shadow: LLM consulted (divergence logged above) but not trusted —
+        // the heuristic prior is what actually gets applied.
+        Set<Integer> applied = "shadow".equals(LLMFullController.COMBAT_MODE)
+                && heuristicAttackIdx != null ? heuristicAttackIdx : attackIndices;
+        applyAttackIndices(combat, attacker, defaultDefender, canAttack, applied);
+    }
+
+    /**
+     * Apply a set of attack indices (positions in {@code canAttack}) to the
+     * live {@link Combat}: add each attacker against {@code defaultDefender},
+     * fall back to the heuristic if the engine rejects the configuration, and
+     * record the action-history entry. Shared by all FORGE_LLM_COMBAT modes —
+     * the indices may come from the LLM response or the heuristic prior (the
+     * two have identical shape by construction).
+     */
+    private void applyAttackIndices(Combat combat, Player attacker, GameEntity defaultDefender,
+                                     List<Card> canAttack, Set<Integer> attackIndices) {
         for (int idx : attackIndices) {
             combat.addAttacker(canAttack.get(idx), defaultDefender);
         }
@@ -160,20 +199,40 @@ final class LLMCombat {
         Map<Integer, Set<Integer>> heuristicAssignment =
                 computeHeuristicBlockPrior(defender, combat, attackerList, blockerList);
 
-        // Single batched LLM call for all block assignments
+        // FORGE_LLM_COMBAT=heuristic (default): trust the prior outright —
+        // skip the prompt build + LLM call entirely.
+        if ("heuristic".equals(LLMFullController.COMBAT_MODE)) {
+            ctrl.lastAttackPlan = "";
+            if (heuristicAssignment == null) {
+                ctrl.defaultDeclareBlockers(defender, combat);
+                return;
+            }
+            applyBlockAssignments(combat, attackerList, blockerList, heuristicAssignment);
+            return;
+        }
+
+        // "llm" / "shadow": single batched LLM call for all block assignments
         String gameState = ctrl.buildGameStateWithHistory();
         // B2: prepend the attack-phase plan note if we have one (continuity context).
+        // The note is volatile, so it travels with the game state in the uncached tail.
         if (!ctrl.lastAttackPlan.isEmpty()) {
             gameState = gameState + "\nYOUR PRIOR ATTACK-PLAN NOTE: " + ctrl.lastAttackPlan + "\n";
         }
         String options = OptionSerializer.serializeBatchBlockOptions(
                 attackerList, blockerList, ctrl.getPlayer().getLife(), heuristicAssignment);
-        String prompt = PromptTemplates.batchBlock(gameState, options);
+        // D2: action history goes into the cached stable prefix; state + options volatile.
+        PromptTemplates.PromptParts prompt = PromptTemplates.batchBlock(
+                ctrl.getActionHistoryText(), gameState, options);
         String response = ctrl.callLLMRaw(prompt, "declareBlockers", LLMResponseSchema.BLOCKS);
         ctrl.lastAttackPlan = ""; // consume once
 
         if (response == null) {
-            ctrl.defaultDeclareBlockers(defender, combat);
+            if ("shadow".equals(LLMFullController.COMBAT_MODE) && heuristicAssignment != null) {
+                // Shadow applies the heuristic anyway; the LLM consult just failed.
+                applyBlockAssignments(combat, attackerList, blockerList, heuristicAssignment);
+            } else {
+                ctrl.defaultDeclareBlockers(defender, combat);
+            }
             return;
         }
 
@@ -181,6 +240,23 @@ final class LLMCombat {
                 response, attackerList.size(), blockerList.size());
         logBlockShadow(attackerList, blockerList, heuristicAssignment, assignments);
 
+        // Shadow: LLM consulted (divergence logged above) but not trusted —
+        // the heuristic prior is what actually gets applied.
+        Map<Integer, Set<Integer>> applied = "shadow".equals(LLMFullController.COMBAT_MODE)
+                && heuristicAssignment != null ? heuristicAssignment : assignments;
+        applyBlockAssignments(combat, attackerList, blockerList, applied);
+    }
+
+    /**
+     * Apply a block-assignment map (attacker index → blocker indices, positions
+     * in {@code attackerList} / {@code blockerList}) to the live {@link Combat},
+     * re-checking legality per pair, and record the action-history entry.
+     * Shared by all FORGE_LLM_COMBAT modes — the map may come from the LLM
+     * response or the heuristic prior (identical shape by construction).
+     */
+    private void applyBlockAssignments(Combat combat, List<Card> attackerList,
+                                        List<Card> blockerList,
+                                        Map<Integer, Set<Integer>> assignments) {
         for (Map.Entry<Integer, Set<Integer>> entry : assignments.entrySet()) {
             int attIdx = entry.getKey();
             if (attIdx < 0 || attIdx >= attackerList.size()) continue;
@@ -283,15 +359,23 @@ final class LLMCombat {
         }
     }
 
+    /** True when combat shadow telemetry should fire: either the global
+     *  {@code FORGE_LLM_SHADOW=1} flag or {@code FORGE_LLM_COMBAT=shadow}. */
+    private static boolean shadowLoggingActive() {
+        return LLMFullController.SHADOW_MODE
+                || "shadow".equals(LLMFullController.COMBAT_MODE);
+    }
+
     /**
      * Shadow-mode telemetry for combat: emit one line summarising the heuristic
      * baseline vs the LLM's actual pick and whether they agree on the *set* of
-     * attacking creatures. No-op unless {@code FORGE_LLM_SHADOW=1}. Skips when
-     * the heuristic baseline could not be computed.
+     * attacking creatures. No-op unless {@code FORGE_LLM_SHADOW=1} or
+     * {@code FORGE_LLM_COMBAT=shadow}. Skips when the heuristic baseline could
+     * not be computed.
      */
     private void logCombatShadow(String label, List<Card> canAttack,
                                   Set<Integer> heuristicIdx, Set<Integer> llmIdx) {
-        if (!LLMFullController.SHADOW_MODE || heuristicIdx == null) return;
+        if (!shadowLoggingActive() || heuristicIdx == null) return;
         boolean agree = heuristicIdx.equals(llmIdx);
         StringBuilder sb = new StringBuilder("[LLM SHADOW] ").append(label);
         sb.append(" heuristic=[").append(joinNames(canAttack, heuristicIdx)).append(']');
@@ -304,12 +388,13 @@ final class LLMCombat {
      * Shadow-mode telemetry for declareBlockers: compares the heuristic baseline
      * assignment to what the LLM ended up choosing. Considers them in agreement
      * when, for every attacker, the *set* of blockers is identical (gang-block
-     * order doesn't matter). Skips when no baseline could be computed.
+     * order doesn't matter). No-op unless {@code FORGE_LLM_SHADOW=1} or
+     * {@code FORGE_LLM_COMBAT=shadow}. Skips when no baseline could be computed.
      */
     private void logBlockShadow(List<Card> attackerList, List<Card> blockerList,
                                  Map<Integer, Set<Integer>> heuristicAssignment,
                                  Map<Integer, Set<Integer>> llmAssignment) {
-        if (!LLMFullController.SHADOW_MODE || heuristicAssignment == null) return;
+        if (!shadowLoggingActive() || heuristicAssignment == null) return;
         boolean agree = true;
         Set<Integer> keys = new HashSet<>();
         keys.addAll(heuristicAssignment.keySet());

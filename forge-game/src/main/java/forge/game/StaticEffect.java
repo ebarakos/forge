@@ -59,11 +59,35 @@ public class StaticEffect {
         this.ability = ability;
     }
 
+    /**
+     * Maps this effect onto another game's objects. Lenient maps may return
+     * null for objects that no longer exist in the target game (LKI, tokens
+     * that ceased to exist) — such cards are skipped; if the source itself is
+     * unmappable the copy is abandoned and null is returned.
+     */
     private StaticEffect makeMappedCopy(IEntityMap map) {
-        StaticEffect copy = new StaticEffect(map.map(this.source));
+        Card mappedSource = map.map(this.source);
+        if (mappedSource == null) {
+            return null;
+        }
+        StaticEffect copy = new StaticEffect(mappedSource);
         copy.ability = this.ability;
-        copy.affectedCards = map.mapCollection(this.affectedCards);
-        copy.affectedPlayers  = map.mapList(this.affectedPlayers);
+        CardCollection mappedAffected = new CardCollection();
+        for (final Card c : this.affectedCards) {
+            Card mc = map.map(c);
+            if (mc != null) {
+                mappedAffected.add(mc);
+            }
+        }
+        copy.affectedCards = mappedAffected;
+        List<Player> mappedPlayers = Lists.newArrayList();
+        for (final Player p : this.affectedPlayers) {
+            Player mp = map.map(p);
+            if (mp != null) {
+                mappedPlayers.add(mp);
+            }
+        }
+        copy.affectedPlayers = mappedPlayers;
         copy.timestamp = this.timestamp;
         copy.mapParams = this.mapParams;
         return copy;
@@ -339,7 +363,10 @@ public class StaticEffect {
     }
 
     public void removeMapped(IEntityMap map) {
-        makeMappedCopy(map).remove(Maps.newHashMap());
+        StaticEffect copy = makeMappedCopy(map);
+        if (copy != null) {
+            copy.remove(Maps.newHashMap());
+        }
     }
 
 }

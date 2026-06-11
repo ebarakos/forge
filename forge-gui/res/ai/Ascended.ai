@@ -18,6 +18,10 @@ USE_TRANSPOSITION_TABLE=true
 USE_ITERATIVE_DEEPENING=true
 # Higher bonus score for detecting combo-ready states (increased from 100)
 COMBO_STATE_BONUS=150
+# Enable alpha-beta style pruning for deeper search
+ALPHA_BETA_PRUNING=true
+# Futility margin for pruning
+FUTILITY_MARGIN=300
 
 # ==========================================
 # Strategic Behavior Settings
@@ -154,3 +158,11 @@ DEFAULT_MAX_PLANAR_DIE_ROLLS_PER_TURN=1
 DEFAULT_MIN_TURN_TO_ROLL_PLANAR_DIE=3
 DEFAULT_PLANAR_DIE_ROLL_CHANCE=50
 PLANAR_DIE_ROLL_HESITATION_CHANCE=10
+
+# Weight of progressive life-pressure scoring in the simulation evaluator.
+# Higher = values racing/face damage more as opponent life drops (default 20).
+SIM_EVAL_LIFE_PRESSURE_WEIGHT=45
+
+# Plan-continuation tolerance: abandon a multi-step plan only when the live score
+# drops more than this below the planned score (calibrated 2026-06-11; 40 beat 0/80).
+SIM_PLAN_SCORE_TOLERANCE=40

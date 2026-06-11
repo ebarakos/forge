@@ -58,9 +58,16 @@ public class LLMFullController extends PlayerControllerAi {
 
     /** Sliding window of recent action summaries for LLM context. */
     private final List<String> actionHistory = new ArrayList<>();
-    // 6 entries = roughly 2 turns of action; older history rarely informs the
-    // current decision (board state already reflects it) and just costs tokens.
-    private static final int MAX_HISTORY = 6;
+    // Without prompt caching: 6 entries ≈ 2 turns of action; older history
+    // rarely informs the current decision (board state already reflects it)
+    // and just costs full-price tokens. With prompt caching the history lives
+    // in the byte-stable cached prefix block (cheap cache-read pricing), and
+    // dropping the oldest entry shifts the prefix start — invalidating the
+    // cached block — so use a generous cap that keeps the prefix append-only
+    // for almost the whole game; truncation is only a late-game backstop.
+    private static final int MAX_HISTORY_UNCACHED = 6;
+    private static final int MAX_HISTORY_CACHED = 50;
+    private final int maxHistory;
 
     /** B2: blocking-plan note carried over from the most recent attack LLM call.
      *  Package-private so {@link LLMCombat} can read/clear it. */
@@ -112,6 +119,33 @@ public class LLMFullController extends PlayerControllerAi {
     static final boolean SHADOW_MODE = isTruthy(System.getenv("FORGE_LLM_SHADOW"));
 
     /**
+     * Combat decision source ({@code FORGE_LLM_COMBAT}):
+     * <ul>
+     *   <li>{@code heuristic} (default) — apply the heuristic attack/block
+     *       prior directly and skip the prompt build + LLM call entirely;</li>
+     *   <li>{@code llm} — LLM decides; the prior only annotates the prompt
+     *       (the pre-flag behaviour);</li>
+     *   <li>{@code shadow} — LLM is consulted and divergence logged via the
+     *       combat shadow telemetry, but the heuristic prior is applied.</li>
+     * </ul>
+     * Unset or unrecognised values normalise to {@code heuristic}.
+     */
+    static final String COMBAT_MODE = parseCombatMode(System.getenv("FORGE_LLM_COMBAT"));
+
+    /**
+     * Heuristic-priority override: when the LLM's first plan step is anything
+     * other than the heuristic's top willingToPlay candidate, replace it with
+     * the heuristic's pick. Documented evidence (mirror-vs-heuristic eval,
+     * 4 models × 4 decks): LLM divergences from {@code pruned[0]} are
+     * uniformly net-negative, costing 25-50 percentage points vs the
+     * heuristic's mirror baseline. On by default; flip off via
+     * {@code FORGE_LLM_TRUST_HEURISTIC_TOP=0} for A/B testing.
+     */
+    static final boolean TRUST_HEURISTIC_TOP =
+            !"0".equals(System.getenv("FORGE_LLM_TRUST_HEURISTIC_TOP"))
+            && !"false".equalsIgnoreCase(System.getenv("FORGE_LLM_TRUST_HEURISTIC_TOP"));
+
+    /**
      * Set true around heuristic feasibility checks (canPayCost, validateAndSetTargets)
      * so cost-paying callbacks like {@link #chooseCardsToDelve} can short-circuit
      * with a heuristic pick instead of burning an LLM call. Per-thread because the
@@ -137,9 +171,17 @@ public class LLMFullController extends PlayerControllerAi {
         catch (NumberFormatException e) { return fallback; }
     }
 
+    private static String parseCombatMode(String v) {
+        if (v == null) return "heuristic";
+        String s = v.trim().toLowerCase();
+        return ("llm".equals(s) || "shadow".equals(s) || "heuristic".equals(s)) ? s : "heuristic";
+    }
+
     public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
         super(game, p, lp);
         this.client = client;
+        this.maxHistory = client != null && client.isPromptCachingEnabled()
+                ? MAX_HISTORY_CACHED : MAX_HISTORY_UNCACHED;
         this.spellSelection = new LLMSpellSelection(this);
         this.combat = new LLMCombat(this);
     }
@@ -147,13 +189,21 @@ public class LLMFullController extends PlayerControllerAi {
     /** Record an action summary for the sliding window history. */
     void recordAction(String summary) {
         actionHistory.add(summary);
-        if (actionHistory.size() > MAX_HISTORY) {
+        if (actionHistory.size() > maxHistory) {
             actionHistory.remove(0);
         }
     }
 
-    /** Format the action history section for inclusion in prompts. */
-    private String getActionHistoryText() {
+    /**
+     * Format the action history section for inclusion in prompts.
+     * D2: this text is append-only and byte-stable — no timestamps, no
+     * re-numbering of earlier entries — so it can sit inside the cached
+     * prompt prefix. Entries are only dropped (whole oldest entry first)
+     * when the generous {@link #maxHistory} cap is exceeded.
+     * Package-private so {@link LLMCombat} can compose it into the stable
+     * prefix of its combat prompts.
+     */
+    String getActionHistoryText() {
         if (actionHistory.isEmpty()) return "";
         StringBuilder sb = new StringBuilder("\nRECENT ACTIONS:\n");
         for (String action : actionHistory) {
@@ -163,11 +213,18 @@ public class LLMFullController extends PlayerControllerAi {
     }
 
     /**
-     * Build the game state text with action history appended.
+     * Build the game state text for the current decision.
      * D1: Caches the serialized game state per (turn, phase). Multiple priority
-     * calls in the same phase reuse the same state string, which both skips
-     * re-serialization CPU and gives the provider prompt cache a byte-stable
-     * prefix across consecutive calls. Action history is appended volatile.
+     * calls in the same phase reuse the same state string, which skips
+     * re-serialization CPU.
+     * D2: Despite the historical name, action history is NO longer concatenated
+     * here. The state is volatile (the model must always see it fresh), so it
+     * lives in the uncached tail of the request; the append-only history now
+     * travels in the byte-stable cached prefix block that {@link #callLLM} /
+     * {@link #callLLMRaw} attach to every request (see
+     * {@link PromptTemplates.PromptParts}). The method name is kept so the
+     * delegate call sites ({@link LLMSpellSelection}, {@link LLMCombat}) stay
+     * unchanged.
      */
     String buildGameStateWithHistory() {
         int currentTurn = getGame().getPhaseHandler().getTurn();
@@ -178,7 +235,7 @@ public class LLMFullController extends PlayerControllerAi {
             cachedStateTurn = currentTurn;
             cachedStatePhase = currentPhase;
         }
-        return cachedGameState + getActionHistoryText();
+        return cachedGameState;
     }
 
     // =======================================================================
@@ -248,11 +305,19 @@ public class LLMFullController extends PlayerControllerAi {
     /**
      * Call the LLM with game state, options, and context.
      * Returns the chosen option index, or -1 on failure (caller falls back to heuristic).
+     * D2: the single-string prompt is sent as the volatile tail; the action
+     * history rides separately in the byte-stable cached prefix block.
      */
     int callLLM(String userPrompt, int numOptions, String callLabel) {
+        return callLLM(new PromptTemplates.PromptParts(getActionHistoryText(), userPrompt),
+                numOptions, callLabel);
+    }
+
+    /** Split-prompt variant — stable prefix cached, volatile tail fresh. */
+    int callLLM(PromptTemplates.PromptParts parts, int numOptions, String callLabel) {
         try {
             String response = client.chatCompletion(
-                    PromptTemplates.SYSTEM_PROMPT, userPrompt,
+                    PromptTemplates.SYSTEM_PROMPT, parts.stablePrefix, parts.volatileTail,
                     callLabel, getPlayer().getName(),
                     LLMResponseSchema.CHOICE);
             int choice = ResponseParser.parseChoiceIndex(response, numOptions);
@@ -282,11 +347,21 @@ public class LLMFullController extends PlayerControllerAi {
         return callLLMRaw(userPrompt, callLabel, LLMResponseSchema.INDICES);
     }
 
-    /** Schema-aware variant for batch calls. */
+    /**
+     * Schema-aware variant for batch calls.
+     * D2: like {@link #callLLM(String, int, String)}, wraps the single-string
+     * prompt so the action history goes into the cached prefix block.
+     */
     String callLLMRaw(String userPrompt, String callLabel, LLMResponseSchema schema) {
+        return callLLMRaw(new PromptTemplates.PromptParts(getActionHistoryText(), userPrompt),
+                callLabel, schema);
+    }
+
+    /** Split-prompt variant — stable prefix cached, volatile tail fresh. */
+    String callLLMRaw(PromptTemplates.PromptParts parts, String callLabel, LLMResponseSchema schema) {
         try {
             return client.chatCompletion(
-                    PromptTemplates.SYSTEM_PROMPT, userPrompt,
+                    PromptTemplates.SYSTEM_PROMPT, parts.stablePrefix, parts.volatileTail,
                     callLabel, getPlayer().getName(), schema);
         } catch (Exception e) {
             if (client.isDebug()) {

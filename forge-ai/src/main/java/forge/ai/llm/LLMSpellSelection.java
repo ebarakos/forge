@@ -161,6 +161,54 @@ final class LLMSpellSelection {
                 ctrl.planTurn = ctrl.getGame().getPhaseHandler().getTurn();
                 ctrl.planStackSize = ctrl.getGame().getStack().size();
 
+                // Heuristic-priority override (aggressive): when the LLM's
+                // first plan step is anything other than pruned[0] AND
+                // pruned[0] is willingToPlay, replace with pruned[0].
+                //
+                // Why aggressive: mirror-eval transcripts show the LLM's
+                // dominant failure mode is reordering WITHIN the WillPlay
+                // bucket (e.g. picking Lunarch Veteran when heuristic prefers
+                // Novice Inspector — both willingToPlay) and these reorderings
+                // cost ~25-50 percentage points vs the heuristic mirror
+                // baseline. A narrower verdict-class check (only catch
+                // wait/weak picks) misses every such case. Restricting the
+                // LLM to pruned[0] when a clear "play this" exists eliminates
+                // the cost; the LLM keeps influence when the heuristic itself
+                // is uncertain (no willingToPlay → LLM gets full agency)
+                // and when it returns plan:[] (existing empty-plan path).
+                //
+                // Toggle off via FORGE_LLM_TRUST_HEURISTIC_TOP=0 to restore
+                // pre-fix behaviour.
+                if (!planIndices.isEmpty() && !pruned.isEmpty()
+                        && LLMFullController.TRUST_HEURISTIC_TOP) {
+                    int firstIdx = planIndices.get(0);
+                    if (firstIdx > 0 && firstIdx < pruned.size()) {
+                        SpellAbility heurTop = pruned.get(0);
+                        AiPlayDecision heurVerdict;
+                        try {
+                            heurVerdict = ctrl.getAi().canPlaySa(heurTop);
+                        } catch (Exception e) {
+                            heurVerdict = null;
+                        }
+                        if (heurVerdict != null && heurVerdict.willingToPlay()) {
+                            SpellAbility llmFirst = pruned.get(firstIdx);
+                            if (ctrl.client.isDebug()) {
+                                System.err.println("[LLM] LLM picked "
+                                        + llmFirst.getHostCard().getName()
+                                        + " over heuristic top "
+                                        + heurTop.getHostCard().getName()
+                                        + " (WillPlay) → overriding with heuristic pick");
+                            }
+                            ctrl.mainPhasePlan.clear();
+                            ctrl.mainPhasePlan.addLast(heurTop.getHostCard().getName());
+                            recordSpellAction(heurTop, phase);
+                            List<SpellAbility> result = new ArrayList<>();
+                            result.add(heurTop);
+                            return result;
+                        }
+                    }
+                }
+
                 SpellAbility firstStep = popValidPlanStep(pruned, phase);
                 if (firstStep != null) {
                     recordSpellAction(firstStep, phase);

@@ -373,10 +373,13 @@ public final class GameStateSerializer {
             sb.append(" [Loyalty: ").append(c.getCurrentLoyalty()).append(']');
         }
 
-        // Key keywords
+        // Key keywords. Some keywords are systematically misread by LLMs in
+        // mirror-eval transcripts (notably "Defender" — multiple models
+        // reasoned "no untapped blockers" while a {Defender} creature sat on
+        // opponent's battlefield). Annotate the most-misread ones inline.
         List<String> keywords = getRelevantKeywords(c);
         if (!keywords.isEmpty()) {
-            sb.append(" {").append(String.join(", ", keywords)).append('}');
+            sb.append(" {").append(joinAndAnnotateKeywords(keywords)).append('}');
         }
 
         if (c.isTapped()) sb.append(" (tapped)");
@@ -445,6 +448,32 @@ public final class GameStateSerializer {
             sb.append(" - \"").append(oracle).append('"');
         }
 
+        return sb.toString();
+    }
+
+    /**
+     * Stringify a list of keywords, attaching a one-clause clarifier to
+     * the keywords most-commonly misread by LLMs in transcript audits.
+     * Keep the additions tight — these are emitted on every creature on
+     * the battlefield, so verbose annotations would balloon the prompt.
+     */
+    private static String joinAndAnnotateKeywords(List<String> keywords) {
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        for (String kw : keywords) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append(kw);
+            // Defender is the worst offender — observed multiple LLMs
+            // reasoning "opponent has no blockers" while a {Defender} 0/3
+            // sat untapped opposite an attacker. The keyword sounds like
+            // "can't block" to a model that's pattern-matching on the
+            // word "Defender = can't get past", but rules-wise it's the
+            // opposite: cannot ATTACK, blocks normally.
+            if ("Defender".equals(kw)) {
+                sb.append("=cannot-attack-but-blocks");
+            }
+        }
         return sb.toString();
     }
 

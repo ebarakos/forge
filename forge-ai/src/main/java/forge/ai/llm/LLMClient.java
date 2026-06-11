@@ -77,6 +77,24 @@ public class LLMClient {
     public String chatCompletion(String systemPrompt, String userPrompt,
                                   String callLabel, String playerName,
                                   LLMResponseSchema schema) throws LLMException {
+        return chatCompletion(systemPrompt, null, userPrompt, callLabel, playerName, schema);
+    }
+
+    /**
+     * D2: Send a chat completion request with the user prompt split into a
+     * byte-stable prefix and a volatile tail. When prompt caching is enabled
+     * (and not session-disabled) and {@code stablePrefix} is non-empty, the
+     * user message is sent as a content-block array: block 1 carries the
+     * stable prefix (per-decision doctrine + append-only action history) with
+     * {@code cache_control: ephemeral}; block 2 carries the volatile tail
+     * (current game state + options) uncached. Otherwise the two parts are
+     * concatenated into the legacy plain-string user message. A provider
+     * 400/422 flips the same session-level guard as the system-message block
+     * format, so subsequent calls fall back to plain strings.
+     */
+    public String chatCompletion(String systemPrompt, String stablePrefix, String volatileTail,
+                                  String callLabel, String playerName,
+                                  LLMResponseSchema schema) throws LLMException {
         int callNum = totalCalls.incrementAndGet();
 
         // Build request JSON
@@ -108,10 +126,15 @@ public class LLMClient {
             }
         }
 
+        boolean cachingActive = config.isPromptCachingEnabled() && !cachingDisabledForSession;
+        // Single-string view of the user prompt (non-caching path + debug output).
+        String fullUserPrompt = (stablePrefix == null || stablePrefix.isEmpty())
+                ? volatileTail : stablePrefix + volatileTail;
+
         JsonArray messages = new JsonArray();
         JsonObject sysMsg = new JsonObject();
         sysMsg.addProperty("role", "system");
-        if (config.isPromptCachingEnabled() && !cachingDisabledForSession) {
+        if (cachingActive) {
             // D2: Anthropic-style content-block format with cache_control:ephemeral
             // on the (stable) system prompt so the provider caches it for subsequent calls.
             JsonArray contentArr = new JsonArray();
@@ -130,7 +153,27 @@ public class LLMClient {
 
         JsonObject userMsg = new JsonObject();
         userMsg.addProperty("role", "user");
-        userMsg.addProperty("content", userPrompt);
+        if (cachingActive && stablePrefix != null && !stablePrefix.isEmpty()) {
+            // D2: split user message — block 1 = byte-stable prefix (doctrine +
+            // append-only action history) with cache_control:ephemeral; block 2 =
+            // volatile tail (current game state + options), uncached. Goes through
+            // the same 400/422 session fallback as the system block format above.
+            JsonArray userContent = new JsonArray();
+            JsonObject stableBlock = new JsonObject();
+            stableBlock.addProperty("type", "text");
+            stableBlock.addProperty("text", stablePrefix);
+            JsonObject userCacheControl = new JsonObject();
+            userCacheControl.addProperty("type", "ephemeral");
+            stableBlock.add("cache_control", userCacheControl);
+            userContent.add(stableBlock);
+            JsonObject volatileBlock = new JsonObject();
+            volatileBlock.addProperty("type", "text");
+            volatileBlock.addProperty("text", volatileTail);
+            userContent.add(volatileBlock);
+            userMsg.add("content", userContent);
+        } else {
+            userMsg.addProperty("content", fullUserPrompt);
+        }
         messages.add(userMsg);
 
         body.add("messages", messages);
@@ -164,6 +207,17 @@ public class LLMClient {
         // proxy to a self-hosted OpenAI-compatible endpoint, e.g. LM Studio).
         if (config.getCustomUrl() != null && !config.getCustomUrl().isEmpty()) {
             reqBuilder.header("X-Custom-Url", config.getCustomUrl());
+        }
+        // Tier override for relay-managed keys — without this, the relay caps
+        // requests at the free-tier model whitelist and 403s on paid models
+        // (e.g. "Model 'openai/gpt-4.1-mini' is not available on the 'free' tier").
+        // Set FORGE_LLM_KEY_TIER=all in env to unlock the relay's full catalog.
+        // Default: unset → relay-side default (free tier).
+        if ("relay".equals(config.getProvider())) {
+            String keyTier = LLMConfig.loadProviderApiKey("FORGE_LLM_KEY_TIER");
+            if (keyTier != null && !keyTier.isEmpty()) {
+                reqBuilder.header("X-User-Key-Tier", keyTier);
+            }
         }
 
         HttpRequest request = reqBuilder.build();
@@ -297,7 +351,7 @@ public class LLMClient {
 
         // Debug output
         if (config.isDebug()) {
-            printDebug(callNum, playerName, callLabel, systemPrompt, userPrompt,
+            printDebug(callNum, playerName, callLabel, systemPrompt, fullUserPrompt,
                     content, latencyMs, inputTokens, outputTokens);
         }
 
@@ -369,6 +423,8 @@ public class LLMClient {
     public int getTotalCacheCreationTokens() { return totalCacheCreationTokens.get(); }
     public long getTotalLatencyMs() { return totalLatencyMs.get(); }
     public boolean isDebug() { return config.isDebug(); }
+    /** Whether prompt caching is configured on (ignores the session-level fallback). */
+    public boolean isPromptCachingEnabled() { return config.isPromptCachingEnabled(); }
 
     /** Record that a fallback to heuristic occurred. */
     public void recordFallback() { totalFallbacks.incrementAndGet(); }

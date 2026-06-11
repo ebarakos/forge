@@ -133,14 +133,19 @@ public class SimulateMatch {
             ORIGINAL_ERR.println("Warning: AI profile directory not found at " + aiDir.getAbsolutePath());
         }
         ORIGINAL_OUT.println();
-        ORIGINAL_OUT.println("Usage: -P 1:Simulation -P 2:Default");
-        ORIGINAL_OUT.println("  or:  -P1 Simulation -P2 Default  (legacy syntax)");
+        ORIGINAL_OUT.println("Usage: -P 1:Ascended -P 2:Default");
+        ORIGINAL_OUT.println("  or:  -P1 Ascended -P2 Default  (legacy syntax)");
+        ORIGINAL_OUT.println("Prefix sim: to enable the simulation engine for a seat:");
+        ORIGINAL_OUT.println("  -P 1:sim:Simulation   simulation engine + Simulation profile dials");
+        ORIGINAL_OUT.println("  -P 1:sim              shorthand for the same");
         ORIGINAL_OUT.println();
-        ORIGINAL_OUT.println("LLM profiles (use provider:model syntax):");
-        ORIGINAL_OUT.println("  -P1 relay-custom:openai/gpt-oss-20b              Custom URL via relay (default for discovery)");
-        ORIGINAL_OUT.println("  -P1 ollama:llama3                                Local Ollama model");
-        ORIGINAL_OUT.println("  -P2 openrouter:inclusionai/ling-2.6-1t:free      OpenRouter free model (relay-curated)");
-        ORIGINAL_OUT.println("  -P2 cerebras:qwen-3-235b-a22b-instruct-2507      Cerebras (free tier, 30 RPM)");
+        ORIGINAL_OUT.println("LLM profiles (canonical form: <provider>:<model>; routing follows LLM_VIA_RELAY):");
+        ORIGINAL_OUT.println("  -P1 cerebras:qwen-3-235b-a22b-instruct-2507      Cerebras (relay or direct per LLM_VIA_RELAY)");
+        ORIGINAL_OUT.println("  -P1 openrouter:inclusionai/ling-2.6-1t:free      OpenRouter free model");
+        ORIGINAL_OUT.println("  -P1 openai-compat:openai/gpt-oss-20b             OpenAI-compatible endpoint (OPENAI_COMPAT_URL)");
+        ORIGINAL_OUT.println("  -P1 ollama:llama3                                Local Ollama model (always direct)");
+        ORIGINAL_OUT.println("  -P2 relay:cerebras:gpt-oss-120b                  Force relay routing (per-seat override)");
+        ORIGINAL_OUT.println("  -P2 direct:cerebras:gpt-oss-120b                 Force direct call (per-seat override)");
         return ExitCode.SUCCESS;
     }
 
@@ -232,6 +237,20 @@ public class SimulateMatch {
                         cmd.getLlmKey(), cmd.getLlmTemperature(), cmd.getLlmTimeout(),
                         cmd.isLlmDebug(), cmd.isLlmFree());
                 if (llmConfig != null) {
+                    // Fail fast on a direct-mode seat with no API key — otherwise every
+                    // call 401s and silently falls back to the heuristic AI, which would
+                    // corrupt any benchmark run without an obvious signal.
+                    String prov = llmConfig.getProvider();
+                    boolean needsKey = !"relay".equals(prov) && !"ollama".equals(prov)
+                            && !"openai-compat".equals(prov);
+                    boolean hasKey = (llmConfig.getApiKey() != null && !llmConfig.getApiKey().isEmpty())
+                            || (llmConfig.getUserApiKey() != null && !llmConfig.getUserApiKey().isEmpty());
+                    if (needsKey && !hasKey) {
+                        ORIGINAL_ERR.println("Error: profile '" + profile + "' calls " + prov
+                                + " directly but no API key is available (set "
+                                + LLMConfig.providerApiKeyEnvVar(prov) + " or use --llm-key).");
+                        return ExitCode.ARGS_ERROR;
+                    }
                     LLMClient client = new LLMClient(llmConfig);
                     llmClients.put(entry.getKey(), client);
                     ORIGINAL_ERR.println("Player " + (entry.getKey() + 1)
@@ -551,6 +570,7 @@ public class SimulateMatch {
                     completed.incrementAndGet();
                     progress.update(completed.get());
                 } catch (Exception e) {
+                    ORIGINAL_ERR.println("Game " + (gameNum + 1) + ": setup/run failed, not counted: " + e);
                     completed.incrementAndGet();
                     progress.update(completed.get());
                 }
@@ -606,9 +626,12 @@ public class SimulateMatch {
                 mc.startGame(g1);
             }, mc.getRules().getSimTimeout(), TimeUnit.SECONDS);
         } catch (TimeoutException e) {
-            // Timeout - treat as draw
+            ORIGINAL_ERR.println("Game " + (iGame + 1) + ": timeout after "
+                    + mc.getRules().getSimTimeout() + "s - recorded as draw");
         } catch (Exception | StackOverflowError e) {
-            // Error - treat as draw
+            // Surface the failure: silent error-draws corrupt benchmark numbers.
+            ORIGINAL_ERR.println("Game " + (iGame + 1) + ": error - recorded as draw: " + e);
+            e.printStackTrace(ORIGINAL_ERR);
         } finally {
             if (!g1.isGameOver()) {
                 g1.setGameOver(GameEndReason.Draw);
@@ -1201,6 +1224,7 @@ public class SimulateMatch {
                     completed.incrementAndGet();
                     progress.update(completed.get());
                 } catch (Exception e) {
+                    ORIGINAL_ERR.println("Game " + (gameNum + 1) + ": setup/run failed, not counted: " + e);
                     completed.incrementAndGet();
                     progress.update(completed.get());
                 }

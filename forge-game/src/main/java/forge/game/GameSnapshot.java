@@ -34,6 +34,11 @@ public class GameSnapshot {
         return origGame;
     }
 
+    /** The game produced by the last {@link #makeCopy()} call, or null before any copy. */
+    public Game getNewGame() {
+        return newGame;
+    }
+
     public Game makeCopy() {
         return makeCopy(null, true);
     }
@@ -81,9 +86,9 @@ public class GameSnapshot {
         for (Player p : fromGame.getPlayers()) {
             Player toPlayer = findBy(toGame, p);
             p.copyCommandersToSnapshot(toPlayer, c -> findBy(toGame, c));
-            ((PlayerZoneBattlefield) toPlayer.getZone(ZoneType.Battlefield)).setTriggers(true);
         }
-        toGame.getTriggerHandler().clearSuppression(TriggerType.ChangesZone);
+        // Note: the ChangesZone suppression / battlefield-trigger window opened above stays open
+        // until after the static-effect recompute below — see the comment at the close site.
 
         for (Card c : toGame.getCardsInGame()) {
             Card origCard = fromGame.findById(c.getId());
@@ -123,9 +128,45 @@ public class GameSnapshot {
         }
 
         // Undo effects first before calculating them below, to avoid them applying twice.
-//        for (StaticEffect effect : fromGame.getStaticEffects().getEffects()) {
-//            effect.removeMapped(gameObjectMap);
-//        }
+        // Modeled on GameCopier.makeCopy().
+        //
+        // Direction of the un-apply: this only runs for makeCopy() (!restore). In that direction
+        // toGame is a brand-new game whose StaticEffects registry is empty, so the
+        // checkStateEffects() call below cannot know about effect stamps (PT boosts, changed
+        // types/keywords, hand-size mods, ...) carried over from fromGame's cards while copying —
+        // those are keyed by fromGame's effect timestamps/ability ids and must be removed through
+        // a map onto toGame's objects. In the restore direction toGame is the live game: its
+        // cards carry stamps from toGame's OWN StaticEffects registry (copyGameState only
+        // overwrites zone/tapped/face-down/state-name on already-existing cards), and
+        // checkStaticAbilities() un-applies registry effects itself via clearStaticEffects()
+        // before re-applying — so un-applying fromGame's (the snapshot's) effects would be
+        // redundant at best. Restore is also invoked mid-rollback from live ability resolution
+        // (Game.restoreGameState callers), where re-entrantly recomputing state effects is risky
+        // and unverified, so restore behavior is intentionally left unchanged.
+        if (!restore) {
+            // Lenient mapping: a static effect can reference objects that no longer exist in the
+            // copy (LKI, tokens that ceased to exist). There is nothing to un-apply on the copy
+            // for those, so they map to null and StaticEffect skips them.
+            IEntityMap lenientMap = new IEntityMap() {
+                @Override
+                public Game getGame() {
+                    return toGame;
+                }
+                @Override
+                public GameObject map(GameObject o) {
+                    if (o instanceof Card) {
+                        return findBy(toGame, (Card) o);
+                    }
+                    if (o instanceof Player) {
+                        return findBy(toGame, (Player) o);
+                    }
+                    return null;
+                }
+            };
+            for (StaticEffect effect : fromGame.getStaticEffects().getEffects()) {
+                effect.removeMapped(lenientMap);
+            }
+        }
 
         if (origPhaseHandler.getCombat() != null) {
             Combat combat = new Combat(origPhaseHandler.getCombat(), gameObjectMap);
@@ -133,9 +174,25 @@ public class GameSnapshot {
             //System.out.println(origPhaseHandler.getCombat().toString());
         }
 
-        // I think re-assigning this is killing something?
-        //toGame.getAction().checkStateEffects(true); //ensure state based effects and triggers are updated
-//        toGame.getTriggerHandler().resetActiveTriggers();
+        if (!restore) {
+            // Recompute conditional/characteristic-affecting statics on the copy (e.g. Ghitu
+            // Lavarunner's +1/+0) — same calls and order as GameCopier.makeCopy().
+            toGame.getAction().checkStateEffects(true); //ensure state based effects and triggers are updated
+            toGame.getTriggerHandler().resetActiveTriggers();
+        }
+
+        // Suppression window close. The old commented-out recompute ("I think re-assigning this
+        // is killing something?") most likely broke because it ran after ChangesZone suppression
+        // was lifted: checkStateEffects can move cards via state-based actions and would then
+        // collect/run zone-change triggers mid-copy. GameCopier performs the identical recompute
+        // safely, so we keep the window open until here. (PlayerZoneBattlefield.setTriggers only
+        // gates summoning-sickness assignment on add; the ChangesZone suppression is the
+        // load-bearing part. Nothing in the widened span moves cards on the restore path, so
+        // restore behavior is unaffected by the wider window.)
+        for (Player p : toGame.getPlayers()) {
+            ((PlayerZoneBattlefield) p.getZone(ZoneType.Battlefield)).setTriggers(true);
+        }
+        toGame.getTriggerHandler().clearSuppression(TriggerType.ChangesZone);
 
         if (includeStack) {
             copyStack(fromGame, toGame);
@@ -337,8 +394,16 @@ public class GameSnapshot {
             Card fromCard = fromGame.findById(newCard.getId());
 
             if (fromCard.isAttachedToEntity()) {
-                Card fromAttachedTo = fromCard.getAttachedTo();
-                Card newAttachedTo = fromAttachedTo == null ? null : toGame.findById(fromAttachedTo.getId());
+                // getAttachedTo() only covers card-attachments; auras on a PLAYER
+                // (curses) returned null here and were silently dropped, after which
+                // checkStateEffects culled the orphaned aura from the copy.
+                GameEntity fromAttachedTo = fromCard.getEntityAttachedTo();
+                GameEntity newAttachedTo = null;
+                if (fromAttachedTo instanceof Card) {
+                    newAttachedTo = toGame.findById(((Card) fromAttachedTo).getId());
+                } else if (fromAttachedTo instanceof Player) {
+                    newAttachedTo = findBy(toGame, (Player) fromAttachedTo);
+                }
                 if (newAttachedTo != null) {
                     newCard.setEntityAttachedTo(newAttachedTo);
                     newAttachedTo.addAttachedCard(newCard);

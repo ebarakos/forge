@@ -105,10 +105,17 @@ public class AiProfileUtil {
 
             final String[] split = line.split("=");
 
-            if (split.length == 2) {
-                profileMap.put(AiProps.valueOf(split[0]), split[1]);
-            } else if (split.length == 1 && line.endsWith("=")) {
-                profileMap.put(AiProps.valueOf(split[0]), "");
+            try {
+                if (split.length == 2) {
+                    profileMap.put(AiProps.valueOf(split[0]), split[1]);
+                } else if (split.length == 1 && line.endsWith("=")) {
+                    profileMap.put(AiProps.valueOf(split[0]), "");
+                }
+            } catch (IllegalArgumentException e) {
+                // Unknown property (e.g. profile written for a newer build) —
+                // skip it instead of aborting the whole profile load.
+                System.err.println("[AiProfileUtil] Ignoring unknown AI property '"
+                        + split[0] + "' in profile " + profileName);
             }
         }
 
@@ -189,12 +196,10 @@ public class AiProfileUtil {
         availableProfiles.add(AI_PROFILE_RANDOM_MATCH);
         availableProfiles.add(AI_PROFILE_RANDOM_DUEL);
         availableProfiles.addAll(getAvailableProfiles());
-        // LLM (Custom) listed first — relay-routed to self-hosted LM Studio, no
-        // catalog gating or RPM limits, the recommended default for discovery.
-        availableProfiles.add(LLMConfig.LLM_CUSTOM_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_LOCAL_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_OPENROUTER_DISPLAY);
-        availableProfiles.add(LLMConfig.LLM_CEREBRAS_DISPLAY);
+        // Single LLM entry; selecting it opens LlmConfigDialog for per-seat
+        // provider/model choice. Replaces the four legacy "LLM (Provider)"
+        // entries (removed in Phase 2).
+        availableProfiles.add(LLMConfig.LLM_DIALOG_DISPLAY);
 
         return availableProfiles;
     }

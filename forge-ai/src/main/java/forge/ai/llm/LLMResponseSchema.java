@@ -62,9 +62,13 @@ public enum LLMResponseSchema {
             JsonObject reasoning = new JsonObject();
             reasoning.addProperty("type", "string");
             reasoning.addProperty("description",
-                    "1-3 sentences explaining your choice — what you're trying to do and why.");
-            // Cap to keep small models from spiralling into ellipsis loops.
-            reasoning.addProperty("maxLength", 200);
+                    "1-3 sentences (max ~200 characters) explaining your choice — "
+                            + "what you're trying to do and why.");
+            // No `maxLength` here: Cerebras's structured-output endpoint rejects
+            // schemas with maxLength on string fields with HTTP 400 ("Invalid
+            // fields for schema with types ['string']: {'maxLength'}"), which
+            // forces every call to fall back to the heuristic. The length hint
+            // moves into the description; small models still tend to obey it.
             properties.add("reasoning", reasoning);
             required.add("reasoning");
         }

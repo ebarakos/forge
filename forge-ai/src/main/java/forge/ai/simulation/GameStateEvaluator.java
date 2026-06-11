@@ -6,6 +6,7 @@ import forge.ai.AiProps;
 import forge.ai.CreatureEvaluator;
 import forge.card.mana.ManaAtom;
 import forge.game.Game;
+import forge.game.GameEntity;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
 import forge.game.card.CounterEnumType;
@@ -32,6 +33,7 @@ public class GameStateEvaluator {
 
     // Combo state bonus from profile (cached)
     private int comboStateBonus = 0;
+    private int lifePressureWeight = 20;
 
     // Card evaluation cache for faster repeated evaluations
     // Key format: "cardName:P/T:tapped:counters" for creatures, "cardName:loyalty" for planeswalkers
@@ -49,6 +51,7 @@ public class GameStateEvaluator {
     public void setComboStateBonusFromProfile(Player player) {
         if (player != null) {
             this.comboStateBonus = AiProfileUtil.getIntProperty(player, AiProps.COMBO_STATE_BONUS);
+            this.lifePressureWeight = AiProfileUtil.getIntProperty(player, AiProps.SIM_EVAL_LIFE_PRESSURE_WEIGHT);
         }
     }
 
@@ -460,6 +463,21 @@ public class GameStateEvaluator {
         }
         score -= 2* opponentLife / (game.getPlayers().size() - 1);
 
+        // Life pressure: damage already dealt toward the weakest opponent's lethal
+        // is worth progressively more as their life drops. Without this, one small
+        // creature (~165 pts) outweighs the entire life race (2 pts/life), so
+        // racing decks never go face. Quadratic ramp: negligible early, decisive
+        // near lethal. Tuned via SIM_EVAL_LIFE_PRESSURE_WEIGHT.
+        if (weakestOpponent != null && lifePressureWeight > 0) {
+            int startLife = max(1, weakestOpponent.getStartingLife());
+            int dealt = max(0, startLife - weakestOpponent.getLife());
+            int pressure = dealt * dealt * lifePressureWeight / startLife;
+            if (pressure != 0) {
+                debugPrint("  Life pressure: dealt=" + dealt + " bonus=" + pressure);
+                score += pressure;
+            }
+        }
+
         // Add combo state bonus if enabled
         int comboBonus = evaluateComboState(game, aiPlayer);
         if (comboBonus > 0) {
@@ -591,6 +609,20 @@ public class GameStateEvaluator {
         // Creatures use context-aware evaluation (depends on board state, not cacheable)
         if (c.isCreature()) {
             return eval.evaluateCreatureInContext(c, game, aiPlayer);
+        }
+
+        // Player-attachment check must come BEFORE the cache: the cache key does not
+        // encode the attachment target, so a signed curse value must never be cached.
+        GameEntity attachedTo = c.getEntityAttachedTo();
+        if (attachedTo instanceof Player) {
+            if (c.isCurse()) {
+                // Score from the controller's perspective (battlefield loop handles
+                // the sign flip for opponent-controlled cards, so don't double-negate).
+                int base = 50 + 30 * c.getCMC();
+                return (attachedTo == c.getController()) ? -base : base;
+            }
+            // Non-curse player-attached aura: neutral (mirrors isEnchantingCard() == 0)
+            return 0;
         }
 
         // Non-creature cards can be cached

@@ -17,6 +17,8 @@ import forge.util.Localizer;
 import forge.util.MyRandom;
 import org.apache.commons.lang3.StringUtils;
 
+import java.util.Collections;
+import java.util.Locale;
 import java.util.Set;
 
 public final class GamePlayerUtil {
@@ -57,7 +59,20 @@ public final class GamePlayerUtil {
     public static LobbyPlayer createAiPlayer(final String name, final String profileOverride) {
         final int avatarCount = GuiBase.getInterface().getAvatarCount();
         final int sleeveCount = GuiBase.getInterface().getSleevesCount();
-        return createAiPlayer(name, avatarCount == 0 ? 0 : MyRandom.getRandom().nextInt(avatarCount), sleeveCount == 0 ? 0 : MyRandom.getRandom().nextInt(sleeveCount), null, profileOverride);
+        // "sim" / "sim:<Profile>" enables the simulation engine for this seat —
+        // CLI parity with the GUI "Use Simulation" checkbox. The remainder (or
+        // the Simulation profile when bare) selects the heuristic dials.
+        Set<AIOption> options = null;
+        String profile = profileOverride;
+        String lower = profile == null ? "" : profile.trim().toLowerCase(Locale.ROOT);
+        if (lower.equals("sim") || lower.startsWith("sim:")) {
+            options = Collections.singleton(AIOption.USE_SIMULATION);
+            profile = lower.equals("sim") ? "" : profile.trim().substring("sim:".length()).trim();
+            if (profile.isEmpty()) {
+                profile = "Simulation";
+            }
+        }
+        return createAiPlayer(name, avatarCount == 0 ? 0 : MyRandom.getRandom().nextInt(avatarCount), sleeveCount == 0 ? 0 : MyRandom.getRandom().nextInt(sleeveCount), options, profile);
     }
     public static LobbyPlayer createAiPlayer(final String name, final int avatarIndex) {
         final int sleeveCount = GuiBase.getInterface().getSleevesCount();
@@ -76,7 +91,18 @@ public final class GamePlayerUtil {
         String profile = "";
         if (profileOverride.isEmpty()) {
             String lastProfileChosen = FModel.getPreferences().getPref(FPref.UI_CURRENT_AI_PROFILE);
-            if (!AiProfileUtil.getProfilesDisplayList().contains(lastProfileChosen)) {
+            // Phase-2 migration shim: rewrite legacy "LLM (Provider)" display
+            // strings — saved by older builds — into the canonical profile
+            // grammar so they keep working after the dropdown was reduced to
+            // a single "LLM…" entry.
+            String migrated = migrateLegacyLlmDisplay(lastProfileChosen);
+            if (migrated != null) {
+                lastProfileChosen = migrated;
+                FModel.getPreferences().setPref(FPref.UI_CURRENT_AI_PROFILE, migrated);
+                FModel.getPreferences().save();
+            }
+            if (!AiProfileUtil.getProfilesDisplayList().contains(lastProfileChosen)
+                    && !LLMConfig.isLlmProfile(lastProfileChosen)) {
                 System.out.println("[AI Preferences] Unknown profile " + lastProfileChosen + " was requested, resetting to default.");
                 lastProfileChosen = "Default";
                 FModel.getPreferences().setPref(FPref.UI_CURRENT_AI_PROFILE, "Default");
@@ -112,24 +138,45 @@ public final class GamePlayerUtil {
     }
 
     /**
-     * Create an LLM-backed AI player from a GUI display profile name
-     * (e.g. "LLM (Cerebras)").
+     * Create an LLM-backed AI player from a canonical profile string
+     * (e.g. {@code "cerebras:gpt-oss-120b"} or {@code "direct:openai:gpt-4o-mini"}).
      */
-    public static LobbyPlayer createLLMPlayerFromProfile(String name, String displayProfile) {
-        String profileString = LLMConfig.toProfileString(displayProfile);
+    public static LobbyPlayer createLLMPlayerFromProfile(String name, String profileString) {
         String apiKey = LLMConfig.loadApiKeyFromEnv();
         boolean debug = LLMConfig.isDebugEnabled();
         LLMConfig config = LLMConfig.fromProfileString(profileString, apiKey,
                 0.2, 0, debug);
+        if (config == null) {
+            System.err.println("[LLM] Could not build LLMConfig from profile '"
+                    + profileString + "' — falling back to heuristic AI for seat '" + name + "'.");
+            return createAiPlayer(name);
+        }
         boolean hasAuth = (config.getApiKey() != null && !config.getApiKey().isEmpty())
                 || (config.getUserApiKey() != null && !config.getUserApiKey().isEmpty())
                 || "ollama".equals(config.getProvider());
         String upstream = config.getRelayProvider() != null ? "→" + config.getRelayProvider() : "";
-        System.err.println("[LLM] Creating " + displayProfile + " player '" + name
+        System.err.println("[LLM] Creating LLM player '" + name + "' from '" + profileString
                 + "' → " + config.getProvider() + upstream + ":" + config.getModel()
                 + " (auth=" + (hasAuth ? "ok" : "MISSING") + ", debug=" + debug + ")");
         LLMClient client = new LLMClient(config);
         return createLLMPlayer(name, client);
+    }
+
+    /**
+     * One-shot migration for persisted profile strings written by builds before
+     * Phase 2 collapsed the four {@code "LLM (Provider)"} dropdown entries
+     * into a single {@code "LLM…"} dialog. Returns the canonical equivalent,
+     * or {@code null} if the input is not a legacy display string.
+     */
+    private static String migrateLegacyLlmDisplay(String profile) {
+        if (profile == null) return null;
+        switch (profile) {
+            case "LLM (Custom)":     return "openai-compat:openai/gpt-oss-20b";
+            case "LLM (Local)":      return "ollama:llama3";
+            case "LLM (OpenRouter)": return "openrouter:inclusionai/ling-2.6-1t:free";
+            case "LLM (Cerebras)":   return "cerebras:qwen-3-235b-a22b-instruct-2507";
+            default:                 return null;
+        }
     }
 
     public static void setPlayerName() {

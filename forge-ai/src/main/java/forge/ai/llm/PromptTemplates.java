@@ -12,6 +12,32 @@ public final class PromptTemplates {
     private PromptTemplates() {}
 
     /**
+     * D2: two-part user prompt for provider prompt caching.
+     * {@code stablePrefix} holds the byte-stable, append-only part of the
+     * prompt (per-decision doctrine + action history) and is sent as a
+     * separate content block carrying {@code cache_control: ephemeral};
+     * {@code volatileTail} holds the current game state + options and is
+     * never cached (the model must always see fresh state). When caching is
+     * off, rejected by the provider, or the prefix is empty, the two parts
+     * are concatenated into the legacy single-string user message — the
+     * model sees identical text either way.
+     */
+    public static final class PromptParts {
+        public final String stablePrefix;
+        public final String volatileTail;
+
+        public PromptParts(String stablePrefix, String volatileTail) {
+            this.stablePrefix = stablePrefix == null ? "" : stablePrefix;
+            this.volatileTail = volatileTail == null ? "" : volatileTail;
+        }
+
+        /** Full prompt text as a single string (debug / non-caching fallback). */
+        public String concatenated() {
+            return stablePrefix + volatileTail;
+        }
+    }
+
+    /**
      * System prompt establishing the LLM's role + a competitive doctrine.
      * Stable byte-for-byte across calls so the provider prompt cache hits.
      */
@@ -141,6 +167,19 @@ public final class PromptTemplates {
     }
 
     /**
+     * D2: split-block variant of {@link #batchAttack(String, String)}. The
+     * attack doctrine + action history form the byte-stable cached prefix;
+     * the game state + options stay in the volatile tail.
+     */
+    public static PromptParts batchAttack(String actionHistory, String gameState,
+                                           String attackOptions) {
+        return new PromptParts(
+                ATTACK_DOCTRINE + (actionHistory == null ? "" : actionHistory),
+                "\n" + gameState + "\nDECLARE ATTACKERS\n" + attackOptions
+                        + "\nReturn the indices of the creatures that should attack.");
+    }
+
+    /**
      * Build a user prompt for a block decision (per attacker).
      */
     public static String block(String gameState, String blockOption) {
@@ -153,6 +192,20 @@ public final class PromptTemplates {
     public static String batchBlock(String gameState, String blockOptions) {
         return gameState + "\nDECLARE BLOCKERS\n" + blockOptions
                 + "\nReturn an array of {attacker, blockers[]} entries (gang-blocking allowed).";
+    }
+
+    /**
+     * D2: split-block variant of {@link #batchBlock(String, String)}. There is
+     * no block-specific doctrine constant, so the stable cached prefix is just
+     * the action history; the game state (including any carried-over attack
+     * plan note, which is volatile) + options stay in the uncached tail.
+     */
+    public static PromptParts batchBlock(String actionHistory, String gameState,
+                                          String blockOptions) {
+        return new PromptParts(
+                actionHistory,
+                "\n" + gameState + "\nDECLARE BLOCKERS\n" + blockOptions
+                        + "\nReturn an array of {attacker, blockers[]} entries (gang-blocking allowed).");
     }
 
     /**

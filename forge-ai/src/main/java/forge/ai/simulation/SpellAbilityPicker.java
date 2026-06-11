@@ -25,11 +25,14 @@ public class SpellAbilityPicker {
     private Game game;
     private Player player;
     private Score bestScore;
-    private boolean printOutput = false;
+    private boolean printOutput = Boolean.getBoolean("forge.sim.debug");
     private SpellAbilityChoicesIterator interceptor;
 
     private Plan plan;
     private int numSimulations;
+    // Read lazily per decision: at construction time the player's controller is
+    // not yet assigned, so profile lookups (which walk getController()) would NPE.
+    private int planScoreTolerance = 80;
 
     // Reused evaluator instance to reduce GC pressure (cleared per decision)
     private final GameStateEvaluator evaluator = new GameStateEvaluator();
@@ -98,6 +101,7 @@ public class SpellAbilityPicker {
 
         evaluator.clearCache();
         evaluator.setComboStateBonusFromProfile(player);
+        planScoreTolerance = AiProfileUtil.getIntProperty(player, AiProps.SIM_PLAN_SCORE_TOLERANCE);
         Score origGameScore = evaluator.getScoreForGameState(game, player);
         List<SpellAbility> candidateSAs = getCandidateSpellsAndAbilities();
         if (controller != null) {
@@ -110,6 +114,11 @@ public class SpellAbilityPicker {
         SpellAbility sa = getPlannedSpellAbility(origGameScore, candidateSAs);
         if (sa != null) {
             return sa;
+        }
+        // If a deferred plan is still active (waiting for its start phase), do not wipe and
+        // re-formulate — that would cause flip-flop churn every priority window.
+        if (hasActivePlan()) {
+            return null;
         }
         createNewPlan(origGameScore, candidateSAs);
         return getPlannedSpellAbility(origGameScore, candidateSAs);
@@ -161,9 +170,11 @@ public class SpellAbilityPicker {
                     System.err.println("Formula plan with phase bloom");
                 }
                 Plan afterBlockersPlan = formulatePlanWithPhase(origGameScore, candidateSAs2, PhaseType.COMBAT_DECLARE_BLOCKERS);
-                if (afterBlockersPlan != null && afterBlockersPlan.getFinalScore().value >= bestPlan.getFinalScore().value) {
+                if (afterBlockersPlan != null && afterBlockersPlan.getFinalScore().value > bestPlan.getFinalScore().value) {
                     printPlan(afterBlockersPlan, "After blockers");
                     print("Deciding to wait until after declare blockers.");
+                    afterBlockersPlan.setStartPhase(PhaseType.COMBAT_DECLARE_BLOCKERS, game.getPhaseHandler().getTurn());
+                    plan = afterBlockersPlan;
                     return;
                 }
             }
@@ -245,13 +256,24 @@ public class SpellAbilityPicker {
             return null;
         }
         PhaseType startPhase = plan.getStartPhase();
-        if (startPhase != null && game.getPhaseHandler().getPhase().isBefore(startPhase)) {
-            print("Waiting until phase " + startPhase + " to proceed with the plan.");
-            return null;
+        if (startPhase != null) {
+            // Deferred plan expired: the turn advanced, so assumptions are stale.
+            if (game.getPhaseHandler().getTurn() != plan.getStartPhaseTurn()) {
+                print("Deferred plan expired (created turn " + plan.getStartPhaseTurn()
+                        + ", now turn " + game.getPhaseHandler().getTurn() + ") — abandoning.");
+                plan = null;
+                return null;
+            }
+            if (game.getPhaseHandler().getPhase().isBefore(startPhase)) {
+                print("Waiting until phase " + startPhase + " to proceed with the plan.");
+                return null;
+            }
         }
         Plan.Decision decision = plan.selectNextDecision();
-        if (!decision.initialScore.equals(origGameScore)) {
-            printPlannedActionFailure(decision, "Unexpected game score (" + decision.initialScore + " vs. expected " + origGameScore + ")");
+        // Abandon only when the live score is WORSE than planned by more than the tolerance; transient
+        // score gains (opponent lost a creature, etc.) must not discard a valid plan.
+        if (origGameScore.value < decision.initialScore.value - planScoreTolerance) {
+            printPlannedActionFailure(decision, "Game score dropped too far (planned=" + decision.initialScore.value + " actual=" + origGameScore.value + ")");
             return null;
         }
         SpellAbility sa = decision.saRef.findReferencedAbility(availableSAs);
@@ -385,21 +407,24 @@ public class SpellAbilityPicker {
         Score bestScore = new Score(Integer.MIN_VALUE);
         final SpellAbilityChoicesIterator choicesIterator = new SpellAbilityChoicesIterator(controller);
         Score lastScore;
-        do {
-            // TODO: MyRandom should be an instance on the game object, so that we could do
-            // simulations in parallel without messing up global state.
-            MyRandom.setRandom(new Random(randomSeedToUse));
-            GameSimulator simulator = new GameSimulator(controller, game, player, phase);
-            simulator.setInterceptor(choicesIterator);
-            // I feel like something here is making a wrong assumption about what the target is
-            lastScore = simulator.simulateSpellAbility(sa);
-            numSimulations++;
-            if (lastScore.value > bestScore.value) {
-                bestScore = lastScore;
-            }
-        } while (choicesIterator.advance(lastScore));
+        // MyRandom is now ThreadLocal, so this swap is thread-safe; the finally block ensures the
+        // original RNG is always restored even if a simulation throws.
+        try {
+            do {
+                MyRandom.setRandom(new Random(randomSeedToUse));
+                GameSimulator simulator = new GameSimulator(controller, game, player, phase);
+                simulator.setInterceptor(choicesIterator);
+                // I feel like something here is making a wrong assumption about what the target is
+                lastScore = simulator.simulateSpellAbility(sa);
+                numSimulations++;
+                if (lastScore.value > bestScore.value) {
+                    bestScore = lastScore;
+                }
+            } while (choicesIterator.advance(lastScore));
+        } finally {
+            MyRandom.setRandom(origRandom);
+        }
         controller.doneEvaluating(bestScore);
-        MyRandom.setRandom(origRandom);
         return bestScore;
     }
 

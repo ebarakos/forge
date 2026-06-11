@@ -335,7 +335,9 @@
                 <executions>
                     <execution>
                         <id>flatten</id>
-                        <phase>deploy</phase>
+                        <!-- process-resources, not deploy: local builds stop at install,
+                             and the raw pom must never reach .m2 with ${revision} unresolved -->
+                        <phase>process-resources</phase>
                         <goals>
                             <goal>flatten</goal>
                         </goals>
