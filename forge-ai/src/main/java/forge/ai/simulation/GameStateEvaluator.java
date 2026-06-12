@@ -35,6 +35,15 @@ public class GameStateEvaluator {
     private int comboStateBonus = 0;
     private int lifePressureWeight = 20;
 
+    // Category weight multipliers (percent scale, 100 = neutral). Loaded from the
+    // AI profile alongside the combo bonus; with all at 100 the produced scores are
+    // identical to the unweighted evaluator.
+    private int handWeightPct = 100;
+    private int lifeWeightPct = 100;
+    private int boardWeightPct = 100;
+    private int tempoWeightPct = 100;
+    private int clockWeightPct = 100;
+
     // Card evaluation cache for faster repeated evaluations
     // Key format: "cardName:P/T:tapped:counters" for creatures, "cardName:loyalty" for planeswalkers
     private final java.util.Map<String, Integer> cardEvalCache = new java.util.HashMap<>();
@@ -52,6 +61,11 @@ public class GameStateEvaluator {
         if (player != null) {
             this.comboStateBonus = AiProfileUtil.getIntProperty(player, AiProps.COMBO_STATE_BONUS);
             this.lifePressureWeight = AiProfileUtil.getIntProperty(player, AiProps.SIM_EVAL_LIFE_PRESSURE_WEIGHT);
+            this.handWeightPct = AiProfileUtil.getIntProperty(player, AiProps.SIM_EVAL_HAND_WEIGHT_PCT);
+            this.lifeWeightPct = AiProfileUtil.getIntProperty(player, AiProps.SIM_EVAL_LIFE_WEIGHT_PCT);
+            this.boardWeightPct = AiProfileUtil.getIntProperty(player, AiProps.SIM_EVAL_BOARD_WEIGHT_PCT);
+            this.tempoWeightPct = AiProfileUtil.getIntProperty(player, AiProps.SIM_EVAL_TEMPO_WEIGHT_PCT);
+            this.clockWeightPct = AiProfileUtil.getIntProperty(player, AiProps.SIM_EVAL_CLOCK_WEIGHT_PCT);
         }
     }
 
@@ -426,34 +440,23 @@ public class GameStateEvaluator {
 
         // --- Card quality weighting ---
         // Weight hand cards by castability rather than flat count
-        int myHandValue = 0;
-        int theirCards = 0;
         int myAvailableMana = countUntappedManaProducers(aiPlayer);
+        int myHandValue = castabilityWeightedHandValue(game, aiPlayer, myAvailableMana);
+        int theirCards = 0;
         for (Card c : game.getCardsIn(ZoneType.Hand)) {
-            if (c.getController() == aiPlayer) {
-                if (c.isLand()) {
-                    myHandValue += 3; // lands in hand have diminishing value
-                } else if (c.getCMC() <= myAvailableMana) {
-                    myHandValue += 6; // castable spell — real option
-                } else {
-                    myHandValue += 3; // too expensive right now
-                }
-            } else {
+            if (c.getController() != aiPlayer) {
                 theirCards++;
             }
         }
         int myCards = aiPlayer.getCardsIn(ZoneType.Hand).size();
         debugPrint("My cards in hand: " + myCards + " (value: " + myHandValue + ")");
         debugPrint("Their cards in hand: " + theirCards);
-        if (!aiPlayer.isUnlimitedHandSize() && myCards > aiPlayer.getMaxHandSize()) {
-            // Excess cards will be discarded — count them for less
-            int excess = myCards - aiPlayer.getMaxHandSize();
-            myHandValue -= excess * 2;
-        }
-        score += myHandValue - 4 * theirCards;
+        // Excess cards will be discarded — count them for less
+        myHandValue -= excessHandSizePenalty(aiPlayer);
+        score += (myHandValue - 4 * theirCards) * handWeightPct / 100;
 
         debugPrint("  My life: " + aiPlayer.getLife());
-        score += 2 * aiPlayer.getLife();
+        score += 2 * aiPlayer.getLife() * lifeWeightPct / 100;
         int opponentIndex = 1;
         int opponentLife = 0;
         for (Player opponent : aiPlayer.getOpponents()) {
@@ -461,7 +464,7 @@ public class GameStateEvaluator {
             opponentLife += opponent.getLife();
             opponentIndex++;
         }
-        score -= 2* opponentLife / (game.getPlayers().size() - 1);
+        score -= (2 * opponentLife / (game.getPlayers().size() - 1)) * lifeWeightPct / 100;
 
         // Life pressure: damage already dealt toward the weakest opponent's lethal
         // is worth progressively more as their life drops. Without this, one small
@@ -492,7 +495,7 @@ public class GameStateEvaluator {
         // Having more untapped mana means more options and trick potential
         if (weakestOpponent != null) {
             int theirUntappedMana = countUntappedManaProducers(weakestOpponent);
-            int tempoBonus = (myAvailableMana - theirUntappedMana) * 3;
+            int tempoBonus = (myAvailableMana - theirUntappedMana) * 3 * tempoWeightPct / 100;
             if (tempoBonus != 0) {
                 debugPrint("  Tempo: my mana=" + myAvailableMana + " their mana=" + theirUntappedMana + " bonus=" + tempoBonus);
                 score += tempoBonus;
@@ -506,6 +509,11 @@ public class GameStateEvaluator {
         int myEvasiveDamage = 0;
         int theirEvasiveDamage = 0;
 
+        // Accumulate the signed battlefield sums raw, then apply the board weight
+        // once to the totals (per-card rounding would change results at pct != 100).
+        int boardScore = 0;
+        int boardSummonSickScore = 0;
+
         for (Card c : game.getCardsIn(ZoneType.Battlefield)) {
             int value = evalCard(game, aiPlayer, c);
             int summonSickValue = value;
@@ -517,12 +525,12 @@ public class GameStateEvaluator {
             String str = cardToString(c);
             if (c.getController() == aiPlayer) {
                 debugPrint("  Battlefield: " + str + " = " + value);
-                score += value;
-                summonSickScore += summonSickValue;
+                boardScore += value;
+                boardSummonSickScore += summonSickValue;
             } else {
                 debugPrint("  Battlefield: " + str + " = -" + value);
-                score -= value;
-                summonSickScore -= summonSickValue;
+                boardScore -= value;
+                boardSummonSickScore -= summonSickValue;
             }
             String nonAbilityText = c.getNonAbilityText();
             if (!nonAbilityText.isEmpty()) {
@@ -543,6 +551,9 @@ public class GameStateEvaluator {
             }
         }
 
+        score += boardScore * boardWeightPct / 100;
+        summonSickScore += boardSummonSickScore * boardWeightPct / 100;
+
         // --- Clock calculation ---
         // Being ahead on the evasive damage clock is strategically valuable
         if (weakestOpponent != null && (myEvasiveDamage > 0 || theirEvasiveDamage > 0)) {
@@ -551,7 +562,7 @@ public class GameStateEvaluator {
             int theirTurnsToKill = theirEvasiveDamage > 0
                     ? (aiPlayer.getLife() + theirEvasiveDamage - 1) / theirEvasiveDamage : 99;
             // Each turn of clock advantage is worth ~15 points, capped
-            int clockBonus = max(-80, min(80, (theirTurnsToKill - myTurnsToKill) * 15));
+            int clockBonus = max(-80, min(80, (theirTurnsToKill - myTurnsToKill) * 15)) * clockWeightPct / 100;
             if (clockBonus != 0) {
                 debugPrint("  Clock: my turns=" + myTurnsToKill + " their turns=" + theirTurnsToKill + " bonus=" + clockBonus);
                 score += clockBonus;
@@ -561,6 +572,111 @@ public class GameStateEvaluator {
 
         debugPrint("Score = " + score);
         return new Score(score, summonSickScore);
+    }
+
+    /**
+     * Castability-weighted value of a player's hand: lands and currently
+     * uncastable spells count 3, castable spells count 6. Shared between the
+     * scoring path and {@link #extractFeatures(Game, Player)}.
+     */
+    private static int castabilityWeightedHandValue(Game game, Player aiPlayer, int availableMana) {
+        int handValue = 0;
+        for (Card c : game.getCardsIn(ZoneType.Hand)) {
+            if (c.getController() != aiPlayer) {
+                continue;
+            }
+            if (c.isLand()) {
+                handValue += 3; // lands in hand have diminishing value
+            } else if (c.getCMC() <= availableMana) {
+                handValue += 6; // castable spell — real option
+            } else {
+                handValue += 3; // too expensive right now
+            }
+        }
+        return handValue;
+    }
+
+    /**
+     * Penalty for cards above the maximum hand size (they will be discarded).
+     */
+    private static int excessHandSizePenalty(Player aiPlayer) {
+        int myCards = aiPlayer.getCardsIn(ZoneType.Hand).size();
+        if (!aiPlayer.isUnlimitedHandSize() && myCards > aiPlayer.getMaxHandSize()) {
+            return (myCards - aiPlayer.getMaxHandSize()) * 2;
+        }
+        return 0;
+    }
+
+    /**
+     * Extracts raw evaluation features for player {@code p} from the live game
+     * state, for offline analysis (e.g. fitting the SIM_EVAL_*_PCT weights).
+     * <p>
+     * Computed directly on the real game with a fresh evaluator instance:
+     * no combat simulation, no game copying, no RNG consumption, and no
+     * profile loading. Keys missing an opponent are omitted.
+     */
+    public static java.util.Map<String, Integer> extractFeatures(Game game, Player p) {
+        java.util.Map<String, Integer> features = new java.util.LinkedHashMap<>();
+        if (game == null || p == null) {
+            return features;
+        }
+        GameStateEvaluator evaluator = new GameStateEvaluator();
+        Player opp = p.getWeakestOpponent();
+
+        features.put("turn", game.getPhaseHandler().getTurn());
+        features.put("my_life", p.getLife());
+        if (opp != null) {
+            features.put("opp_life", opp.getLife());
+            features.put("opp_dealt", max(0, opp.getStartingLife() - opp.getLife()));
+        }
+
+        int myAvailableMana = evaluator.countUntappedManaProducers(p);
+        int myHandValue = castabilityWeightedHandValue(game, p, myAvailableMana)
+                - excessHandSizePenalty(p);
+        features.put("my_hand_value", myHandValue);
+        features.put("my_hand_count", p.getCardsIn(ZoneType.Hand).size());
+        if (opp != null) {
+            features.put("opp_hand_count", opp.getCardsIn(ZoneType.Hand).size());
+        }
+
+        // Signed battlefield sums, same per-card evaluation (and perspective)
+        // as the scoring loop; split by controller instead of signed into one total.
+        int myBoardEval = 0;
+        int oppBoardEval = 0;
+        int myLands = 0;
+        int oppLands = 0;
+        for (Card c : game.getCardsIn(ZoneType.Battlefield)) {
+            int value = evaluator.evalCard(game, p, c);
+            boolean mine = c.getController() == p;
+            if (mine) {
+                myBoardEval += value;
+            } else {
+                oppBoardEval += value;
+            }
+            if (c.isLand()) {
+                if (mine) {
+                    myLands++;
+                } else {
+                    oppLands++;
+                }
+            }
+        }
+        features.put("my_board_eval", myBoardEval);
+        features.put("opp_board_eval", oppBoardEval);
+        features.put("my_lands", myLands);
+        features.put("opp_lands", oppLands);
+
+        features.put("my_untapped_mana", myAvailableMana);
+        if (opp != null) {
+            features.put("opp_untapped_mana", evaluator.countUntappedManaProducers(opp));
+        }
+
+        features.put("my_evasive", evasiveDamage(p));
+        if (opp != null) {
+            features.put("opp_evasive", evasiveDamage(opp));
+        }
+
+        return features;
     }
 
     public int evalManaBase(Game game, Player player, AiDeckStatistics statistics) {

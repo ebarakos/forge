@@ -5,23 +5,50 @@ import forge.ai.ability.ChangeZoneAi;
 import forge.ai.ability.LearnAi;
 import forge.ai.simulation.GameStateEvaluator.Score;
 import forge.game.Game;
+import forge.game.GameObject;
 import forge.game.ability.ApiType;
 import forge.game.card.*;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
+import forge.game.player.PlayerController;
 import forge.game.spellability.AbilitySub;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityCondition;
+import forge.game.spellability.TargetChoices;
 import forge.game.zone.ZoneType;
 import forge.util.MyRandom;
 import forge.util.TextUtil;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Random;
 import java.util.Set;
 
 public class SpellAbilityPicker {
+    // Policy-guided search: how the heuristic AI's choice is combined with the simulation.
+    // FORGE_SIM_POLICY: sim (default) | shadow | veto | hybrid
+    private static final String POLICY_MODE = parsePolicyMode(
+            System.getProperty("forge.sim.policy", System.getenv("FORGE_SIM_POLICY")));
+
+    private static String parsePolicyMode(String raw) {
+        if (raw == null || raw.trim().isEmpty()) {
+            return "sim";
+        }
+        String mode = raw.trim().toLowerCase(Locale.ROOT);
+        switch (mode) {
+            case "sim":
+            case "shadow":
+            case "veto":
+            case "hybrid":
+                return mode;
+            default:
+                System.err.println("[SIM_POLICY] Unknown policy mode '" + raw + "' (forge.sim.policy / FORGE_SIM_POLICY) - falling back to 'sim'.");
+                return "sim";
+        }
+    }
+
     private Game game;
     private Player player;
     private Score bestScore;
@@ -111,6 +138,34 @@ public class SpellAbilityPicker {
         }
 
         printPhaseInfo();
+
+        if (!POLICY_MODE.equals("sim")) {
+            AiController heuristicAi = getHeuristicAi();
+            if (heuristicAi != null) {
+                try {
+                    if (POLICY_MODE.equals("veto")) {
+                        return chooseWithVetoPolicy(heuristicAi, origGameScore);
+                    }
+                    if (POLICY_MODE.equals("hybrid")) {
+                        return chooseWithHybridPolicy(heuristicAi, origGameScore, candidateSAs);
+                    }
+                    return chooseWithShadowPolicy(heuristicAi, origGameScore, candidateSAs);
+                } catch (Exception e) {
+                    // The policy layer is advisory — it must never end the real game.
+                    // Fall back to the heuristic's own choice for this priority.
+                    plan = null;
+                    System.err.println(policyLog("POLICY_EXC") + " exc=" + e);
+                    try {
+                        return getHeuristicChoice(heuristicAi);
+                    } catch (Exception e2) {
+                        System.err.println(policyLog("POLICY_EXC") + " heuristic also failed: " + e2);
+                        return null;
+                    }
+                }
+            }
+            // No heuristic AI controller available - fall through to plain sim behavior.
+        }
+
         SpellAbility sa = getPlannedSpellAbility(origGameScore, candidateSAs);
         if (sa != null) {
             return sa;
@@ -122,6 +177,347 @@ public class SpellAbilityPicker {
         }
         createNewPlan(origGameScore, candidateSAs);
         return getPlannedSpellAbility(origGameScore, candidateSAs);
+    }
+
+    private AiController getHeuristicAi() {
+        PlayerController pc = player.getController();
+        if (pc instanceof PlayerControllerAi) {
+            return ((PlayerControllerAi) pc).getAi();
+        }
+        return null;
+    }
+
+    /**
+     * Asks the heuristic AI for its choice this priority. Returns the first element of the
+     * returned list: either a spell/ability with targets already chosen by the heuristic, a
+     * land ability, or null (heuristic passes).
+     */
+    private SpellAbility getHeuristicChoice(AiController heuristicAi) {
+        List<SpellAbility> choice = heuristicAi.chooseSpellAbilityToPlayWithoutSim();
+        return choice == null || choice.isEmpty() ? null : choice.get(0);
+    }
+
+    /**
+     * Same-action test: same host card and same SpellAbility string form.
+     */
+    private static boolean isSameAction(SpellAbility a, SpellAbility b) {
+        if (a == null && b == null) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.getHostCard().equals(b.getHostCard()) && a.toString().equals(b.toString());
+    }
+
+    private String policyLog(String event) {
+        StringBuilder sb = new StringBuilder("[SIM_POLICY] mode=").append(POLICY_MODE);
+        if (event != null) {
+            sb.append(' ').append(event);
+        }
+        sb.append(" player=").append(player.getName())
+                .append(" turn=").append(game.getPhaseHandler().getTurn())
+                .append(" myTurn=").append(game.getPhaseHandler().getPlayerTurn() == player)
+                .append(" phase=").append(game.getPhaseHandler().getPhase());
+        return sb.toString();
+    }
+
+    private static String policyDesc(SpellAbility sa) {
+        return sa == null ? "PASS" : abilityToString(sa, false);
+    }
+
+    /**
+     * Saves the chosen targets along the ability's sub-ability chain so they can be
+     * restored after policy simulations (which require untargeted candidates).
+     */
+    private static List<TargetChoices> saveTargets(SpellAbility sa) {
+        List<TargetChoices> saved = new ArrayList<>();
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            saved.add(s.getTargets());
+        }
+        return saved;
+    }
+
+    private static void restoreTargets(SpellAbility sa, List<TargetChoices> saved) {
+        if (saved == null) {
+            return;
+        }
+        int i = 0;
+        for (SpellAbility s = sa; s != null && i < saved.size(); s = s.getSubAbility()) {
+            s.setTargets(saved.get(i++));
+        }
+    }
+
+    /**
+     * Strips targets from candidate abilities before policy simulations. The heuristic
+     * consult chooses (and probes) targets on the live SpellAbility objects shared with
+     * the candidate list; GameSimulator maps pre-set targets into the game copy, which
+     * both skews evaluations and crashes outright on unmappable objects (e.g. spells on
+     * the stack). Simulations select their own targets inside the copy.
+     */
+    private static void clearAllTargets(Iterable<SpellAbility> sas) {
+        for (SpellAbility sa : sas) {
+            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                if (s.usesTargeting()) {
+                    s.resetTargets();
+                }
+            }
+        }
+    }
+
+    /**
+     * True when the ability (or a sub-ability) targets an object on the stack
+     * (counterspells and similar responses).
+     */
+    private static boolean targetsStack(SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting() && s.getTargets() != null) {
+                for (GameObject o : s.getTargets()) {
+                    if (o instanceof SpellAbility) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * One-step simulated score of playing this single ability now (fresh one-off controller).
+     * Returns {@code Integer.MIN_VALUE} when the ability cannot be evaluated; the policy
+     * treats that as "no opinion" and plays the heuristic's choice.
+     */
+    private Score evaluateOneStep(SpellAbility sa, Score origGameScore) {
+        // Stack-targeting responses cannot be evaluated: GameCopier does not map stack
+        // objects, and a stackless copy has nothing to counter.
+        if (targetsStack(sa)) {
+            return new Score(Integer.MIN_VALUE);
+        }
+        try {
+            SimulationController oneOff = new SimulationController(origGameScore, player);
+            return evaluateSa(oneOff, null, Collections.singletonList(sa), 0);
+        } catch (Exception e) {
+            // The one-step probe is advisory; a copy/mapping failure must never
+            // propagate into (and end) the real game.
+            System.err.println(policyLog("SIM_EXC") + " sa=" + policyDesc(sa) + " exc=" + e);
+            return new Score(Integer.MIN_VALUE);
+        }
+    }
+
+    /**
+     * Veto check shared by veto and hybrid modes. Returns true when the heuristic's choice
+     * simulates far enough below the current game score to be considered a blunder.
+     */
+    private boolean shouldVetoHeuristicChoice(SpellAbility heurSa, Score heurOneStep, Score origGameScore) {
+        if (heurOneStep.value == Integer.MIN_VALUE) {
+            // The simulation infrastructure failed to even simulate the ability (e.g. SA not
+            // found in the game copy). That is not evidence of a blunder - trust the heuristic.
+            System.err.println(policyLog("SIM_FAIL") + " heur=" + policyDesc(heurSa)
+                    + " orig=" + origGameScore.value);
+            return false;
+        }
+        if (origGameScore.value <= Integer.MIN_VALUE / 2) {
+            // The current state already evaluates as lost (e.g. lethal attackers incoming per
+            // the embedded combat sim). Passing guarantees the loss; any heuristic action is
+            // at worst equally bad - never veto. (Also avoids the underflow in the margin
+            // subtraction below, which once vetoed a +1359 survival line against orig=MIN.)
+            return false;
+        }
+        int vetoMargin = AiProfileUtil.getIntProperty(player, AiProps.SIM_POLICY_VETO_MARGIN);
+        if ((long) heurOneStep.value < (long) origGameScore.value - vetoMargin) {
+            System.err.println(policyLog("VETO") + " heur=" + policyDesc(heurSa)
+                    + " heurScore=" + heurOneStep.value + " orig=" + origGameScore.value);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Shadow mode: the sim decides exactly as in plain sim mode, but whenever a new plan is
+     * formulated the heuristic is consulted as well and the (dis)agreement is logged.
+     */
+    private SpellAbility chooseWithShadowPolicy(AiController heuristicAi, Score origGameScore, List<SpellAbility> candidateSAs) {
+        SpellAbility sa = getPlannedSpellAbility(origGameScore, candidateSAs);
+        if (sa != null) {
+            return sa;
+        }
+        if (hasActivePlan()) {
+            return null;
+        }
+        // Consult the heuristic before formulating the plan: getPlannedSpellAbility() below
+        // re-selects targets on the chosen ability per the plan, overwriting any targets the
+        // heuristic may have set on the same SpellAbility object.
+        SpellAbility heurSa = getHeuristicChoice(heuristicAi);
+        // The consult chooses/probes targets on live SA objects shared with the candidate
+        // list; simulations must start from untargeted candidates (see clearAllTargets).
+        clearAllTargets(candidateSAs);
+        if (heurSa != null) {
+            clearAllTargets(Collections.singletonList(heurSa));
+        }
+        createNewPlan(origGameScore, candidateSAs);
+        SpellAbility simSa = getPlannedSpellAbility(origGameScore, candidateSAs);
+
+        boolean agree = isSameAction(heurSa, simSa);
+        String simScoreStr = plan != null ? String.valueOf(plan.getFinalScore().value) : "-";
+        String heurScoreStr = "-";
+        if (!agree && heurSa != null && !heurSa.isLandAbility()) {
+            heurScoreStr = String.valueOf(evaluateOneStep(heurSa, origGameScore).value);
+        }
+        System.err.println(policyLog(null) + " heur=" + policyDesc(heurSa) + " sim=" + policyDesc(simSa)
+                + " agree=" + agree + " orig=" + origGameScore.value
+                + " simScore=" + simScoreStr + " heurScore=" + heurScoreStr);
+        return simSa;
+    }
+
+    /**
+     * Veto mode: the heuristic decides; the sim only blocks blunders (one-step score far below
+     * the current score). Plans are never retained - every priority re-consults the heuristic.
+     */
+    private SpellAbility chooseWithVetoPolicy(AiController heuristicAi, Score origGameScore) {
+        plan = null;
+        SpellAbility heurSa = getHeuristicChoice(heuristicAi);
+        if (heurSa == null) {
+            return null;
+        }
+        if (heurSa.isLandAbility()) {
+            // Land drops are never vetoed.
+            return heurSa;
+        }
+        Score heurOneStep = evaluateOneStep(heurSa, origGameScore);
+        if (shouldVetoHeuristicChoice(heurSa, heurOneStep, origGameScore)) {
+            return null;
+        }
+        // The heuristic already chose its targets - return its choice directly.
+        return heurSa;
+    }
+
+    /**
+     * Hybrid mode: the heuristic proposes and ranks, the sim re-ranks the top-K candidates and
+     * may override (with sufficient margin) or veto (blunder check) the heuristic's choice.
+     */
+    private SpellAbility chooseWithHybridPolicy(AiController heuristicAi, Score origGameScore, List<SpellAbility> candidateSAs) {
+        // While a plan is active, follow it exactly as in plain sim mode - the heuristic is
+        // not consulted.
+        SpellAbility planned = getPlannedSpellAbility(origGameScore, candidateSAs);
+        if (planned != null) {
+            return planned;
+        }
+        if (hasActivePlan()) {
+            return null;
+        }
+
+        SpellAbility heurSa = getHeuristicChoice(heuristicAi);
+        if (heurSa != null && heurSa.isLandAbility()) {
+            // Lands stay heuristic.
+            return heurSa;
+        }
+
+        // The sim's lookahead is only trusted in its window of competence: the player's
+        // own main phase with an empty stack (proactive sequencing — combat math, lethal
+        // lines, deployment order). Reactive decisions (opponent's turn, instant speed,
+        // responses on the stack) depend on hidden information and long-horizon values
+        // the 1-2 ply evaluator misjudges — benchmarks showed sim overrides there are
+        // net-negative for reactive decks. Outside the window, the heuristic decides.
+        boolean proactiveWindow = game.getPhaseHandler().getPlayerTurn() == player
+                && game.getPhaseHandler().getPhase().isMain()
+                && game.getStack().isEmpty();
+        if (!proactiveWindow) {
+            return heurSa;
+        }
+
+        // Save the heuristic's chosen targets, then strip targets everywhere before any
+        // simulation: candidates share live SA objects with the heuristic's pick, and
+        // GameSimulator maps pre-set targets into the copy (crashes on stack objects,
+        // double-targets otherwise). Restored below if the heuristic's pick is played.
+        List<TargetChoices> savedHeurTargets = heurSa != null ? saveTargets(heurSa) : null;
+
+        // Prune the sim's candidates to the heuristic's top-K ranking (same ranking the
+        // heuristic uses in chooseSpellAbilityToPlayFromList), plus the heuristic's choice.
+        int topK = AiProfileUtil.getIntProperty(player, AiProps.SIM_POLICY_TOP_K);
+        List<SpellAbility> prunedSAs = new ArrayList<>(candidateSAs);
+        try {
+            prunedSAs.sort(ComputerUtilAbility.saEvaluator); // put best spells first
+            ComputerUtilAbility.sortCreatureSpells(prunedSAs);
+        } catch (IllegalArgumentException ex) {
+            System.err.println(ex.getMessage());
+        }
+        if (topK > 0 && prunedSAs.size() > topK) {
+            prunedSAs.subList(topK, prunedSAs.size()).clear();
+        }
+        if (heurSa != null) {
+            boolean present = false;
+            for (SpellAbility candidate : prunedSAs) {
+                if (isSameAction(candidate, heurSa)) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                prunedSAs.add(heurSa);
+            }
+        }
+        clearAllTargets(candidateSAs);
+        if (heurSa != null) {
+            clearAllTargets(Collections.singletonList(heurSa));
+        }
+
+        // Formulate a plan over the pruned set (keeps the after-blockers deferral logic).
+        createNewPlan(origGameScore, prunedSAs);
+        Score heurOneStep = null;
+        if (plan != null) {
+            SpellAbility planRoot = getPlanRootAbility(prunedSAs);
+            if (isSameAction(planRoot, heurSa)) {
+                // Sim agrees with the heuristic - keep the plan and follow it as today.
+                return getPlannedSpellAbility(origGameScore, prunedSAs);
+            }
+            // Plan root differs from the heuristic's choice: override only with margin.
+            // A heuristic pass is scored as keeping the current game score.
+            int heurValue = origGameScore.value;
+            if (heurSa != null) {
+                heurOneStep = evaluateOneStep(heurSa, origGameScore);
+                heurValue = heurOneStep.value;
+            }
+            int overrideMargin = AiProfileUtil.getIntProperty(player, AiProps.SIM_POLICY_OVERRIDE_MARGIN);
+            if (plan.getFinalScore().value > heurValue + overrideMargin) {
+                System.err.println(policyLog("OVERRIDE") + " heur=" + policyDesc(heurSa)
+                        + " heurScore=" + (heurSa == null ? "-" : String.valueOf(heurValue))
+                        + " sim=" + policyDesc(planRoot) + " simScore=" + plan.getFinalScore().value
+                        + " orig=" + origGameScore.value);
+                return getPlannedSpellAbility(origGameScore, prunedSAs);
+            }
+            // Not enough margin - discard the sim plan and play the heuristic's choice.
+            plan = null;
+        }
+
+        if (heurSa == null) {
+            return null;
+        }
+        if (heurOneStep == null) {
+            heurOneStep = evaluateOneStep(heurSa, origGameScore);
+        }
+        if (shouldVetoHeuristicChoice(heurSa, heurOneStep, origGameScore)) {
+            return null;
+        }
+        // Play the heuristic's choice with its originally chosen targets re-applied. The MAIN1
+        // summon-sick holdoff inside chooseSpellAbilityToPlayImpl() only applies to sim-chosen
+        // lines; it intentionally does not veto the heuristic's choice here.
+        restoreTargets(heurSa, savedHeurTargets);
+        return heurSa;
+    }
+
+    /**
+     * Resolves the first decision of the current plan back to a SpellAbility from the list the
+     * plan was formulated from. Returns null if it cannot be resolved.
+     */
+    private SpellAbility getPlanRootAbility(List<SpellAbility> formulationSAs) {
+        if (plan == null || plan.getDecisions().isEmpty()) {
+            return null;
+        }
+        Plan.Decision first = plan.getDecisions().get(0);
+        if (first.saRef == null) {
+            return null;
+        }
+        return first.saRef.findReferencedAbility(formulationSAs);
     }
 
     private Plan formulatePlanWithPhase(Score origGameScore, List<SpellAbility> candidateSAs, PhaseType phase) {

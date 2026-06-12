@@ -19,6 +19,7 @@ import com.google.gson.GsonBuilder;
 import forge.LobbyPlayer;
 import forge.ai.llm.LLMClient;
 import forge.ai.llm.LLMConfig;
+import forge.ai.simulation.EvalFeatureCollector;
 import forge.cli.ExitCode;
 import forge.cli.ProgressBar;
 import forge.cli.SimCommand;
@@ -61,6 +62,24 @@ public class SimulateMatch {
     private static final PrintStream ORIGINAL_OUT = System.out;
     private static final PrintStream ORIGINAL_ERR = System.err;
 
+    // Keep stderr open when the sim-policy layer logs decisions ("[SIM_POLICY]" lines from
+    // FORGE_SIM_POLICY=shadow|veto|hybrid) — mirrors the FORGE_LLM_SHADOW exception.
+    private static final boolean SIM_POLICY_LOGGING = isSimPolicyLogging();
+
+    private static boolean isSimPolicyLogging() {
+        String mode = System.getProperty("forge.sim.policy", System.getenv("FORGE_SIM_POLICY"));
+        return mode != null && !mode.trim().isEmpty() && !"sim".equalsIgnoreCase(mode.trim());
+    }
+
+    // Keep stderr open when the sim-combat attack search logs decisions ("[SIM_COMBAT]" lines
+    // from FORGE_SIM_COMBAT=sim) — analogous to SIM_POLICY_LOGGING above.
+    private static final boolean SIM_COMBAT_LOGGING = isSimCombatLogging();
+
+    private static boolean isSimCombatLogging() {
+        String mode = System.getProperty("forge.sim.combat", System.getenv("FORGE_SIM_COMBAT"));
+        return mode != null && "sim".equalsIgnoreCase(mode.trim());
+    }
+
     /**
      * Configuration for a player in parallel simulation.
      * Stores the original deck and player info so fresh RegisteredPlayer objects
@@ -102,6 +121,7 @@ public class SimulateMatch {
      */
     private static class GameResult {
         boolean isDraw;
+        boolean timedOut; // draw produced by the -c wall-clock kill, not by the game
         int winnerIndex;
         String winnerName;
         long timeMs;
@@ -364,7 +384,7 @@ public class SimulateMatch {
         String shadowEnv = System.getenv("FORGE_LLM_SHADOW");
         boolean shadowMode = shadowEnv != null && !shadowEnv.isEmpty()
                 && !"false".equalsIgnoreCase(shadowEnv) && !"0".equals(shadowEnv);
-        boolean keepStderr = cmd.isLlmDebug() || shadowMode;
+        boolean keepStderr = cmd.isLlmDebug() || shadowMode || SIM_POLICY_LOGGING || SIM_COMBAT_LOGGING;
         if (quietMode || structuredOutput) {
             System.setOut(NULL_PRINT_STREAM);
             if (!keepStderr) {
@@ -444,6 +464,19 @@ public class SimulateMatch {
     }
 
     /**
+     * Attaches the eval-feature collector to a freshly created game.
+     * No-op unless the {@code forge.sim.features} system property is set.
+     */
+    private static void attachFeatureCollector(Game game, Match mc) {
+        List<RegisteredPlayer> players = mc.getPlayers();
+        String deck0 = players.size() > 0 && players.get(0).getDeck() != null
+                ? players.get(0).getDeck().getName() : "";
+        String deck1 = players.size() > 1 && players.get(1).getDeck() != null
+                ? players.get(1).getDeck().getName() : "";
+        EvalFeatureCollector.attach(game, deck0, deck1);
+    }
+
+    /**
      * Determines the winner index by comparing against the match's registered players.
      * Returns -1 if no match found.
      */
@@ -476,6 +509,7 @@ public class SimulateMatch {
 
         final Game g1 = mc.createGame();
         g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
+        attachFeatureCollector(g1, mc);
 
         try {
             TimeLimitedCodeBlock.runWithTimeout(() -> {
@@ -484,6 +518,7 @@ public class SimulateMatch {
             }, mc.getRules().getSimTimeout(), TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             ORIGINAL_ERR.println("Stopping slow match as draw");
+            result.timedOut = true;
         } catch (Exception | StackOverflowError e) {
             ORIGINAL_ERR.println("Game error: " + e.getMessage());
             e.printStackTrace(ORIGINAL_ERR);
@@ -544,7 +579,9 @@ public class SimulateMatch {
         final ProgressBar progress = new ProgressBar(ORIGINAL_ERR, nGames);
 
         System.setOut(NULL_PRINT_STREAM);
-        System.setErr(NULL_PRINT_STREAM);
+        if (!SIM_POLICY_LOGGING && !SIM_COMBAT_LOGGING) {
+            System.setErr(NULL_PRINT_STREAM);
+        }
 
         List<Future<?>> futures = new ArrayList<>();
 
@@ -620,6 +657,7 @@ public class SimulateMatch {
 
         final Game g1 = mc.createGame();
         g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
+        attachFeatureCollector(g1, mc);
 
         try {
             TimeLimitedCodeBlock.runWithTimeout(() -> {
@@ -628,6 +666,7 @@ public class SimulateMatch {
         } catch (TimeoutException e) {
             ORIGINAL_ERR.println("Game " + (iGame + 1) + ": timeout after "
                     + mc.getRules().getSimTimeout() + "s - recorded as draw");
+            result.timedOut = true;
         } catch (Exception | StackOverflowError e) {
             // Surface the failure: silent error-draws corrupt benchmark numbers.
             ORIGINAL_ERR.println("Game " + (iGame + 1) + ": error - recorded as draw: " + e);
@@ -670,14 +709,19 @@ public class SimulateMatch {
         // Count wins per player
         int[] wins = new int[playerConfigs.size()];
         int drawCount = 0;
+        int timeoutCount = 0;
         for (GameResult r : results) {
             if (r.isDraw) {
                 drawCount++;
+                if (r.timedOut) {
+                    timeoutCount++;
+                }
             } else if (r.winnerIndex >= 0 && r.winnerIndex < wins.length) {
                 wins[r.winnerIndex]++;
             }
         }
         jsonResult.summary.draws = drawCount;
+        jsonResult.summary.timeouts = timeoutCount;
 
         // Build player summaries
         for (int p = 0; p < playerConfigs.size(); p++) {
@@ -720,8 +764,9 @@ public class SimulateMatch {
             gr.winnerIndex = r.isDraw ? null : r.winnerIndex;
             gr.durationMs = r.timeMs;
             gr.turns = r.turns;
-            gr.endReason = r.game != null && r.game.getOutcome() != null ?
-                          r.game.getOutcome().getWinCondition().toString() : "Unknown";
+            gr.endReason = r.timedOut ? "Timeout"
+                    : r.game != null && r.game.getOutcome() != null
+                            ? r.game.getOutcome().getWinCondition().toString() : "Unknown";
 
             // Add full game log if game reference is available
             if (r.game != null) {
@@ -1157,7 +1202,9 @@ public class SimulateMatch {
 
         if (quietMode) {
             System.setOut(NULL_PRINT_STREAM);
-            System.setErr(NULL_PRINT_STREAM);
+            if (!SIM_POLICY_LOGGING && !SIM_COMBAT_LOGGING) {
+                System.setErr(NULL_PRINT_STREAM);
+            }
         }
 
         try {
@@ -1199,7 +1246,9 @@ public class SimulateMatch {
         final ProgressBar progress = new ProgressBar(ORIGINAL_ERR, nGames);
 
         System.setOut(NULL_PRINT_STREAM);
-        System.setErr(NULL_PRINT_STREAM);
+        if (!SIM_POLICY_LOGGING && !SIM_COMBAT_LOGGING) {
+            System.setErr(NULL_PRINT_STREAM);
+        }
 
         List<Future<?>> futures = new ArrayList<>();
 
@@ -1290,6 +1339,7 @@ public class SimulateMatch {
 
         final Game g1 = mc.createGame();
         g1.EXPERIMENTAL_RESTORE_SNAPSHOT = useSnapshot;
+        attachFeatureCollector(g1, mc);
 
         try {
             TimeLimitedCodeBlock.runWithTimeout(() -> {

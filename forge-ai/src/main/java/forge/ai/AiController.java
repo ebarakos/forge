@@ -23,6 +23,7 @@ import com.google.common.collect.Lists;
 import forge.ai.AiCardMemory.MemorySet;
 import forge.ai.ability.ChangeZoneAi;
 import forge.ai.ability.LearnAi;
+import forge.ai.simulation.CombatAttackSearch;
 import forge.ai.simulation.GameStateEvaluator;
 import forge.ai.simulation.SpellAbilityPicker;
 import forge.card.CardStateName;
@@ -1323,6 +1324,15 @@ public class AiController {
     }
 
     public void declareAttackers(Player attacker, Combat combat) {
+        // Sim-combat attack search (FORGE_SIM_COMBAT=sim): inside a CombatAttackSearch config
+        // simulation this controller belongs to a game copy and must declare exactly the
+        // forced attack configuration instead of consulting the attack heuristic.
+        final Set<Card> forcedAttackers = CombatAttackSearch.getForcedAttackers();
+        if (forcedAttackers != null) {
+            declareForcedAttackers(attacker, combat, forcedAttackers);
+            return;
+        }
+
         // 12/2/10(sol) the decision making here has moved to getAttackers()
         AiAttackController aiAtk = new AiAttackController(attacker);
         lastAttackAggression = aiAtk.declareAttackers(combat);
@@ -1349,6 +1359,32 @@ public class AiController {
         }
     }
 
+    /**
+     * Declares exactly the given attack configuration (to the default defender), used by
+     * {@link CombatAttackSearch} when this controller runs inside a config simulation on a
+     * game copy. Cards that can't attack here are dropped silently. If mandatory-attack
+     * requirements make the forced configuration illegal, it is repaired the same way the
+     * heuristic path does, so the phase loop can't spin forever.
+     */
+    private void declareForcedAttackers(Player attacker, Combat combat, Set<Card> forcedAttackers) {
+        final GameEntity defender = combat.getDefenders().getFirst();
+        for (final Card c : forcedAttackers) {
+            if (c.getController() == attacker && CombatUtil.canAttack(c, defender)) {
+                combat.addAttacker(c, defender);
+            }
+        }
+        if (!CombatUtil.validateAttackers(combat)) {
+            combat.clearAttackers();
+            final Map<Card, GameEntity> legal = combat.getAttackConstraints().getLegalAttackers().getLeft();
+            for (final Map.Entry<Card, GameEntity> mandatoryAttacker : legal.entrySet()) {
+                combat.addAttacker(mandatoryAttacker.getKey(), mandatoryAttacker.getValue());
+            }
+            if (!CombatUtil.validateAttackers(combat)) {
+                new AiAttackController(attacker).declareAttackers(combat);
+            }
+        }
+    }
+
     private List<SpellAbility> singleSpellAbilityList(SpellAbility sa) {
         if (sa == null) {
             return null;
@@ -1370,6 +1406,17 @@ public class AiController {
             return singleSpellAbilityList(simPicker.chooseSpellAbilityToPlay(null));
         }
 
+        return chooseSpellAbilityToPlayWithoutSim();
+    }
+
+    /**
+     * The heuristic spell/ability selection body, without the simulation dispatch or the
+     * per-priority state resets done by {@link #chooseSpellAbilityToPlay()}. Exposed so the
+     * simulation picker can consult the heuristic as a policy prior (FORGE_SIM_POLICY modes).
+     * Returns null, a single-element list with the chosen spell/ability, or a list of land
+     * abilities of one chosen land (MDFC sides).
+     */
+    public List<SpellAbility> chooseSpellAbilityToPlayWithoutSim() {
         CardCollection playBeforeLand = CardLists.filter(
                 player.getCardsIn(ZoneType.Hand), CardPredicates.hasSVar("PlayBeforeLandDrop")
         );

@@ -52,6 +52,10 @@ for arg in "$@"; do
             echo "  ./run.sh --clean                  # clean build + run sim"
             echo "  ./run.sh --run-only               # skip build, just run"
             echo "  ./run.sh --profile -d a.dck -d b.dck -n 20  # JFR profile"
+            echo ""
+            echo "Environment:"
+            echo "  FORGE_CPUS=N  Pin the JVM to the first N cores (hard CPU cap for"
+            echo "                parallel sims; pair with a matching -j N)"
             exit 0
             ;;
         *)            PASSTHROUGH_ARGS+=("$arg") ;;
@@ -120,6 +124,16 @@ do_run() {
     fi
     if [[ ${#PASSTHROUGH_ARGS[@]} -gt 0 ]]; then
         cmd+=("${PASSTHROUGH_ARGS[@]}")
+    fi
+
+    # CPU containment: FORGE_CPUS=<n> pins the JVM (and all its threads) to the
+    # first n cores via taskset — a hard cap that parallel game threads cannot
+    # exceed. Headless sim runs are also niced so the desktop stays responsive.
+    if [[ -n "${FORGE_CPUS:-}" ]] && command -v taskset >/dev/null; then
+        cmd=(taskset -c "0-$((FORGE_CPUS - 1))" "${cmd[@]}")
+    fi
+    if ! $GUI_MODE; then
+        cmd=(nice -n 10 "${cmd[@]}")
     fi
 
     echo "==> Running: ${cmd[*]}"

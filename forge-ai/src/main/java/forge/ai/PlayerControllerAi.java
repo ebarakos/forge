@@ -3,6 +3,7 @@ package forge.ai;
 import com.google.common.collect.*;
 import forge.LobbyPlayer;
 import forge.ai.ability.ProtectAi;
+import forge.ai.simulation.CombatAttackSearch;
 import forge.card.CardStateName;
 import forge.card.ColorSet;
 import forge.card.ICardFace;
@@ -917,6 +918,12 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public void declareAttackers(Player attacker, Combat combat) {
+        if (CombatAttackSearch.isEnabled() && getAi().usesSimulation()) {
+            // Simulation-guided attack search (FORGE_SIM_COMBAT=sim); falls back to
+            // brains.declareAttackers internally on any failure.
+            CombatAttackSearch.declareAttackers(player, attacker, combat, brains);
+            return;
+        }
         brains.declareAttackers(attacker, combat);
     }
 

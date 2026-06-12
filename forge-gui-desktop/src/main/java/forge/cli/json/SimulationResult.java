@@ -46,6 +46,8 @@ public class SimulationResult {
         public int totalGames;
         public int completedGames;
         public int draws;
+        /** Of the draws, how many were wall-clock timeout kills (-c) rather than game outcomes. */
+        public int timeouts;
         public long totalTimeMs;
         public double averageGameTimeMs;
         public double gamesPerSecond;

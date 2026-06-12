@@ -1252,6 +1252,29 @@ public class AiAttackController {
             aiAggression = 0;
         } // stay at home to block
 
+        // Stall breaker: on a developed board where neither player has taken combat
+        // damage for two turns, the game's terminal resource is the library — whoever
+        // decks first loses. When we do not win that race, walling converges to a
+        // certain loss, so an all-out attack with any nonzero win chance dominates
+        // whatever aggression level the board-ratio math computed.
+        if (defendingOpponent != null && ai.getController().isAI()) {
+            AiController aic = ((PlayerControllerAi) ai.getController()).getAi();
+            if (aic.getBoolProperty(AiProps.STALL_BREAKER_ENABLED)
+                    && ai.getGame().getPhaseHandler().getTurn() >= aic.getIntProperty(AiProps.STALL_BREAKER_MIN_TURN)
+                    && ai.getCreaturesInPlay().size() >= aic.getIntProperty(AiProps.STALL_BREAKER_MIN_CREATURES)
+                    && defendingOpponent.getCreaturesInPlay().size() >= aic.getIntProperty(AiProps.STALL_BREAKER_MIN_CREATURES)
+                    && ai.getLifeLostThisTurn() + ai.getLifeLostLastTurn() == 0
+                    && defendingOpponent.getLifeLostThisTurn() + defendingOpponent.getLifeLostLastTurn() == 0
+                    && ai.getZone(ZoneType.Library).size() <= defendingOpponent.getZone(ZoneType.Library).size()) {
+                System.err.println("[STALL_BREAK] player=" + ai.getName()
+                        + " turn=" + ai.getGame().getPhaseHandler().getTurn()
+                        + " preAggression=" + aiAggression
+                        + " myLib=" + ai.getZone(ZoneType.Library).size()
+                        + " oppLib=" + defendingOpponent.getZone(ZoneType.Library).size());
+                aiAggression = 5; // losing the stall's endgame — convert while chances remain
+            }
+        }
+
         if ( LOG_AI_ATTACKS )
             System.out.println(aiAggression + " = ai aggression");
 

@@ -166,7 +166,25 @@ public enum AiProps { /** */
     FUTILITY_MARGIN ("300"), /** */
     SIM_EVAL_LIFE_PRESSURE_WEIGHT ("20"), /** */
     // Tolerance for plan-continuation: abandon plan only when live score is worse than planned by more than this
-    SIM_PLAN_SCORE_TOLERANCE ("80");
+    SIM_PLAN_SCORE_TOLERANCE ("80"), /** */
+    // Policy-guided search (FORGE_SIM_POLICY=hybrid): number of heuristic-ranked candidates the sim evaluates
+    SIM_POLICY_TOP_K ("4"), /** */
+    // hybrid: a sim line must beat the heuristic pick's simulated score by this margin to override it
+    SIM_POLICY_OVERRIDE_MARGIN ("100"), /** */
+    // veto/hybrid: the heuristic pick is vetoed (pass instead) only when its simulated score is this far below passing
+    SIM_POLICY_VETO_MARGIN ("200"), /** */
+    // Stall breaker: on a developed, quiet board, escalate to all-out attack when losing
+    // (or tied in) the library race — waiting converges to a certain decking loss, so any
+    // attack line with a nonzero win chance strictly dominates continuing to wall.
+    STALL_BREAKER_ENABLED ("false"), /** */
+    STALL_BREAKER_MIN_TURN ("12"), /** */
+    STALL_BREAKER_MIN_CREATURES ("5"), /** */
+    // Eval category multipliers, percent scale (100 = current behavior). Calibrated by data-driven fitting.
+    SIM_EVAL_HAND_WEIGHT_PCT ("100"), /** */
+    SIM_EVAL_LIFE_WEIGHT_PCT ("100"), /** */
+    SIM_EVAL_BOARD_WEIGHT_PCT ("100"), /** */
+    SIM_EVAL_TEMPO_WEIGHT_PCT ("100"), /** */
+    SIM_EVAL_CLOCK_WEIGHT_PCT ("100");
 
 
     private final String strDefaultVal;
