@@ -17,7 +17,11 @@ MARKER_FILE="$SCRIPT_DIR/.last_build_timestamp"
 JAR_PATTERN="$SCRIPT_DIR/forge-gui-desktop/target/forge-gui-desktop-*-jar-with-dependencies.jar"
 MVN="$SCRIPT_DIR/mvnw"
 
-JVM_ARGS=(-XX:+UseG1GC -Xms2g -Xmx2g)
+# FORGE_HEAP overrides the JVM heap size (default 2g). Long parallel sim runs
+# (-j N with games running to natural completion) can exhaust 2g late in a
+# batch — set FORGE_HEAP=4g for those.
+FORGE_HEAP="${FORGE_HEAP:-2g}"
+JVM_ARGS=(-XX:+UseG1GC -Xms"$FORGE_HEAP" -Xmx"$FORGE_HEAP")
 
 # Parse flags
 DO_CLEAN=false

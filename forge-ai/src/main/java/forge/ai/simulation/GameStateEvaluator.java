@@ -432,7 +432,70 @@ public class GameStateEvaluator {
         return getScoreForGameStateImpl(game, aiPlayer);
     }
 
+    // --- Learned evaluator mode (FORGE_SIM_EVAL=learned) ---
+    // Sysprop forge.sim.eval wins over the env var, mirroring the policy/combat
+    // mode plumbing. The model path comes from forge.sim.evalmodel /
+    // FORGE_SIM_EVAL_MODEL. Load failures warn once and fall back to the
+    // linear evaluator — an advisory layer must never end a run.
+    private static final boolean LEARNED_MODE = parseLearnedMode();
+    private static volatile LearnedEvaluator LEARNED_INSTANCE;
+    private static volatile boolean learnedLoadFailed;
+
+    private static boolean parseLearnedMode() {
+        String mode = System.getProperty("forge.sim.eval");
+        if (mode == null || mode.isEmpty()) {
+            mode = System.getenv("FORGE_SIM_EVAL");
+        }
+        return "learned".equalsIgnoreCase(mode);
+    }
+
+    /** Whether the learned-evaluator mode is active (scores in win-probability millionths). */
+    public static boolean isLearnedMode() {
+        return LEARNED_MODE;
+    }
+
+    private static LearnedEvaluator learnedInstance() {
+        LearnedEvaluator le = LEARNED_INSTANCE;
+        if (le != null || learnedLoadFailed) {
+            return le;
+        }
+        synchronized (GameStateEvaluator.class) {
+            if (LEARNED_INSTANCE != null || learnedLoadFailed) {
+                return LEARNED_INSTANCE;
+            }
+            String path = System.getProperty("forge.sim.evalmodel");
+            if (path == null || path.isEmpty()) {
+                path = System.getenv("FORGE_SIM_EVAL_MODEL");
+            }
+            try {
+                if (path == null || path.isEmpty()) {
+                    throw new java.io.IOException(
+                            "FORGE_SIM_EVAL=learned but no model path set "
+                            + "(forge.sim.evalmodel / FORGE_SIM_EVAL_MODEL)");
+                }
+                LEARNED_INSTANCE = LearnedEvaluator.load(path);
+                System.err.println("GameStateEvaluator: learned evaluator loaded from " + path);
+            } catch (Exception e) {
+                learnedLoadFailed = true;
+                System.err.println("GameStateEvaluator: learned evaluator unavailable, "
+                        + "falling back to linear: " + e);
+            }
+            return LEARNED_INSTANCE;
+        }
+    }
+
     private Score getScoreForGameStateImpl(Game game, Player aiPlayer) {
+        if (LEARNED_MODE) {
+            LearnedEvaluator le = learnedInstance();
+            if (le != null) {
+                int s = le.score(extractFeaturesInstance(game, aiPlayer));
+                // Pre-MAIN2, also score with own summon-sick creatures zeroed —
+                // the picker's hold-creatures-for-MAIN2 gate compares this variant.
+                int sick = game.getPhaseHandler().getPhase().isBefore(PhaseType.MAIN2)
+                        ? le.score(extractFeaturesInstance(game, aiPlayer, true)) : s;
+                return new Score(s, sick);
+            }
+        }
         int score = 0;
         // TODO: more than 2 players
         // TODO: try and reuse evaluateBoardPosition
@@ -616,11 +679,30 @@ public class GameStateEvaluator {
      * profile loading. Keys missing an opponent are omitted.
      */
     public static java.util.Map<String, Integer> extractFeatures(Game game, Player p) {
-        java.util.Map<String, Integer> features = new java.util.LinkedHashMap<>();
         if (game == null || p == null) {
-            return features;
+            return new java.util.LinkedHashMap<>();
         }
-        GameStateEvaluator evaluator = new GameStateEvaluator();
+        return new GameStateEvaluator().extractFeaturesInstance(game, p);
+    }
+
+    /**
+     * Instance variant of {@link #extractFeatures(Game, Player)} that reuses
+     * this evaluator's card-evaluation cache — the form the learned-evaluator
+     * scoring path calls per simulated state.
+     */
+    java.util.Map<String, Integer> extractFeaturesInstance(Game game, Player p) {
+        return extractFeaturesInstance(game, p, false);
+    }
+
+    /**
+     * With {@code zeroSickOwn} set, the perspective player's summon-sick
+     * creatures are excluded from board features (the learned-path analogue
+     * of the linear evaluator's summonSickScore, used pre-MAIN2 to keep the
+     * hold-creatures-for-MAIN2 behaviour).
+     */
+    java.util.Map<String, Integer> extractFeaturesInstance(Game game, Player p, boolean zeroSickOwn) {
+        java.util.Map<String, Integer> features = new java.util.LinkedHashMap<>();
+        GameStateEvaluator evaluator = this;
         Player opp = p.getWeakestOpponent();
 
         features.put("turn", game.getPhaseHandler().getTurn());
@@ -646,8 +728,9 @@ public class GameStateEvaluator {
         int myLands = 0;
         int oppLands = 0;
         for (Card c : game.getCardsIn(ZoneType.Battlefield)) {
-            int value = evaluator.evalCard(game, p, c);
             boolean mine = c.getController() == p;
+            boolean zeroed = zeroSickOwn && mine && c.isCreature() && c.isSick();
+            int value = zeroed ? 0 : evaluator.evalCard(game, p, c);
             if (mine) {
                 myBoardEval += value;
             } else {
@@ -676,7 +759,108 @@ public class GameStateEvaluator {
             features.put("opp_evasive", evasiveDamage(opp));
         }
 
+        // Stall / inevitability: in locked board states the terminal resource
+        // is the library, the exit routes are lifegain loops and evasion, and
+        // "no life lost for two turns" is the stall fingerprint itself.
+        features.put("my_library", p.getZone(ZoneType.Library).size());
+        features.put("my_gy", p.getCardsIn(ZoneType.Graveyard).size());
+        features.put("my_life_lost_recent", p.getLifeLostThisTurn() + p.getLifeLostLastTurn());
+        if (opp != null) {
+            features.put("opp_library", opp.getZone(ZoneType.Library).size());
+            features.put("opp_gy", opp.getCardsIn(ZoneType.Graveyard).size());
+            features.put("opp_life_lost_recent", opp.getLifeLostThisTurn() + opp.getLifeLostLastTurn());
+        }
+
+        boardStructureFeatures(p, "my_", features, zeroSickOwn);
+        if (opp != null) {
+            boardStructureFeatures(opp, "opp_", features, false);
+        }
+
+        // Own-hand composition (own perspective only — the evaluator may know
+        // its own hand, never the opponent's).
+        int castable = 0;
+        int counterspells = 0;
+        int burn = 0;
+        int removal = 0;
+        for (Card c : p.getCardsIn(ZoneType.Hand)) {
+            if (c.isLand()) {
+                continue;
+            }
+            if (c.getCMC() <= myAvailableMana) {
+                castable++;
+            }
+            SpellAbility first = c.getFirstSpellAbility();
+            forge.game.ability.ApiType api = first == null ? null : first.getApi();
+            if (api == forge.game.ability.ApiType.Counter) {
+                counterspells++;
+            } else if (api == forge.game.ability.ApiType.DealDamage) {
+                burn++;
+            } else if (api == forge.game.ability.ApiType.Destroy
+                    || api == forge.game.ability.ApiType.DestroyAll) {
+                removal++;
+            }
+        }
+        features.put("my_castable", castable);
+        features.put("my_counterspells", counterspells);
+        features.put("my_burn", burn);
+        features.put("my_removal", removal);
+
         return features;
+    }
+
+    /**
+     * Battlefield-structure features for one player: creature counts and
+     * power/toughness distribution (wall math), tribal concentration, static
+     * ability density (anthems/lords), and lifegain-loop sources.
+     */
+    private static void boardStructureFeatures(Player pl, String prefix,
+            java.util.Map<String, Integer> out, boolean zeroSick) {
+        int creatures = 0;
+        int untappedCreatures = 0;
+        int power = 0;
+        int toughness = 0;
+        int maxPower = 0;
+        int maxToughness = 0;
+        int statics = 0;
+        int lifegainSources = 0;
+        java.util.Map<String, Integer> typeCounts = new java.util.HashMap<>();
+        for (Card c : pl.getCardsIn(ZoneType.Battlefield)) {
+            statics += c.getStaticAbilities().size();
+            for (SpellAbility sa : c.getSpellAbilities()) {
+                if (sa.getApi() == forge.game.ability.ApiType.GainLife) {
+                    lifegainSources++;
+                }
+            }
+            if (!c.isCreature() || (zeroSick && c.isSick())) {
+                continue;
+            }
+            creatures++;
+            if (!c.isTapped()) {
+                untappedCreatures++;
+            }
+            int pw = max(0, c.getNetPower());
+            int tf = max(0, c.getNetToughness());
+            power += pw;
+            toughness += tf;
+            maxPower = max(maxPower, pw);
+            maxToughness = max(maxToughness, tf);
+            for (String type : c.getType().getCreatureTypes()) {
+                typeCounts.merge(type, 1, Integer::sum);
+            }
+        }
+        int tribalMax = 0;
+        for (int count : typeCounts.values()) {
+            tribalMax = max(tribalMax, count);
+        }
+        out.put(prefix + "creatures", creatures);
+        out.put(prefix + "untapped_creatures", untappedCreatures);
+        out.put(prefix + "power", power);
+        out.put(prefix + "toughness", toughness);
+        out.put(prefix + "max_power", maxPower);
+        out.put(prefix + "max_toughness", maxToughness);
+        out.put(prefix + "tribal_max", tribalMax);
+        out.put(prefix + "statics", statics);
+        out.put(prefix + "lifegain_sources", lifegainSources);
     }
 
     public int evalManaBase(Game game, Player player, AiDeckStatistics statistics) {

@@ -129,6 +129,12 @@ public class SpellAbilityPicker {
         evaluator.clearCache();
         evaluator.setComboStateBonusFromProfile(player);
         planScoreTolerance = AiProfileUtil.getIntProperty(player, AiProps.SIM_PLAN_SCORE_TOLERANCE);
+        if (GameStateEvaluator.isLearnedMode()) {
+            // The learned evaluator scores in win-probability millionths; the
+            // profile tolerance is tuned to the linear scale (~hundreds). 250x
+            // maps the default 80 to 20,000 = 2pp of win probability.
+            planScoreTolerance *= 250;
+        }
         Score origGameScore = evaluator.getScoreForGameState(game, player);
         List<SpellAbility> candidateSAs = getCandidateSpellsAndAbilities();
         if (controller != null) {
