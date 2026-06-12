@@ -432,26 +432,58 @@ public class GameStateEvaluator {
         return getScoreForGameStateImpl(game, aiPlayer);
     }
 
-    // --- Learned evaluator mode (FORGE_SIM_EVAL=learned) ---
+    // --- Learned evaluator modes (FORGE_SIM_EVAL=learned|blend) ---
     // Sysprop forge.sim.eval wins over the env var, mirroring the policy/combat
     // mode plumbing. The model path comes from forge.sim.evalmodel /
     // FORGE_SIM_EVAL_MODEL. Load failures warn once and fall back to the
     // linear evaluator — an advisory layer must never end a run.
-    private static final boolean LEARNED_MODE = parseLearnedMode();
+    //
+    // "learned" replaces the linear score with win-prob millionths. "blend"
+    // keeps the linear score (full fine-grained action discrimination — the
+    // GBDT exact-ties on ~46% of small board deltas, which the picker's
+    // strict-improvement gates turn into held actions) and adds a learned
+    // strategic correction: score += (p - 0.5) * blendScale.
+    private enum EvalMode { LINEAR, LEARNED, BLEND }
+    private static final EvalMode EVAL_MODE = parseEvalMode();
+    private static final int BLEND_SCALE = parseBlendScale();
     private static volatile LearnedEvaluator LEARNED_INSTANCE;
     private static volatile boolean learnedLoadFailed;
 
-    private static boolean parseLearnedMode() {
+    private static EvalMode parseEvalMode() {
         String mode = System.getProperty("forge.sim.eval");
         if (mode == null || mode.isEmpty()) {
             mode = System.getenv("FORGE_SIM_EVAL");
         }
-        return "learned".equalsIgnoreCase(mode);
+        if ("learned".equalsIgnoreCase(mode)) {
+            return EvalMode.LEARNED;
+        }
+        if ("blend".equalsIgnoreCase(mode)) {
+            return EvalMode.BLEND;
+        }
+        return EvalMode.LINEAR;
     }
 
-    /** Whether the learned-evaluator mode is active (scores in win-probability millionths). */
+    private static int parseBlendScale() {
+        String s = System.getProperty("forge.sim.evalblendscale");
+        if (s == null || s.isEmpty()) {
+            s = System.getenv("FORGE_SIM_EVAL_BLEND_SCALE");
+        }
+        if (s != null && !s.isEmpty()) {
+            try {
+                return Integer.parseInt(s.trim());
+            } catch (NumberFormatException e) {
+                System.err.println("GameStateEvaluator: bad blend scale '" + s + "', using 6000");
+            }
+        }
+        // 6000 ⇒ a 10pp win-probability swing is worth ~600 linear points
+        // (roughly a good creature) — strategic signal that matters without
+        // drowning the linear evaluator's per-card resolution.
+        return 6000;
+    }
+
+    /** Whether the pure learned mode is active (scores in win-probability millionths). */
     public static boolean isLearnedMode() {
-        return LEARNED_MODE;
+        return EVAL_MODE == EvalMode.LEARNED;
     }
 
     private static LearnedEvaluator learnedInstance() {
@@ -485,7 +517,7 @@ public class GameStateEvaluator {
     }
 
     private Score getScoreForGameStateImpl(Game game, Player aiPlayer) {
-        if (LEARNED_MODE) {
+        if (EVAL_MODE == EvalMode.LEARNED) {
             LearnedEvaluator le = learnedInstance();
             if (le != null) {
                 int s = le.score(extractFeaturesInstance(game, aiPlayer));
@@ -633,6 +665,21 @@ public class GameStateEvaluator {
             }
         }
 
+        if (EVAL_MODE == EvalMode.BLEND) {
+            LearnedEvaluator le = learnedInstance();
+            if (le != null) {
+                int corr = (int) ((le.winProbability(extractFeaturesInstance(game, aiPlayer)) - 0.5)
+                        * BLEND_SCALE);
+                int sickCorr = game.getPhaseHandler().getPhase().isBefore(PhaseType.MAIN2)
+                        ? (int) ((le.winProbability(extractFeaturesInstance(game, aiPlayer, true)) - 0.5)
+                                * BLEND_SCALE)
+                        : corr;
+                debugPrint("  Learned blend correction: " + corr);
+                score += corr;
+                summonSickScore += sickCorr;
+            }
+        }
+
         debugPrint("Score = " + score);
         return new Score(score, summonSickScore);
     }
@@ -706,6 +753,25 @@ public class GameStateEvaluator {
         Player opp = p.getWeakestOpponent();
 
         features.put("turn", game.getPhaseHandler().getTurn());
+        // Sample-point context: whose turn it is and a coarse phase ordinal
+        // (0 pre-main, 1 main1, 2 combat, 3 main2, 4 end) — lets a model
+        // trained on mixed-phase data condition on the sampling point instead
+        // of conflating turn-start and mid-turn resource profiles.
+        features.put("my_turn", game.getPhaseHandler().getPlayerTurn() == p ? 1 : 0);
+        PhaseType ph = game.getPhaseHandler().getPhase();
+        int phaseOrd;
+        if (ph == null || ph.isBefore(PhaseType.MAIN1)) {
+            phaseOrd = 0;
+        } else if (ph == PhaseType.MAIN1) {
+            phaseOrd = 1;
+        } else if (ph.isBefore(PhaseType.MAIN2)) {
+            phaseOrd = 2;
+        } else if (ph == PhaseType.MAIN2) {
+            phaseOrd = 3;
+        } else {
+            phaseOrd = 4;
+        }
+        features.put("phase_ord", phaseOrd);
         features.put("my_life", p.getLife());
         if (opp != null) {
             features.put("opp_life", opp.getLife());

@@ -71,6 +71,25 @@ public final class EvalFeatureCollector {
 
     @Subscribe
     public void onTurnBegan(GameEventTurnBegan event) {
+        sampleAllPlayers();
+    }
+
+    /**
+     * On-policy mid-turn samples: the sim picker scores states mid-turn
+     * (mana spent, spells cast, combat resolved), so training only on
+     * turn-start snapshots leaves those states out-of-distribution. Sampling
+     * at combat-end and end-of-turn covers the post-action resource profile;
+     * the {@code phase_ord}/{@code my_turn} features record the sample point.
+     */
+    @Subscribe
+    public void onTurnPhase(forge.game.event.GameEventTurnPhase event) {
+        if (event.phase() == forge.game.phase.PhaseType.COMBAT_END
+                || event.phase() == forge.game.phase.PhaseType.END_OF_TURN) {
+            sampleAllPlayers();
+        }
+    }
+
+    private void sampleAllPlayers() {
         try {
             List<Player> players = game.getPlayers();
             for (int i = 0; i < players.size(); i++) {
