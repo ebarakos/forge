@@ -179,6 +179,21 @@ public enum AiProps { /** */
     STALL_BREAKER_ENABLED ("false"), /** */
     STALL_BREAKER_MIN_TURN ("12"), /** */
     STALL_BREAKER_MIN_CREATURES ("5"), /** */
+    // Reach priority: point direct damage at the opponent rather than at creatures,
+    // unless the board is genuinely threatening to kill us first.
+    //
+    // The default logic asks "is there a spare burn spell to throw at the player?",
+    // which suits a midrange deck carrying removal but not a deck whose whole plan is
+    // to reduce the opponent from 20 to 0.
+    //
+    // MEASURED WORSE, do not enable expecting a win-rate gain. On a Burn deck against
+    // Weenie White, 20 games a side: spells aimed at the opponent rose from 14% to 79%
+    // and damage dealt to the player from 124 to 171, but the win rate FELL from 20% to
+    // 5%. Not killing blockers meant dying faster (median 18 turns to 14). The lesson is
+    // that neither "always face" nor "always creatures" is the policy; the useful
+    // version has to weigh the specific creature against the remaining clock. Kept as an
+    // opt-in A/B lever for that work, off by default.
+    REACH_PRIORITY_ENABLED ("false"), /** */
     // Eval category multipliers, percent scale (100 = current behavior). Calibrated by data-driven fitting.
     SIM_EVAL_HAND_WEIGHT_PCT ("100"), /** */
     SIM_EVAL_LIFE_WEIGHT_PCT ("100"), /** */

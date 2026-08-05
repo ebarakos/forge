@@ -224,6 +224,32 @@ public class SimulateMatch {
             }
         }
 
+        // A profile name that does not exist used to be accepted in silence: the seat
+        // fell back to built-in defaults, the match ran, and the results looked entirely
+        // normal. That turns every A/B comparison into a comparison of a profile against
+        // itself, without a single line of output to say so. Fail instead.
+        for (Map.Entry<Integer, String> entry : aiProfiles.entrySet()) {
+            String profile = entry.getValue();
+            if (profile.isEmpty() || LLMConfig.isLlmProfile(profile)) {
+                continue;
+            }
+            String lower = profile.toLowerCase();
+            if (lower.equals("sim")) {
+                continue; // simulation engine with default dials, no profile file needed
+            }
+            String name = lower.startsWith("sim:") ? profile.substring("sim:".length()).trim() : profile;
+            if (name.isEmpty()) {
+                continue;
+            }
+            if (!new File(ForgeConstants.AI_PROFILE_DIR, name + ".ai").isFile()) {
+                ORIGINAL_ERR.println("Error: unknown AI profile '" + name + "' for player "
+                        + (entry.getKey() + 1) + ".");
+                ORIGINAL_ERR.println("Run 'sim --list-profiles' to see what is available in "
+                        + ForgeConstants.AI_PROFILE_DIR);
+                return 2;
+            }
+        }
+
         if (matchSize != null && matchSize > 0) {
             rules.setGamesPerMatch(matchSize);
         }

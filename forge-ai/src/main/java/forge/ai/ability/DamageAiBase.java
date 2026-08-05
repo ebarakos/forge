@@ -1,7 +1,10 @@
 package forge.ai.ability;
 
+import forge.ai.AiController;
+import forge.ai.AiProps;
 import forge.ai.ComputerUtil;
 import forge.ai.ComputerUtilCombat;
+import forge.ai.PlayerControllerAi;
 import forge.ai.SpellAbilityAi;
 import forge.game.Game;
 import forge.game.card.Card;
@@ -103,6 +106,20 @@ public abstract class DamageAiBase extends SpellAbilityAi {
         if ((enemy.getLife() - restDamage) < 5) {
             // drop the human to less than 5 life
             return true;
+        }
+
+        // Reach priority (opt-in per AI profile). The logic below this point asks
+        // whether there is a *spare* burn spell to throw at the player, which is the
+        // right question for a midrange deck carrying removal and the wrong one for a
+        // deck that wins by reducing the opponent's life total. For those decks, damage
+        // pointed at a creature is damage that never comes back, so the default flips:
+        // go face unless the board is about to kill us.
+        if (comp.getController() instanceof PlayerControllerAi) {
+            final AiController aic = ((PlayerControllerAi) comp.getController()).getAi();
+            if (aic.getBoolProperty(AiProps.REACH_PRIORITY_ENABLED)
+                    && !ComputerUtil.aiLifeInDanger(comp, false, 0)) {
+                return true;
+            }
         }
 
         if (sa.isSpell()) {
