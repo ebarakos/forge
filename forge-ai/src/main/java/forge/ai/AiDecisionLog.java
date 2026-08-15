@@ -470,12 +470,18 @@ public final class AiDecisionLog {
             state.initFromGame(game);
             // Comment lines are skipped by the parser, so the file stays restorable while
             // saying on its face which refusal it came from.
+            String board = state.toString();
             StringBuilder text = new StringBuilder(4096);
             text.append("# forge ai board dump\n");
             text.append("# card=").append(watched.name).append('\n');
             text.append("# seat=").append(seat).append('\n');
             text.append("# game=").append(game.getId()).append('\n');
-            text.append(state);
+            // The digest of everything below. A dump cut short by a full disk or a killed
+            // process is still a valid, restorable, different position that agrees with
+            // itself; without this line a reader has no way to tell it from the board that
+            // was meant to be written. See StateDumpChecksum.
+            text.append(StateDumpChecksum.headerLineFor(board)).append('\n');
+            text.append(board);
             Path dir = Paths.get(STATE_DUMP_DIR);
             Files.createDirectories(dir);
             Files.write(dir.resolve(fileName), text.toString().getBytes(StandardCharsets.UTF_8));
