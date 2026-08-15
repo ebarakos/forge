@@ -59,9 +59,12 @@ final class LLMCombat {
         // we just skip the annotation; the LLM runs unannotated as before.
         Set<Integer> heuristicAttackIdx = computeHeuristicAttackPrior(attacker, canAttack);
 
-        // FORGE_LLM_COMBAT=heuristic (default): trust the prior outright —
-        // skip the prompt build + LLM call entirely. Null prior (heuristic
-        // threw) falls back the same way an LLM failure would.
+        // Muzzle: FORGE_LLM_COMBAT=heuristic (the default, and the single
+        // largest one — the model never fights a combat) trusts the prior
+        // outright and skips the prompt build + LLM call entirely. Set
+        // FORGE_LLM_COMBAT=llm, or FORGE_LLM_UNMUZZLED, to hand attacks and
+        // blocks to the model. Null prior (heuristic threw) falls back the
+        // same way an LLM failure would.
         if ("heuristic".equals(LLMFullController.COMBAT_MODE)) {
             ctrl.lastAttackPlan = "";
             if (heuristicAttackIdx == null) {
@@ -199,8 +202,9 @@ final class LLMCombat {
         Map<Integer, Set<Integer>> heuristicAssignment =
                 computeHeuristicBlockPrior(defender, combat, attackerList, blockerList);
 
-        // FORGE_LLM_COMBAT=heuristic (default): trust the prior outright —
-        // skip the prompt build + LLM call entirely.
+        // Muzzle: FORGE_LLM_COMBAT=heuristic (default) trusts the prior
+        // outright and skips the prompt build + LLM call entirely. See the
+        // matching note in declareAttackers.
         if ("heuristic".equals(LLMFullController.COMBAT_MODE)) {
             ctrl.lastAttackPlan = "";
             if (heuristicAssignment == null) {

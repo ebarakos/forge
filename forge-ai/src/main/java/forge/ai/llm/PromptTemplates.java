@@ -152,6 +152,23 @@ public final class PromptTemplates {
     }
 
     /**
+     * Build a user prompt for the play-or-draw decision made before the game
+     * starts. There is no board and no hand yet, so the prompt carries no game
+     * state — only the choice and what each side of it costs. Used only when
+     * {@code FORGE_LLM_HARDCODED_PLAY_FIRST} is off; otherwise the seat plays
+     * first without asking.
+     */
+    public static String startingPlayer(boolean isFirstGame) {
+        return "You have won the die roll"
+             + (isFirstGame ? "" : " (or lost the previous game)")
+             + " and choose who takes the first turn.\n"
+             + "Playing first wins the race for the board but skips your first draw step.\n"
+             + "Drawing first gives you one extra card, which favours decks that answer\n"
+             + "threats rather than deploy them.\n"
+             + "\nOPTIONS:\n0: Play first\n1: Draw first\n";
+    }
+
+    /**
      * Build a user prompt for an attack decision (per creature).
      */
     public static String attack(String gameState, String attackOption) {

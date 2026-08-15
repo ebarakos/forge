@@ -94,14 +94,107 @@ public class LLMFullController extends PlayerControllerAi {
     static final boolean EVAL_HINTS_ENABLED = isTruthy(System.getenv("FORGE_LLM_EVAL_HINTS"));
     static final int EVAL_HINT_MAX_CANDIDATES = 6;
 
+    // =======================================================================
+    // Muzzles: which decisions the heuristic AI keeps for itself
+    // =======================================================================
+    //
+    // An "LLM seat" does not actually decide everything. Nine places below
+    // hand a decision back to the heuristic AI, either always or whenever the
+    // heuristic disagrees with the model. That is deliberate — each one was
+    // added because it won games — but it also means a run labelled "LLM" is
+    // measuring a mixture, and an experiment that wants to know what the model
+    // alone is worth has to be able to switch every one of them off.
+    //
+    // So each muzzle has its own environment variable, and FORGE_LLM_UNMUZZLED
+    // flips all of them to the model at once. An individual variable, when
+    // set, always wins over the aggregate, so one muzzle can be put back
+    // without unsetting the rest. Everything unset behaves exactly as before
+    // these switches existed.
+    //
+    //   FORGE_LLM_UNMUZZLED             off  — aggregate: give every decision below to the model
+    //   FORGE_LLM_TRUST_HEURISTIC_TOP   on   — replace the model's first plan step with the
+    //                                          heuristic's own pick whenever the two differ
+    //   FORGE_LLM_COMBAT                heuristic — who declares attackers and blockers
+    //                                          (heuristic | llm | shadow)
+    //   FORGE_LLM_TOPK                  8    — how many spell options the model gets to see
+    //                                          (0 = no cap)
+    //   FORGE_LLM_PRUNE_HOPELESS        on   — hide options the heuristic calls fundamentally bad
+    //   FORGE_LLM_SINGLE_OPTION_SHORTCUT on  — with exactly one playable spell, let the heuristic
+    //                                          decide it and skip the LLM call
+    //   FORGE_LLM_PLAN_STEP_APPROVAL    on   — re-ask the heuristic before each step of the
+    //                                          model's own plan is played
+    //   FORGE_LLM_EMPTY_PLAN_OVERRIDE   on   — when the model chose to hold, cast anyway if the
+    //                                          heuristic wants to play something
+    //   FORGE_LLM_HEURISTIC_LAND_DROPS  on   — the heuristic picks which land to play, and when
+    //   FORGE_LLM_HARDCODED_PLAY_FIRST  on   — always choose to play first, without asking
+    //
+    // Truthiness for the boolean switches follows the rest of FORGE_LLM_*:
+    // anything except "0" or "false" (case-insensitive) counts as on; unset or
+    // empty falls through to the default in the list above.
+
+    /**
+     * Aggregate de-muzzle switch. Truthy means every muzzle in this block
+     * defaults to "the model decides" instead of "the heuristic decides".
+     * Declared first because the muzzle constants below read it.
+     */
+    static final boolean UNMUZZLED = isTruthy(System.getenv("FORGE_LLM_UNMUZZLED"));
+
     /**
      * Heuristic-prior pruning: cap the number of spell options shown to the
      * LLM and sort heuristic-preferred candidates first. Set
-     * {@code FORGE_LLM_TOPK=0} to disable; defaults to 8. Lower = cheaper
-     * prompts + tighter LLM attention; higher = more freedom for the LLM to
-     * disagree with the heuristic.
+     * {@code FORGE_LLM_TOPK=0} to disable; defaults to 8 (0 when unmuzzled).
+     * Lower = cheaper prompts + tighter LLM attention; higher = more freedom
+     * for the LLM to disagree with the heuristic.
      */
-    static final int HEURISTIC_TOPK = parseIntEnv("FORGE_LLM_TOPK", 8);
+    static final int HEURISTIC_TOPK = parseIntEnv("FORGE_LLM_TOPK", UNMUZZLED ? 0 : 8);
+
+    /**
+     * Drop options the heuristic gave a hopeless verdict (CantPlaySa,
+     * BadEtbEffects, DoesntImpactGame, …) before the model ever sees them.
+     * Off ({@code FORGE_LLM_PRUNE_HOPELESS=0}) keeps them in the list, ranked
+     * last, so the model can disagree with the heuristic about what is bad.
+     */
+    static final boolean PRUNE_HOPELESS = muzzleOn("FORGE_LLM_PRUNE_HOPELESS");
+
+    /**
+     * With exactly one playable spell, ask the heuristic instead of the model
+     * and skip the LLM call. Saves a call per trivial decision, but it also
+     * means the heuristic — not the model — decides every forced-looking turn.
+     * Off ({@code FORGE_LLM_SINGLE_OPTION_SHORTCUT=0}) sends the single option
+     * to the model like any other.
+     */
+    static final boolean SINGLE_OPTION_SHORTCUT = muzzleOn("FORGE_LLM_SINGLE_OPTION_SHORTCUT");
+
+    /**
+     * Re-ask the heuristic before playing each step of the model's own cached
+     * MAIN-phase plan; a step the heuristic will not endorse is skipped. Off
+     * ({@code FORGE_LLM_PLAN_STEP_APPROVAL=0}) plays the plan as written.
+     */
+    static final boolean PLAN_STEP_APPROVAL = muzzleOn("FORGE_LLM_PLAN_STEP_APPROVAL");
+
+    /**
+     * When the model returns an empty plan — it chose to hold — cast the
+     * heuristic's pick anyway if the heuristic is willing. Added because small
+     * models emit {@code plan:[]} when their reasoning truncates, but it also
+     * makes "hold everything" unreachable for a model that meant it. Off
+     * ({@code FORGE_LLM_EMPTY_PLAN_OVERRIDE=0}) honours the pass.
+     */
+    static final boolean EMPTY_PLAN_OVERRIDE = muzzleOn("FORGE_LLM_EMPTY_PLAN_OVERRIDE");
+
+    /**
+     * Let the heuristic choose which land to play and whether to hold the land
+     * drop; the model never sees land abilities. Off
+     * ({@code FORGE_LLM_HEURISTIC_LAND_DROPS=0}) lists land plays among the
+     * model's options like any other play.
+     */
+    static final boolean HEURISTIC_LAND_DROPS = muzzleOn("FORGE_LLM_HEURISTIC_LAND_DROPS");
+
+    /**
+     * Always choose to play first, without asking anyone. Off
+     * ({@code FORGE_LLM_HARDCODED_PLAY_FIRST=0}) asks the model to choose play
+     * or draw; a failed call still falls back to playing first.
+     */
+    static final boolean HARDCODED_PLAY_FIRST = muzzleOn("FORGE_LLM_HARDCODED_PLAY_FIRST");
 
     /**
      * Heuristic-prior verdict annotation: tag each option with the heuristic
@@ -128,22 +221,22 @@ public class LLMFullController extends PlayerControllerAi {
      *   <li>{@code shadow} — LLM is consulted and divergence logged via the
      *       combat shadow telemetry, but the heuristic prior is applied.</li>
      * </ul>
-     * Unset or unrecognised values normalise to {@code heuristic}.
+     * Unset or unrecognised values normalise to {@code heuristic}
+     * ({@code llm} when unmuzzled).
      */
-    static final String COMBAT_MODE = parseCombatMode(System.getenv("FORGE_LLM_COMBAT"));
+    static final String COMBAT_MODE = parseCombatMode(System.getenv("FORGE_LLM_COMBAT"),
+            UNMUZZLED ? "llm" : "heuristic");
 
     /**
-     * Heuristic-priority override: when the LLM's first plan step is anything
-     * other than the heuristic's top willingToPlay candidate, replace it with
-     * the heuristic's pick. Documented evidence (mirror-vs-heuristic eval,
-     * 4 models × 4 decks): LLM divergences from {@code pruned[0]} are
-     * uniformly net-negative, costing 25-50 percentage points vs the
-     * heuristic's mirror baseline. On by default; flip off via
+     * Heuristic-priority override: when the LLM's first plan step is not the
+     * spell the heuristic would have played, play the heuristic's spell
+     * instead. Documented evidence (mirror-vs-heuristic eval, 4 models ×
+     * 4 decks): LLM divergences from the heuristic's pick are uniformly
+     * net-negative, costing 25-50 percentage points vs the heuristic's mirror
+     * baseline. On by default; flip off via
      * {@code FORGE_LLM_TRUST_HEURISTIC_TOP=0} for A/B testing.
      */
-    static final boolean TRUST_HEURISTIC_TOP =
-            !"0".equals(System.getenv("FORGE_LLM_TRUST_HEURISTIC_TOP"))
-            && !"false".equalsIgnoreCase(System.getenv("FORGE_LLM_TRUST_HEURISTIC_TOP"));
+    static final boolean TRUST_HEURISTIC_TOP = muzzleOn("FORGE_LLM_TRUST_HEURISTIC_TOP");
 
     /**
      * Set true around heuristic feasibility checks (canPayCost, validateAndSetTargets)
@@ -164,17 +257,40 @@ public class LLMFullController extends PlayerControllerAi {
         return v != null && !v.isEmpty() && !"false".equalsIgnoreCase(v) && !"0".equals(v);
     }
 
+    /** Read one boolean muzzle switch from the environment. */
+    private static boolean muzzleOn(String envVar) {
+        return resolveMuzzle(System.getenv(envVar), UNMUZZLED);
+    }
+
+    /**
+     * Resolve one boolean muzzle switch. Every muzzle is on by default and off
+     * when the aggregate {@code FORGE_LLM_UNMUZZLED} is set; naming the
+     * variable explicitly wins over the aggregate in either direction, so a
+     * single muzzle can be restored inside an otherwise unmuzzled run.
+     * Package-private and taking its inputs as arguments so the resolution
+     * rule is testable without touching the process environment.
+     */
+    static boolean resolveMuzzle(String rawValue, boolean unmuzzled) {
+        if (rawValue != null && !rawValue.isEmpty()) return isTruthy(rawValue);
+        return !unmuzzled;
+    }
+
     private static int parseIntEnv(String name, int fallback) {
-        String v = System.getenv(name);
-        if (v == null || v.isEmpty()) return fallback;
-        try { return Integer.parseInt(v.trim()); }
+        return resolveInt(System.getenv(name), fallback);
+    }
+
+    /** @see #resolveMuzzle(String, boolean) — same reason for the argument form. */
+    static int resolveInt(String rawValue, int fallback) {
+        if (rawValue == null || rawValue.isEmpty()) return fallback;
+        try { return Integer.parseInt(rawValue.trim()); }
         catch (NumberFormatException e) { return fallback; }
     }
 
-    private static String parseCombatMode(String v) {
-        if (v == null) return "heuristic";
-        String s = v.trim().toLowerCase();
-        return ("llm".equals(s) || "shadow".equals(s) || "heuristic".equals(s)) ? s : "heuristic";
+    /** @see #resolveMuzzle(String, boolean) — same reason for the argument form. */
+    static String parseCombatMode(String rawValue, String fallback) {
+        if (rawValue == null) return fallback;
+        String s = rawValue.trim().toLowerCase();
+        return ("llm".equals(s) || "shadow".equals(s) || "heuristic".equals(s)) ? s : fallback;
     }
 
     public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
@@ -1370,8 +1486,27 @@ public class LLMFullController extends PlayerControllerAi {
 
     @Override
     public Player chooseStartingPlayer(boolean isFirstgame) {
-        // Always choose to play first
-        return getPlayer();
+        // Muzzle: FORGE_LLM_HARDCODED_PLAY_FIRST (on by default) always chooses
+        // to play first without asking. Off, the model chooses play or draw —
+        // a real decision in Pauper, where several decks want the extra card.
+        // Any failure (no client, bad answer) keeps today's play-first answer.
+        if (HARDCODED_PLAY_FIRST || client == null) {
+            return getPlayer();
+        }
+        Player opponent = null;
+        for (Player p : getGame().getPlayers()) {
+            if (!p.equals(getPlayer())) {
+                opponent = p;
+                break;
+            }
+        }
+        if (opponent == null) {
+            return getPlayer();
+        }
+        int chosen = callLLM(PromptTemplates.startingPlayer(isFirstgame), 2, "chooseStartingPlayer");
+        boolean playFirst = chosen != 1;
+        recordAction(playFirst ? "Chose to play first" : "Chose to draw first");
+        return playFirst ? getPlayer() : opponent;
     }
 
     @Override
