@@ -119,6 +119,83 @@ public final class OptionSerializer {
     }
 
     /**
+     * Serialize the legal targets of one spell or ability as numbered options.
+     *
+     * <p>Takes the candidates already rendered to text rather than as game
+     * objects, for two reasons: the caller is the only place that knows which
+     * board-context renderer suits each candidate's zone, and a plain-string
+     * signature means the layout of this prompt can be checked in a unit test
+     * without standing up a game.
+     *
+     * <p>{@code heuristicPicks} names the entities the heuristic AI had already
+     * chosen, by index, so the model sees the baseline it is revising — the
+     * same policy-prior annotation the attack and block prompts carry. Pass an
+     * empty set to leave the annotation out.
+     *
+     * @param spellDescription  what is being cast or activated, for the header
+     * @param candidates        one rendered line per legal target, in option order
+     * @param chooseCount       exactly how many of them to name
+     * @param heuristicPicks    indices the heuristic AI chose, or null for no annotation
+     */
+    public static String serializeTargetOptions(String spellDescription, List<String> candidates,
+                                                 int chooseCount, java.util.Set<Integer> heuristicPicks) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("CHOOSE TARGETS for ").append(spellDescription).append('\n');
+        sb.append("Name exactly ").append(chooseCount)
+          .append(chooseCount == 1 ? " target" : " targets").append(" from the list below.\n");
+        if (heuristicPicks != null && !heuristicPicks.isEmpty()) {
+            sb.append("Heuristic baseline: ");
+            boolean first = true;
+            for (int i = 0; i < candidates.size(); i++) {
+                if (!heuristicPicks.contains(i)) continue;
+                if (!first) sb.append(", ");
+                first = false;
+                sb.append(i);
+            }
+            sb.append(". Diverge from this only with reason.\n");
+        }
+        sb.append("OPTIONS:\n");
+        for (int i = 0; i < candidates.size(); i++) {
+            sb.append(i).append(": ").append(candidates.get(i));
+            if (heuristicPicks != null && !heuristicPicks.isEmpty()) {
+                sb.append(heuristicPicks.contains(i) ? "  [heur: TARGET]" : "");
+            }
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Render one target candidate for {@link #serializeTargetOptions}.
+     * Permanents get the battlefield rendering (power/toughness, keywords,
+     * tapped, counters, attachments); anything elsewhere gets the full card
+     * rendering; a player is named with their life total. Every line says whose
+     * the target is, because "kill the 2/2" and "kill MY 2/2" are different
+     * decisions and the model only has this line to tell them apart.
+     */
+    public static String describeTargetCandidate(GameEntity entity, Player self) {
+        if (entity instanceof Player) {
+            Player p = (Player) entity;
+            return p.getName() + " — " + p.getLife() + " life"
+                    + (p.equals(self) ? " (you)" : " (opponent)");
+        }
+        if (entity instanceof Card) {
+            Card c = (Card) entity;
+            boolean onBattlefield = c.isInZone(ZoneType.Battlefield);
+            String body = onBattlefield
+                    ? GameStateSerializer.serializeCardBattlefield(c)
+                    : GameStateSerializer.serializeCardFull(c);
+            Player controller = c.getController();
+            String owner = controller == null ? ""
+                    : (controller.equals(self) ? " (yours)" : " (opponent's)");
+            String zone = onBattlefield || c.getZone() == null
+                    ? "" : " (in " + c.getZone().getZoneType() + ")";
+            return body + owner + zone;
+        }
+        return entity.getName();
+    }
+
+    /**
      * Serialize a boolean choice.
      */
     public static String serializeBooleanOptions(String question) {

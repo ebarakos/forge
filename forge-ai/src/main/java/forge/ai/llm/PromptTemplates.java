@@ -152,6 +152,23 @@ public final class PromptTemplates {
     }
 
     /**
+     * Build a user prompt for the play-or-draw decision made before the game
+     * starts. There is no board and no hand yet, so the prompt carries no game
+     * state — only the choice and what each side of it costs. Used only when
+     * {@code FORGE_LLM_HARDCODED_PLAY_FIRST} is off; otherwise the seat plays
+     * first without asking.
+     */
+    public static String startingPlayer(boolean isFirstGame) {
+        return "You have won the die roll"
+             + (isFirstGame ? "" : " (or lost the previous game)")
+             + " and choose who takes the first turn.\n"
+             + "Playing first wins the race for the board but skips your first draw step.\n"
+             + "Drawing first gives you one extra card, which favours decks that answer\n"
+             + "threats rather than deploy them.\n"
+             + "\nOPTIONS:\n0: Play first\n1: Draw first\n";
+    }
+
+    /**
      * Build a user prompt for an attack decision (per creature).
      */
     public static String attack(String gameState, String attackOption) {
@@ -206,6 +223,43 @@ public final class PromptTemplates {
                 actionHistory,
                 "\n" + gameState + "\nDECLARE BLOCKERS\n" + blockOptions
                         + "\nReturn an array of {attacker, blockers[]} entries (gang-blocking allowed).");
+    }
+
+    /**
+     * Target-specific guidance. Appended only to target-choice prompts.
+     *
+     * <p>Deliberately even-handed about face damage. An earlier attempt to fix
+     * a burn deck's targeting by pushing damage at the opponent's face made it
+     * lose considerably more, so this text names the question — does the
+     * creature actually cost you the race — instead of naming an answer.
+     */
+    private static final String TARGET_DOCTRINE =
+            "TARGET DOCTRINE\n"
+          + "Pick the target that most advances your own plan, not the one that looks biggest.\n"
+          + "- Damage or removal at a creature buys time; at the opponent it shortens the game.\n"
+          + "  Take the creature when it would otherwise block your attackers, kill you first,\n"
+          + "  or generate value every turn; take the opponent when nothing on their board\n"
+          + "  changes the race and you can finish before they stabilise.\n"
+          + "- Never spend a bigger answer than the threat requires, and never point removal\n"
+          + "  at something the creature you already have can handle in combat.\n"
+          + "- A pump or protection spell goes on the creature that is actually doing work\n"
+          + "  this turn — usually an unblocked attacker or a blocker about to die.\n";
+
+    /**
+     * Build a user prompt for choosing the targets of a spell or ability the
+     * seat has already decided to play. {@code options} comes from
+     * {@link OptionSerializer#serializeTargetOptions}; the answer is read back
+     * with {@link LLMResponseSchema#TARGETS}.
+     *
+     * <p>Split into two parts like the combat prompts: the doctrine and the
+     * action history are byte-stable and ride in the cached prefix, while the
+     * board and the candidate list — which change every call — stay in the
+     * fresh tail.
+     */
+    public static PromptParts chooseTargets(String actionHistory, String gameState, String options) {
+        return new PromptParts(
+                TARGET_DOCTRINE + (actionHistory == null ? "" : actionHistory),
+                "\n" + gameState + "\n" + options);
     }
 
     /**

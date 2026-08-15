@@ -4,7 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
 /**
- * The four JSON response schemas used by the LLM player. Each one shares a
+ * The JSON response schemas used by the LLM player. Each one shares a
  * {@code reasoning} field (forces chain-of-thought for non-thinking models)
  * plus a payload field whose name matches the decision type.
  *
@@ -14,26 +14,42 @@ import com.google.gson.JsonObject;
  */
 public enum LLMResponseSchema {
     /** Single choice — payload field {@code choice: int}. */
-    CHOICE("choice", PayloadKind.INT),
+    CHOICE("choice", PayloadKind.INT, "The chosen option index from OPTIONS."),
     /** Multi-pick / batch attack / batch scry — payload {@code indices: int[]}. */
-    INDICES("indices", PayloadKind.INT_ARRAY),
+    INDICES("indices", PayloadKind.INT_ARRAY,
+            "Ordered indices of options to take. Empty array means none / PASS."),
     /** Block assignment — payload {@code blocks: [{attacker:int, blockers:int[]}]}. */
-    BLOCKS("blocks", PayloadKind.BLOCKS),
+    BLOCKS("blocks", PayloadKind.BLOCKS,
+            "Block assignments: each entry maps an attacker index to a list of blocker indices. Empty array means no blocks."),
     /** MAIN-phase plan sequence — payload {@code plan: int[]} (omit for PASS). */
-    PLAN("plan", PayloadKind.INT_ARRAY);
+    PLAN("plan", PayloadKind.INT_ARRAY,
+            "Ordered indices of options to take. Empty array means none / PASS."),
+    /**
+     * Which entities a spell or ability should point at — payload
+     * {@code targets: int[]}, indices into the candidate list in OPTIONS.
+     * Separate from {@link #INDICES} so the description can say "targets"
+     * instead of "options to take"; the wire shape is the same integer array.
+     */
+    TARGETS("targets", PayloadKind.INT_ARRAY,
+            "Indices from OPTIONS of the entities this spell or ability should target, "
+                    + "in the order you want them targeted. Give exactly the number of targets asked for.");
 
     enum PayloadKind { INT, INT_ARRAY, BLOCKS }
 
     private final String fieldName;
     private final PayloadKind kind;
+    private final String description;
 
-    LLMResponseSchema(String fieldName, PayloadKind kind) {
+    LLMResponseSchema(String fieldName, PayloadKind kind, String description) {
         this.fieldName = fieldName;
         this.kind = kind;
+        this.description = description;
     }
 
     public String fieldName() { return fieldName; }
     public PayloadKind kind() { return kind; }
+    /** The {@code description} the payload field carries in the emitted JSON Schema. */
+    public String description() { return description; }
 
     /**
      * Build the JSON Schema object for this response shape. Used in the
@@ -77,7 +93,7 @@ public enum LLMResponseSchema {
             case INT: {
                 JsonObject p = new JsonObject();
                 p.addProperty("type", "integer");
-                p.addProperty("description", "The chosen option index from OPTIONS.");
+                p.addProperty("description", description);
                 properties.add(fieldName, p);
                 required.add(fieldName);
                 break;
@@ -88,8 +104,7 @@ public enum LLMResponseSchema {
                 JsonObject items = new JsonObject();
                 items.addProperty("type", "integer");
                 p.add("items", items);
-                p.addProperty("description",
-                        "Ordered indices of options to take. Empty array means none / PASS.");
+                p.addProperty("description", description);
                 properties.add(fieldName, p);
                 required.add(fieldName);
                 break;
@@ -112,8 +127,7 @@ public enum LLMResponseSchema {
                 items.add("required", itemReq);
                 items.addProperty("additionalProperties", false);
                 p.add("items", items);
-                p.addProperty("description",
-                        "Block assignments: each entry maps an attacker index to a list of blocker indices. Empty array means no blocks.");
+                p.addProperty("description", description);
                 properties.add(fieldName, p);
                 required.add(fieldName);
                 break;

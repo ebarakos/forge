@@ -176,11 +176,16 @@ public final class GameStateSerializer {
     }
 
     /**
-     * Serialize available mana from untapped mana sources.
-     * Shows color breakdown and total, e.g. "Available mana: 2W 1U 1C (4 total)"
+     * Serialize available mana from untapped mana sources, reading <em>every</em>
+     * mana ability each source has rather than only the first.
+     *
+     * <p>Colours a source can choose between are printed as a choice, e.g.
+     * {@code "Available mana: 2R 1C 2{W/U} (5 total)"} — five mana, two of which
+     * may each be spent as white or as blue. A source that adds several mana at
+     * once contributes each of them.
      */
     private static void serializeAvailableMana(StringBuilder sb, Player player) {
-        // Count producible mana by color from untapped sources
+        // Mana whose colour is already settled: one entry per colour.
         Map<Character, Integer> colorCounts = new LinkedHashMap<>();
         colorCounts.put('W', 0);
         colorCounts.put('U', 0);
@@ -188,40 +193,31 @@ public final class GameStateSerializer {
         colorCounts.put('R', 0);
         colorCounts.put('G', 0);
         colorCounts.put('C', 0);
+        // Mana the player still chooses a colour for, grouped by the set of
+        // colours on offer ("WU" -> 2 means two mana, each white or blue).
+        Map<String, Integer> choiceCounts = new LinkedHashMap<>();
 
         for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
             if (c.isTapped()) continue;
             FCollectionView<SpellAbility> manaAbilities = c.getManaAbilities();
             if (manaAbilities.isEmpty()) continue;
 
-            // Use the first mana ability to determine what this source produces
-            boolean counted = false;
+            List<ManaOption> options = new ArrayList<>();
             for (SpellAbility ma : manaAbilities) {
-                if (counted) break;
                 AbilityManaPart manaPart = ma.getManaPart();
                 if (manaPart == null) continue;
-                String produced = manaPart.getOrigProduced();
-                if (produced == null || produced.isEmpty()) continue;
+                ManaOption option = ManaOption.read(manaPart.getOrigProduced(), repetitions(ma));
+                if (option != null) options.add(option);
+            }
 
-                if (produced.contains("Any")) {
-                    // "Any" color — count as one of each WUBRG? No, count as 1 generic.
-                    // Best representation: count as 1 "any" mana
-                    colorCounts.put('A', colorCounts.getOrDefault('A', 0) + 1);
-                    counted = true;
-                } else {
-                    // Parse individual color letters from produced string (e.g. "W", "G G", "W U")
-                    for (String token : produced.split("\\s+")) {
-                        if (token.length() == 1 && colorCounts.containsKey(token.charAt(0))) {
-                            colorCounts.merge(token.charAt(0), 1, Integer::sum);
-                            counted = true;
-                        } else if ("C".equals(token) || "1".equals(token)) {
-                            colorCounts.merge('C', 1, Integer::sum);
-                            counted = true;
-                        }
-                    }
+            ManaOption offer = ManaOption.merge(options);
+            if (offer == null) continue;
+            if (offer.choice) {
+                choiceCounts.merge(offer.colors, offer.amount, Integer::sum);
+            } else {
+                for (int i = 0; i < offer.colors.length(); i++) {
+                    colorCounts.merge(offer.colors.charAt(i), 1, Integer::sum);
                 }
-                // Only count first playable mana ability per source
-                if (counted) break;
             }
         }
 
@@ -230,6 +226,7 @@ public final class GameStateSerializer {
 
         int total = poolTotal;
         for (int v : colorCounts.values()) total += v;
+        for (int v : choiceCounts.values()) total += v;
 
         if (total == 0) return;
 
@@ -239,15 +236,199 @@ public final class GameStateSerializer {
             if (entry.getValue() == 0) continue;
             if (!first) sb.append(' ');
             first = false;
-            char color = entry.getKey();
-            String label = color == 'A' ? "Any" : String.valueOf(color);
-            sb.append(entry.getValue()).append(label);
+            sb.append(entry.getValue()).append(fixedLabel(entry.getKey()));
+        }
+        for (Map.Entry<String, Integer> entry : choiceCounts.entrySet()) {
+            if (entry.getValue() == 0) continue;
+            if (!first) sb.append(' ');
+            first = false;
+            sb.append(entry.getValue()).append(choiceLabel(entry.getKey()));
         }
         if (poolTotal > 0) {
             if (!first) sb.append(' ');
             sb.append("+").append(poolTotal).append(" in pool");
         }
         sb.append(" (").append(total).append(" total)\n");
+    }
+
+    /** How many times one activation repeats its {@code Produced$} string. */
+    private static int repetitions(SpellAbility ma) {
+        String amount = ma.getParam("Amount");
+        if (amount == null) return 1;
+        try {
+            return Math.max(1, Integer.parseInt(amount.trim()));
+        } catch (NumberFormatException e) {
+            // A computed amount ("Count$..."). Reading it needs the ability to be
+            // activated; assume one rather than guess high.
+            return 1;
+        }
+    }
+
+    /** Print name of a settled colour. */
+    static String fixedLabel(char color) {
+        if (color == 'A') return "Any";
+        if (color == '?') return "?";
+        return String.valueOf(color);
+    }
+
+    /** Print name of a set of colours the player picks from, e.g. {@code "{W/U}"}. */
+    static String choiceLabel(String colors) {
+        StringBuilder sb = new StringBuilder("{");
+        for (int i = 0; i < colors.length(); i++) {
+            if (i > 0) sb.append('/');
+            sb.append(fixedLabel(colors.charAt(i)));
+        }
+        return sb.append('}').toString();
+    }
+
+    /**
+     * What one mana ability adds to the pool: how many mana, which colours, and
+     * whether those colours are alternatives or are all produced together.
+     *
+     * <p>It exists because the card script's {@code Produced$} string comes in
+     * shapes that mean different things and used to be read as one.
+     * {@code "G U"} adds two mana, one green and one blue. {@code "Combo W U"}
+     * adds one mana that is white <em>or</em> blue — a dual land. {@code "Any"}
+     * adds one mana of any colour. Reading a Combo string as a plain list is
+     * what made a dual land look like two mana of two fixed colours, and
+     * stopping at a source's first ability is what made a land with one ability
+     * per colour look like it made only the first one.
+     */
+    static final class ManaOption {
+        /** Colour letters: one per mana when {@link #choice} is false, one per alternative when it is true. */
+        final String colors;
+        /** How many mana one activation adds. */
+        final int amount;
+        /** True when {@link #colors} lists alternatives and one is chosen per mana. */
+        final boolean choice;
+
+        private ManaOption(String colors, int amount, boolean choice) {
+            this.colors = colors;
+            this.amount = amount;
+            this.choice = choice;
+        }
+
+        /**
+         * Read one ability's output.
+         *
+         * @param produced    the raw {@code Produced$} string from the card script
+         * @param repetitions the ability's {@code Amount$}, i.e. how many times
+         *                    the produced string is repeated
+         * @return what the ability adds, or null when the string names no mana
+         */
+        static ManaOption read(String produced, int repetitions) {
+            if (produced == null) return null;
+            String trimmed = produced.trim();
+            if (trimmed.isEmpty()) return null;
+            int reps = Math.max(1, repetitions);
+
+            String[] tokens = trimmed.split("\\s+");
+            boolean combo = tokens.length > 0 && "Combo".equals(tokens[0]);
+            StringBuilder symbols = new StringBuilder();
+            for (int i = combo ? 1 : 0; i < tokens.length; i++) {
+                appendSymbols(symbols, tokens[i], combo);
+            }
+            if (symbols.length() == 0) return null;
+
+            if (!combo) {
+                StringBuilder all = new StringBuilder();
+                for (int i = 0; i < reps; i++) all.append(symbols);
+                return new ManaOption(all.toString(), all.length(), false);
+            }
+            String alternatives = normalizeChoice(symbols.toString());
+            if (alternatives.length() == 1) {
+                // One alternative is not a choice: it is that colour, reps times.
+                StringBuilder all = new StringBuilder();
+                for (int i = 0; i < reps; i++) all.append(alternatives);
+                return new ManaOption(all.toString(), reps, false);
+            }
+            return new ManaOption(alternatives, reps, true);
+        }
+
+        /**
+         * What a source with several mana abilities can add. Separate abilities
+         * are alternatives — a land taps once — so the merged view is a choice
+         * between their colours, and the amount is the most any one of them adds.
+         *
+         * @return null when the source names no mana at all
+         */
+        static ManaOption merge(List<ManaOption> options) {
+            if (options == null || options.isEmpty()) return null;
+            ManaOption firstOption = options.get(0);
+            if (options.size() == 1) return firstOption;
+
+            boolean allSame = true;
+            for (ManaOption o : options) {
+                if (o.choice != firstOption.choice || o.amount != firstOption.amount
+                        || !o.colors.equals(firstOption.colors)) {
+                    allSame = false;
+                    break;
+                }
+            }
+            if (allSame) return firstOption;
+
+            StringBuilder union = new StringBuilder();
+            int amount = 0;
+            for (ManaOption o : options) {
+                amount = Math.max(amount, o.amount);
+                for (int i = 0; i < o.colors.length(); i++) {
+                    char sym = o.colors.charAt(i);
+                    if (union.indexOf(String.valueOf(sym)) < 0) union.append(sym);
+                }
+            }
+            String alternatives = normalizeChoice(union.toString());
+            if (alternatives.length() == 1) {
+                StringBuilder all = new StringBuilder();
+                for (int i = 0; i < amount; i++) all.append(alternatives);
+                return new ManaOption(all.toString(), amount, false);
+            }
+            return new ManaOption(alternatives, amount, true);
+        }
+
+        /** Collapse a set of alternatives that already means "any colour". */
+        private static String normalizeChoice(String symbols) {
+            if (symbols.indexOf('A') >= 0) return "A";
+            boolean everyColor = true;
+            for (char color : new char[] {'W', 'U', 'B', 'R', 'G'}) {
+                if (symbols.indexOf(color) < 0) { everyColor = false; break; }
+            }
+            return everyColor ? "A" : symbols;
+        }
+
+        /** Turn one {@code Produced$} token into colour letters. */
+        private static void appendSymbols(StringBuilder out, String token, boolean dedupe) {
+            if (token == null || token.isEmpty()) return;
+            if ("Any".equals(token)) {
+                append(out, 'A', dedupe);
+                return;
+            }
+            if (token.length() == 1 && "WUBRGC".indexOf(token.charAt(0)) >= 0) {
+                append(out, token.charAt(0), dedupe);
+                return;
+            }
+            if (isNumeric(token)) {
+                // Generic mana is produced as colourless.
+                int n = Integer.parseInt(token);
+                for (int i = 0; i < n; i++) append(out, 'C', dedupe);
+                return;
+            }
+            // Chosen, ColorID, NotedColors, ColorIdentity, Special… — a real
+            // mana whose colour is not known until the ability resolves. Say so
+            // rather than drop it, which used to undercount the mana available.
+            append(out, '?', dedupe);
+        }
+
+        private static void append(StringBuilder out, char symbol, boolean dedupe) {
+            if (dedupe && out.indexOf(String.valueOf(symbol)) >= 0) return;
+            out.append(symbol);
+        }
+
+        private static boolean isNumeric(String token) {
+            for (int i = 0; i < token.length(); i++) {
+                if (!Character.isDigit(token.charAt(i))) return false;
+            }
+            return true;
+        }
     }
 
     /**

@@ -6,6 +6,7 @@ import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.llm.LLMClient;
 import forge.ai.llm.LLMConfig;
+import forge.ai.llm.LLMStrictMode;
 import forge.ai.llm.LobbyPlayerLLM;
 import forge.gui.GuiBase;
 import forge.gui.util.SOptionPane;
@@ -132,8 +133,24 @@ public final class GamePlayerUtil {
      * @param client LLMClient instance for API calls
      */
     public static LobbyPlayer createLLMPlayer(String name, LLMClient client) {
+        return createLLMPlayer(name, client, null);
+    }
+
+    /**
+     * Create an LLM-backed AI player that plays under a named AI profile.
+     *
+     * <p>The model does not decide everything on an LLM seat: the heuristic AI
+     * underneath it handles every decision the model is not asked about, and
+     * takes its dials from an {@code .ai} profile. This used to be pinned to
+     * {@code Default}, which meant no LLM seat could run a tuned profile.
+     *
+     * @param aiProfile name of a profile in {@code res/ai}; null or empty keeps
+     *                  {@code Default}
+     */
+    public static LobbyPlayer createLLMPlayer(String name, LLMClient client, String aiProfile) {
         LobbyPlayerLLM player = new LobbyPlayerLLM(name, client);
-        player.setAiProfile("Default");
+        player.setAiProfile(aiProfile == null || aiProfile.trim().isEmpty()
+                ? "Default" : aiProfile.trim());
         return player;
     }
 
@@ -147,6 +164,12 @@ public final class GamePlayerUtil {
         LLMConfig config = LLMConfig.fromProfileString(profileString, apiKey,
                 0.2, 0, debug);
         if (config == null) {
+            if (LLMStrictMode.isEnabled()) {
+                throw new IllegalStateException(LLMStrictMode.silentHeuristicSeatMessage(
+                        "'" + name + "'", profileString,
+                        "the profile could not be turned into an LLM configuration"
+                                + " (any [LLM] line printed above says which setting is missing)"));
+            }
             System.err.println("[LLM] Could not build LLMConfig from profile '"
                     + profileString + "' — falling back to heuristic AI for seat '" + name + "'.");
             return createAiPlayer(name);
@@ -159,7 +182,7 @@ public final class GamePlayerUtil {
                 + "' → " + config.getProvider() + upstream + ":" + config.getModel()
                 + " (auth=" + (hasAuth ? "ok" : "MISSING") + ", debug=" + debug + ")");
         LLMClient client = new LLMClient(config);
-        return createLLMPlayer(name, client);
+        return createLLMPlayer(name, client, LLMConfig.aiProfilePart(profileString));
     }
 
     /**

@@ -79,11 +79,14 @@ public class LLMFullController extends PlayerControllerAi {
     PhaseType planPhase = null;
     int planTurn = -1;
     int planStackSize = 0;
+    /** What the opponent's side looked like when the plan was written. */
+    String planOpponentState = null;
+    /** Which permanents the seat had when the plan was written. */
+    Set<Integer> planOwnPermanents = null;
 
-    /** D1: cached serialized game state (stable anchor for the current turn+phase). */
+    /** D1: cached serialized game state, keyed by the board it describes. */
     private String cachedGameState = null;
-    private int cachedStateTurn = -1;
-    private PhaseType cachedStatePhase = null;
+    private String cachedStateKey = null;
 
     /**
      * Per-option eval hints (PR3.c) — opt-in via {@code FORGE_LLM_EVAL_HINTS=true}.
@@ -94,14 +97,120 @@ public class LLMFullController extends PlayerControllerAi {
     static final boolean EVAL_HINTS_ENABLED = isTruthy(System.getenv("FORGE_LLM_EVAL_HINTS"));
     static final int EVAL_HINT_MAX_CANDIDATES = 6;
 
+    // =======================================================================
+    // Muzzles: which decisions the heuristic AI keeps for itself
+    // =======================================================================
+    //
+    // An "LLM seat" does not actually decide everything. Ten places below
+    // hand a decision back to the heuristic AI, either always or whenever the
+    // heuristic disagrees with the model. That is deliberate — each one was
+    // added because it won games — but it also means a run labelled "LLM" is
+    // measuring a mixture, and an experiment that wants to know what the model
+    // alone is worth has to be able to switch every one of them off.
+    //
+    // So each muzzle has its own environment variable, and FORGE_LLM_UNMUZZLED
+    // flips all of them to the model at once. An individual variable, when
+    // set, always wins over the aggregate, so one muzzle can be put back
+    // without unsetting the rest. Everything unset behaves exactly as before
+    // these switches existed.
+    //
+    //   FORGE_LLM_UNMUZZLED             off  — aggregate: give every decision below to the model
+    //   FORGE_LLM_TRUST_HEURISTIC_TOP   on   — replace the model's first plan step with the
+    //                                          heuristic's own pick whenever the two differ
+    //   FORGE_LLM_COMBAT                heuristic — who declares attackers and blockers
+    //                                          (heuristic | llm | shadow)
+    //   FORGE_LLM_TOPK                  8    — how many spell options the model gets to see
+    //                                          (0 = no cap)
+    //   FORGE_LLM_PRUNE_HOPELESS        on   — hide options the heuristic calls fundamentally bad
+    //   FORGE_LLM_SINGLE_OPTION_SHORTCUT on  — with exactly one playable spell, let the heuristic
+    //                                          decide it and skip the LLM call
+    //   FORGE_LLM_PLAN_STEP_APPROVAL    on   — re-ask the heuristic before each step of the
+    //                                          model's own plan is played
+    //   FORGE_LLM_EMPTY_PLAN_OVERRIDE   on   — when the model chose to hold, cast anyway if the
+    //                                          heuristic wants to play something
+    //   FORGE_LLM_HEURISTIC_LAND_DROPS  on   — the heuristic picks which land to play, and when
+    //   FORGE_LLM_HEURISTIC_TARGETS     on   — the heuristic decides where each spell points
+    //   FORGE_LLM_HARDCODED_PLAY_FIRST  on   — always choose to play first, without asking
+    //
+    // Truthiness for the boolean switches follows the rest of FORGE_LLM_*:
+    // anything except "0" or "false" (case-insensitive) counts as on; unset or
+    // empty falls through to the default in the list above.
+
+    /**
+     * Aggregate de-muzzle switch. Truthy means every muzzle in this block
+     * defaults to "the model decides" instead of "the heuristic decides".
+     * Declared first because the muzzle constants below read it.
+     */
+    static final boolean UNMUZZLED = isTruthy(System.getenv("FORGE_LLM_UNMUZZLED"));
+
     /**
      * Heuristic-prior pruning: cap the number of spell options shown to the
      * LLM and sort heuristic-preferred candidates first. Set
-     * {@code FORGE_LLM_TOPK=0} to disable; defaults to 8. Lower = cheaper
-     * prompts + tighter LLM attention; higher = more freedom for the LLM to
-     * disagree with the heuristic.
+     * {@code FORGE_LLM_TOPK=0} to disable; defaults to 8 (0 when unmuzzled).
+     * Lower = cheaper prompts + tighter LLM attention; higher = more freedom
+     * for the LLM to disagree with the heuristic.
      */
-    static final int HEURISTIC_TOPK = parseIntEnv("FORGE_LLM_TOPK", 8);
+    static final int HEURISTIC_TOPK = parseIntEnv("FORGE_LLM_TOPK", UNMUZZLED ? 0 : 8);
+
+    /**
+     * Drop options the heuristic gave a hopeless verdict (CantPlaySa,
+     * BadEtbEffects, DoesntImpactGame, …) before the model ever sees them.
+     * Off ({@code FORGE_LLM_PRUNE_HOPELESS=0}) keeps them in the list, ranked
+     * last, so the model can disagree with the heuristic about what is bad.
+     */
+    static final boolean PRUNE_HOPELESS = muzzleOn("FORGE_LLM_PRUNE_HOPELESS");
+
+    /**
+     * With exactly one playable spell, ask the heuristic instead of the model
+     * and skip the LLM call. Saves a call per trivial decision, but it also
+     * means the heuristic — not the model — decides every forced-looking turn.
+     * Off ({@code FORGE_LLM_SINGLE_OPTION_SHORTCUT=0}) sends the single option
+     * to the model like any other.
+     */
+    static final boolean SINGLE_OPTION_SHORTCUT = muzzleOn("FORGE_LLM_SINGLE_OPTION_SHORTCUT");
+
+    /**
+     * Re-ask the heuristic before playing each step of the model's own cached
+     * MAIN-phase plan; a step the heuristic will not endorse is skipped. Off
+     * ({@code FORGE_LLM_PLAN_STEP_APPROVAL=0}) plays the plan as written.
+     */
+    static final boolean PLAN_STEP_APPROVAL = muzzleOn("FORGE_LLM_PLAN_STEP_APPROVAL");
+
+    /**
+     * When the model returns an empty plan — it chose to hold — cast the
+     * heuristic's pick anyway if the heuristic is willing. Added because small
+     * models emit {@code plan:[]} when their reasoning truncates, but it also
+     * makes "hold everything" unreachable for a model that meant it. Off
+     * ({@code FORGE_LLM_EMPTY_PLAN_OVERRIDE=0}) honours the pass.
+     */
+    static final boolean EMPTY_PLAN_OVERRIDE = muzzleOn("FORGE_LLM_EMPTY_PLAN_OVERRIDE");
+
+    /**
+     * Let the heuristic choose which land to play and whether to hold the land
+     * drop; the model never sees land abilities. Off
+     * ({@code FORGE_LLM_HEURISTIC_LAND_DROPS=0}) lists land plays among the
+     * model's options like any other play.
+     */
+    static final boolean HEURISTIC_LAND_DROPS = muzzleOn("FORGE_LLM_HEURISTIC_LAND_DROPS");
+
+    /**
+     * Let the heuristic decide where every spell and ability points. This is
+     * not a decision the seat was ever asked for: targets are set as a side
+     * effect of the heuristic's own {@code canPlaySa} check while the option
+     * list is being built, so a burn spell's face-versus-creature choice
+     * belonged to the heuristic even on a fully "LLM" seat. Off
+     * ({@code FORGE_LLM_HEURISTIC_TARGETS=0}) the model is shown the legal
+     * targets of the ability it just chose and re-points it. See
+     * {@link LLMTargeting} for what stays with the heuristic even then.
+     */
+    static final boolean HEURISTIC_TARGETS = muzzleOn("FORGE_LLM_HEURISTIC_TARGETS");
+
+    /**
+     * Always choose to play first, without asking anyone. Off
+     * ({@code FORGE_LLM_HARDCODED_PLAY_FIRST=0}) asks the model to choose play
+     * or draw; a failed call still falls back to playing first.
+     */
+    static final boolean HARDCODED_PLAY_FIRST = muzzleOn("FORGE_LLM_HARDCODED_PLAY_FIRST");
 
     /**
      * Heuristic-prior verdict annotation: tag each option with the heuristic
@@ -128,31 +237,99 @@ public class LLMFullController extends PlayerControllerAi {
      *   <li>{@code shadow} — LLM is consulted and divergence logged via the
      *       combat shadow telemetry, but the heuristic prior is applied.</li>
      * </ul>
-     * Unset or unrecognised values normalise to {@code heuristic}.
+     * Unset or unrecognised values normalise to {@code heuristic}
+     * ({@code llm} when unmuzzled).
      */
-    static final String COMBAT_MODE = parseCombatMode(System.getenv("FORGE_LLM_COMBAT"));
+    static final String COMBAT_MODE = parseCombatMode(System.getenv("FORGE_LLM_COMBAT"),
+            UNMUZZLED ? "llm" : "heuristic");
 
     /**
-     * Heuristic-priority override: when the LLM's first plan step is anything
-     * other than the heuristic's top willingToPlay candidate, replace it with
-     * the heuristic's pick. Documented evidence (mirror-vs-heuristic eval,
-     * 4 models × 4 decks): LLM divergences from {@code pruned[0]} are
-     * uniformly net-negative, costing 25-50 percentage points vs the
-     * heuristic's mirror baseline. On by default; flip off via
+     * Heuristic-priority override: when the LLM's first plan step is not the
+     * spell the heuristic would have played, play the heuristic's spell
+     * instead. Documented evidence (mirror-vs-heuristic eval, 4 models ×
+     * 4 decks): LLM divergences from the heuristic's pick are uniformly
+     * net-negative, costing 25-50 percentage points vs the heuristic's mirror
+     * baseline. On by default; flip off via
      * {@code FORGE_LLM_TRUST_HEURISTIC_TOP=0} for A/B testing.
      */
-    static final boolean TRUST_HEURISTIC_TOP =
-            !"0".equals(System.getenv("FORGE_LLM_TRUST_HEURISTIC_TOP"))
-            && !"false".equalsIgnoreCase(System.getenv("FORGE_LLM_TRUST_HEURISTIC_TOP"));
+    static final boolean TRUST_HEURISTIC_TOP = muzzleOn("FORGE_LLM_TRUST_HEURISTIC_TOP");
 
     /**
-     * Set true around heuristic feasibility checks (canPayCost, validateAndSetTargets)
-     * so cost-paying callbacks like {@link #chooseCardsToDelve} can short-circuit
-     * with a heuristic pick instead of burning an LLM call. Per-thread because the
-     * engine is not multi-threaded per match but parallel matches each run on their
-     * own controller.
+     * How deep we are inside a heuristic feasibility check (canPayCost,
+     * {@link #validateAndSetTargets}) — a question of the form "could this be
+     * cast at all?", whose answer is thrown away. Cost-paying callbacks such as
+     * {@link #chooseCardsToDelve} check it so they answer from the heuristic
+     * instead of burning an LLM call on a spell that is not being cast.
+     *
+     * <p>A depth counter rather than a flag, and every entry paired with an
+     * exit in a {@code finally}. It used to be a boolean that call sites set to
+     * false when they were done, which is wrong two ways: an inner check
+     * finishing un-guarded the outer one it was nested inside, and any throw
+     * between the set and the reset left the flag stuck on for the rest of the
+     * game — silently turning the model back into the heuristic for every
+     * decision that consults it. Per-thread because parallel matches each run
+     * on their own controller.
      */
-    static final ThreadLocal<Boolean> IN_FEASIBILITY = ThreadLocal.withInitial(() -> false);
+    private static final ThreadLocal<Integer> FEASIBILITY_DEPTH =
+            ThreadLocal.withInitial(() -> 0);
+
+    /** True while a "could this be cast?" check is running. */
+    static boolean isCheckingFeasibility() {
+        return FEASIBILITY_DEPTH.get() > 0;
+    }
+
+    /** Open a feasibility check. Always pair with {@link #exitFeasibility()} in a finally. */
+    static void enterFeasibility() {
+        FEASIBILITY_DEPTH.set(FEASIBILITY_DEPTH.get() + 1);
+    }
+
+    /** Close a feasibility check opened by {@link #enterFeasibility()}. */
+    static void exitFeasibility() {
+        FEASIBILITY_DEPTH.set(Math.max(0, FEASIBILITY_DEPTH.get() - 1));
+    }
+
+    /**
+     * How deep we are inside a question put to the heuristic AI purely for its
+     * opinion — "would you play this?", "what would you play?" — whose answer is
+     * then discarded or revised.
+     *
+     * <p>It matters because some of those questions reach back out to this
+     * controller. A card that says the opponent chooses targets sends the
+     * heuristic's own {@code canPlaySa} through {@code chooseTargetsFor}, so
+     * without this counter a single pass over the option list could spend one
+     * LLM target call per option on abilities that are never cast. Per-thread
+     * for the same reason as {@link #isCheckingFeasibility()}: parallel matches
+     * each run on their own controller.
+     */
+    private static final ThreadLocal<Integer> HEURISTIC_CONSULT_DEPTH =
+            ThreadLocal.withInitial(() -> 0);
+
+    /** True while an answer is being collected from the heuristic AI for comparison. */
+    static boolean isConsultingHeuristic() {
+        return HEURISTIC_CONSULT_DEPTH.get() > 0;
+    }
+
+    private static void enterHeuristicConsult() {
+        HEURISTIC_CONSULT_DEPTH.set(HEURISTIC_CONSULT_DEPTH.get() + 1);
+    }
+
+    private static void exitHeuristicConsult() {
+        HEURISTIC_CONSULT_DEPTH.set(HEURISTIC_CONSULT_DEPTH.get() - 1);
+    }
+
+    /**
+     * The heuristic AI's verdict on one ability. Identical to calling
+     * {@code getAi().canPlaySa(sa)} except that it marks the call as an opinion,
+     * so nothing it reaches decides to spend an LLM call of its own.
+     */
+    AiPlayDecision askHeuristicVerdict(SpellAbility sa) {
+        enterHeuristicConsult();
+        try {
+            return getAi().canPlaySa(sa);
+        } finally {
+            exitHeuristicConsult();
+        }
+    }
 
     /** Spell-selection delegate (heuristic prior, plan caching, choose ability). */
     private final LLMSpellSelection spellSelection;
@@ -160,21 +337,47 @@ public class LLMFullController extends PlayerControllerAi {
     /** Combat delegate (declare attackers/blockers with heuristic baselines). */
     private final LLMCombat combat;
 
+    /** Target-choice delegate (re-points an ability the heuristic already targeted). */
+    private final LLMTargeting targeting;
+
     private static boolean isTruthy(String v) {
         return v != null && !v.isEmpty() && !"false".equalsIgnoreCase(v) && !"0".equals(v);
     }
 
+    /** Read one boolean muzzle switch from the environment. */
+    private static boolean muzzleOn(String envVar) {
+        return resolveMuzzle(System.getenv(envVar), UNMUZZLED);
+    }
+
+    /**
+     * Resolve one boolean muzzle switch. Every muzzle is on by default and off
+     * when the aggregate {@code FORGE_LLM_UNMUZZLED} is set; naming the
+     * variable explicitly wins over the aggregate in either direction, so a
+     * single muzzle can be restored inside an otherwise unmuzzled run.
+     * Package-private and taking its inputs as arguments so the resolution
+     * rule is testable without touching the process environment.
+     */
+    static boolean resolveMuzzle(String rawValue, boolean unmuzzled) {
+        if (rawValue != null && !rawValue.isEmpty()) return isTruthy(rawValue);
+        return !unmuzzled;
+    }
+
     private static int parseIntEnv(String name, int fallback) {
-        String v = System.getenv(name);
-        if (v == null || v.isEmpty()) return fallback;
-        try { return Integer.parseInt(v.trim()); }
+        return resolveInt(System.getenv(name), fallback);
+    }
+
+    /** @see #resolveMuzzle(String, boolean) — same reason for the argument form. */
+    static int resolveInt(String rawValue, int fallback) {
+        if (rawValue == null || rawValue.isEmpty()) return fallback;
+        try { return Integer.parseInt(rawValue.trim()); }
         catch (NumberFormatException e) { return fallback; }
     }
 
-    private static String parseCombatMode(String v) {
-        if (v == null) return "heuristic";
-        String s = v.trim().toLowerCase();
-        return ("llm".equals(s) || "shadow".equals(s) || "heuristic".equals(s)) ? s : "heuristic";
+    /** @see #resolveMuzzle(String, boolean) — same reason for the argument form. */
+    static String parseCombatMode(String rawValue, String fallback) {
+        if (rawValue == null) return fallback;
+        String s = rawValue.trim().toLowerCase();
+        return ("llm".equals(s) || "shadow".equals(s) || "heuristic".equals(s)) ? s : fallback;
     }
 
     public LLMFullController(Game game, Player p, LobbyPlayer lp, LLMClient client) {
@@ -184,6 +387,17 @@ public class LLMFullController extends PlayerControllerAi {
                 ? MAX_HISTORY_CACHED : MAX_HISTORY_UNCACHED;
         this.spellSelection = new LLMSpellSelection(this);
         this.combat = new LLMCombat(this);
+        this.targeting = new LLMTargeting(this);
+    }
+
+    /**
+     * Hand target choice for {@code sa} to the model, if that muzzle is off.
+     * Returns true when the targets changed hands; false leaves the ability
+     * exactly as the heuristic AI targeted it. Package-private so
+     * {@link LLMSpellSelection} can call it on the ability it is about to play.
+     */
+    boolean chooseTargetsWithLLM(SpellAbility sa, String callLabel) {
+        return targeting.chooseTargets(sa, callLabel);
     }
 
     /** Record an action summary for the sliding window history. */
@@ -214,28 +428,135 @@ public class LLMFullController extends PlayerControllerAi {
 
     /**
      * Build the game state text for the current decision.
-     * D1: Caches the serialized game state per (turn, phase). Multiple priority
-     * calls in the same phase reuse the same state string, which skips
-     * re-serialization CPU.
-     * D2: Despite the historical name, action history is NO longer concatenated
-     * here. The state is volatile (the model must always see it fresh), so it
-     * lives in the uncached tail of the request; the append-only history now
-     * travels in the byte-stable cached prefix block that {@link #callLLM} /
-     * {@link #callLLMRaw} attach to every request (see
+     *
+     * <p>D1: the serialized state is cached and reused while the board it
+     * describes has not moved, which skips re-serialization CPU across the
+     * several priority passes a phase normally contains.
+     *
+     * <p>The cache used to be keyed on turn and phase alone, which is not the
+     * same thing at all. A MAIN phase holds many priority passes with spells
+     * resolving between them, so from the second decision of the phase onward
+     * the model was shown the board as it stood before its own creature
+     * entered, before an opponent's removal resolved, before combat damage —
+     * and then asked what to do about it. Keying on a fingerprint of the board
+     * keeps the saving where the board really is unchanged and re-serializes
+     * the moment it is not.
+     *
+     * <p>D2: Despite the historical name, action history is NO longer
+     * concatenated here. The state is volatile (the model must always see it
+     * fresh), so it lives in the uncached tail of the request; the append-only
+     * history now travels in the byte-stable cached prefix block that
+     * {@link #callLLM} / {@link #callLLMRaw} attach to every request (see
      * {@link PromptTemplates.PromptParts}). The method name is kept so the
      * delegate call sites ({@link LLMSpellSelection}, {@link LLMCombat}) stay
      * unchanged.
      */
     String buildGameStateWithHistory() {
-        int currentTurn = getGame().getPhaseHandler().getTurn();
-        PhaseType currentPhase = getGame().getPhaseHandler().getPhase();
-        if (cachedGameState == null || cachedStateTurn != currentTurn
-                || cachedStatePhase != currentPhase) {
+        String key = boardFingerprint();
+        if (cachedGameState == null || !key.equals(cachedStateKey)) {
             cachedGameState = GameStateSerializer.serializeGameState(getPlayer(), getGame());
-            cachedStateTurn = currentTurn;
-            cachedStatePhase = currentPhase;
+            cachedStateKey = key;
         }
         return cachedGameState;
+    }
+
+    /**
+     * A short fingerprint of everything the serialized state describes: turn,
+     * phase, stack depth, and both players' life, zone sizes and permanents.
+     *
+     * <p>Deliberately not a full serialization — no oracle text, no names, no
+     * formatting — so it is cheap enough to compute on every decision. Two
+     * boards with the same fingerprint produce the same state text.
+     */
+    private String boardFingerprint() {
+        StringBuilder sb = new StringBuilder(128);
+        sb.append(getGame().getPhaseHandler().getTurn()).append('|')
+          .append(getGame().getPhaseHandler().getPhase()).append('|')
+          .append(getGame().getStack().size());
+        for (Player p : getGame().getPlayers()) {
+            sb.append("|P").append(p.getId());
+            appendPlayerFingerprint(sb, p);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Fingerprint of one player's visible position: life, zone sizes, and every
+     * permanent with the state that can change without it leaving the
+     * battlefield.
+     */
+    private static void appendPlayerFingerprint(StringBuilder sb, Player p) {
+        sb.append(':').append(p.getLife())
+          .append('/').append(p.getCardsIn(ZoneType.Hand).size())
+          .append('/').append(p.getCardsIn(ZoneType.Library).size())
+          .append('/').append(p.getCardsIn(ZoneType.Graveyard).size())
+          .append('/').append(p.getCardsIn(ZoneType.Exile).size());
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            sb.append(',').append(c.getId());
+            if (c.isTapped()) sb.append('t');
+            if (c.isSick()) sb.append('s');
+            sb.append(c.getNetPower()).append('/').append(c.getNetToughness());
+            int counters = totalCounters(c);
+            if (counters != 0) sb.append('+').append(counters);
+        }
+    }
+
+    private static int totalCounters(Card c) {
+        if (!c.hasCounters()) return 0;
+        int total = 0;
+        for (Integer n : c.getCounters().values()) {
+            if (n != null) total += n;
+        }
+        return total;
+    }
+
+    /**
+     * Fingerprint of the opponent's side of the board, plus the number of
+     * spells they have cast. Used to tell whether a cached multi-step plan is
+     * still a plan about this game: the seat knows what its own steps will do,
+     * but nothing in the plan anticipates the opponent countering, removing a
+     * blocker, or pumping in response.
+     *
+     * <p>Their life is deliberately absent — the seat's own burn spell changes
+     * it, and re-planning after every point of damage would defeat the plan
+     * entirely. Everything here moves only when the opponent does something.
+     */
+    String opponentBoardState() {
+        StringBuilder sb = new StringBuilder(96);
+        for (Player p : getGame().getPlayers()) {
+            if (p == getPlayer()) continue;
+            sb.append('|').append(p.getId()).append(':').append(p.getSpellsCastThisGame())
+              .append('/').append(p.getCardsIn(ZoneType.Hand).size())
+              .append('/').append(p.getCardsIn(ZoneType.Graveyard).size());
+            for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+                sb.append(',').append(c.getId());
+                if (c.isTapped()) sb.append('t');
+                sb.append(c.getNetPower()).append('/').append(c.getNetToughness());
+                int counters = totalCounters(c);
+                if (counters != 0) sb.append('+').append(counters);
+            }
+        }
+        return sb.toString();
+    }
+
+    /** The permanents the seat controls right now, by card id. */
+    Set<Integer> ownPermanentIds() {
+        Set<Integer> ids = new java.util.HashSet<>();
+        for (Card c : getPlayer().getCardsIn(ZoneType.Battlefield)) {
+            ids.add(c.getId());
+        }
+        return ids;
+    }
+
+    /**
+     * Whether every permanent the seat had at {@code since} is still on the
+     * battlefield. Additions are ignored, because casting things is exactly
+     * what a plan does; a permanent that has left is not something the plan
+     * accounted for.
+     */
+    boolean ownPermanentsIntact(Set<Integer> since) {
+        if (since == null || since.isEmpty()) return true;
+        return ownPermanentIds().containsAll(since);
     }
 
     // =======================================================================
@@ -277,7 +598,7 @@ public class LLMFullController extends PlayerControllerAi {
             // it has no legal target on the current stack/board.
             CardCollection cards = ComputerUtilAbility.getAvailableCards(getGame(), getPlayer());
             List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, getPlayer());
-            IN_FEASIBILITY.set(true);
+            enterFeasibility();
             try {
                 for (SpellAbility sa : candidates) {
                     if (sa.isManaAbility() || sa.isLandAbility()) continue;
@@ -289,11 +610,10 @@ public class LLMFullController extends PlayerControllerAi {
                     }
                 }
             } finally {
-                IN_FEASIBILITY.set(false);
+                exitFeasibility();
             }
             return false;
         } catch (Exception e) {
-            IN_FEASIBILITY.set(false);
             return false;
         }
     }
@@ -325,7 +645,8 @@ public class LLMFullController extends PlayerControllerAi {
                 if (client.isDebug()) {
                     System.err.println("[LLM FALLBACK] " + callLabel + ": parse failed");
                 }
-                client.recordFallback();
+                client.recordFallback(getPlayer().getName(), callLabel
+                        + ": answer held no usable option index (" + numOptions + " options offered)");
                 return -1;
             }
             return choice;
@@ -334,9 +655,32 @@ public class LLMFullController extends PlayerControllerAi {
                 System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
                         + " - " + e.getMessage());
             }
-            client.recordFallback();
+            client.recordFallback(getPlayer().getName(), describeFailure(callLabel, e));
             return -1;
         }
+    }
+
+    /**
+     * Failure text recorded with a fallback. Wider than the debug line on
+     * purpose: {@link LLMException} often wraps a cause whose own message is the
+     * only useful part (a bare connection refusal arrives with a null message),
+     * and this string is what strict mode prints as its whole explanation.
+     */
+    private static String describeFailure(String callLabel, Exception e) {
+        StringBuilder sb = new StringBuilder(callLabel).append(": ")
+                .append(e.getClass().getSimpleName());
+        if (e.getMessage() != null && !e.getMessage().isEmpty()) {
+            sb.append(" - ").append(e.getMessage());
+        }
+        Throwable cause = e.getCause();
+        if (cause != null) {
+            sb.append(" (cause: ").append(cause.getClass().getName());
+            if (cause.getMessage() != null && !cause.getMessage().isEmpty()) {
+                sb.append(": ").append(cause.getMessage());
+            }
+            sb.append(')');
+        }
+        return sb.toString();
     }
 
     /**
@@ -368,20 +712,45 @@ public class LLMFullController extends PlayerControllerAi {
                 System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
                         + " - " + e.getMessage());
             }
-            client.recordFallback();
+            client.recordFallback(getPlayer().getName(), describeFailure(callLabel, e));
             return null;
         }
     }
 
     /**
-     * Use the heuristic AI's targeting logic to set up targets on the given SA.
-     * Returns true if targeting succeeded (or no targeting is needed).
+     * Ask the heuristic AI to point {@code sa} at something, and report whether
+     * it now has a legal, complete set of targets. Used to keep spells that
+     * cannot legally be cast out of the option list the model chooses from.
+     *
+     * <p>Targeting is a side effect of the heuristic's {@code canPlaySa}: it
+     * sets targets while working out whether it wants to cast the spell. That
+     * makes the verdict and the targets arrive together, and the two have to be
+     * kept apart, because "the heuristic would rather not cast this" and "this
+     * spell has nothing legal to point at" are different answers and only the
+     * second one should hide an option from the model.
+     *
+     * <p>So a verdict short of {@code WillPlay} is not by itself a refusal
+     * here: the option stays if it is really targeted, and
+     * {@link LLMSpellSelection#applyHeuristicPrior} sorts and (by default)
+     * prunes on the verdict afterwards. What changed on 2026-08-15 is which
+     * targets count as "really targeted". Abilities are long-lived objects that
+     * are re-examined every time priority comes round, so an ability could
+     * arrive already carrying targets chosen several priority passes ago —
+     * possibly at a creature that has since died. The old check asked
+     * {@code isTargetNumberValid()} without clearing those first, so a spell
+     * the heuristic had just declined to target at all was offered to the model
+     * on the strength of a stale answer. Clearing first means the question is
+     * about the targets the heuristic chose this time, or none.
+     *
+     * @return true when the ability needs no targets, or has a full set chosen
+     *         during this call
      */
     boolean validateAndSetTargets(SpellAbility sa) {
         if (!sa.usesTargeting()) {
             return true;
         }
 
+        enterFeasibility();
         try {
             sa.setActivatingPlayer(getPlayer());
             SpellAbility root = sa.getRootAbility();
@@ -390,24 +759,49 @@ public class LLMFullController extends PlayerControllerAi {
                 sa.setLastStateGraveyard(getGame().getLastStateGraveyard());
             }
 
-            AiPlayDecision decision = getAi().canPlaySa(sa);
+            // Discard any targets left over from an earlier priority pass, so
+            // what the check below sees is this call's work and nothing else.
+            sa.resetTargets();
+            AiPlayDecision decision = askHeuristicVerdict(sa);
             sa.clearLastState();
 
-            if (decision == AiPlayDecision.WillPlay) {
-                return true;
-            }
-            if (decision == AiPlayDecision.TargetingFailed) {
-                return false;
-            }
-            // Strategic refusal — targets may have been set as a side effect
-            return sa.isTargetNumberValid();
+            return acceptTargetedOption(decision, sa.isTargetNumberValid());
         } catch (Exception e) {
             sa.clearLastState();
             if (client.isDebug()) {
                 System.err.println("[LLM] validateAndSetTargets failed: " + e.getMessage());
             }
             return false;
+        } finally {
+            exitFeasibility();
         }
+    }
+
+    /**
+     * Whether a targeted ability the heuristic AI has just looked at belongs in
+     * the option list shown to the model.
+     *
+     * <p>Split out from {@link #validateAndSetTargets(SpellAbility)} because it
+     * is the whole rule, and because it can be checked directly this way.
+     *
+     * @param decision        the heuristic's verdict on playing the ability
+     * @param targetsComplete whether the ability now has a full, legal set of
+     *                        targets, asked after any earlier ones were cleared
+     */
+    static boolean acceptTargetedOption(AiPlayDecision decision, boolean targetsComplete) {
+        if (decision == AiPlayDecision.WillPlay) {
+            // The heuristic wants to cast it; whatever targeting it still needs
+            // it will do when the spell is actually played.
+            return true;
+        }
+        if (decision == AiPlayDecision.TargetingFailed) {
+            return false;
+        }
+        // Every other verdict is a strategic refusal, not a statement that the
+        // spell has nowhere legal to point. The model is allowed to disagree
+        // with a refusal, so the option survives — but only if the heuristic
+        // really targeted it during this call.
+        return targetsComplete;
     }
 
     // =======================================================================
@@ -671,9 +1065,20 @@ public class LLMFullController extends PlayerControllerAi {
         return spellSelection.chooseSpellAbilityToPlay();
     }
 
-    /** Default heuristic spell selection — exposed so {@link LLMSpellSelection} can fall back to it. */
+    /**
+     * Default heuristic spell selection — exposed so {@link LLMSpellSelection}
+     * can fall back to it, and so it can ask what the heuristic would do. Marked
+     * as a heuristic consultation for the duration: whatever the caller does
+     * with the answer, nothing reached along the way should spend an LLM call
+     * of its own (see {@link #isConsultingHeuristic()}).
+     */
     List<SpellAbility> defaultChooseSpellAbilityToPlay() {
-        return super.chooseSpellAbilityToPlay();
+        enterHeuristicConsult();
+        try {
+            return super.chooseSpellAbilityToPlay();
+        } finally {
+            exitHeuristicConsult();
+        }
     }
 
 
@@ -681,16 +1086,27 @@ public class LLMFullController extends PlayerControllerAi {
     // Mulligan
     // =======================================================================
 
+    /**
+     * Keep or mulligan the opening hand.
+     *
+     * <p>There used to be an auto-keep in front of this: a seven-card hand with
+     * two to four lands and one spell costing three or less was kept without
+     * asking anybody. It was deleted on 2026-08-15 because it could not tell
+     * whether the lands cast the spell. Three Islands and a Lightning Bolt met
+     * every one of its conditions, so a hand that cannot cast a single card was
+     * auto-kept, and it fired first — ahead of both the model and the
+     * heuristic's own evaluator, on the majority of opening hands.
+     *
+     * <p>Nothing was lost by removing it. {@code ComputerUtil.evaluateHand},
+     * whose verdict is already offered to the model here as a baseline, checks
+     * every colour each land can produce against the coloured pips of every
+     * spell and mulligans a hand whose mana cannot cast most of it; it is also
+     * deck-aware, where the auto-keep's "2 to 4 lands" was a constant. The cost
+     * is one LLM call per opening hand, against the fifty-odd a game already
+     * spends, for the single decision with the largest effect on the game.
+     */
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn) {
-        // A4: Auto-keep obvious 7-card hands. 2-4 lands + ≥1 cheap spell is a
-        // standard "keep" for any reasonable player; no need to spend an LLM call.
-        CardCollectionView hand = getPlayer().getCardsIn(ZoneType.Hand);
-        if (hand.size() == 7 && isObviousKeep(hand)) {
-            recordAction("Auto-kept opening hand");
-            return true;
-        }
-
         // Heuristic prior: surface ComputerUtil.wantMulligan()'s verdict as a
         // baseline annotation in the prompt — symmetric counterpart to the
         // attack/block priors. Failure → no annotation, prompt runs as before.
@@ -719,15 +1135,6 @@ public class LLMFullController extends PlayerControllerAi {
         }
         recordAction(keep ? "Kept opening hand" : "Mulliganed");
         return keep;
-    }
-
-    private boolean isObviousKeep(CardCollectionView hand) {
-        int lands = 0, cheapSpells = 0;
-        for (Card c : hand) {
-            if (c.isLand()) lands++;
-            else if (c.getCMC() <= 3) cheapSpells++;
-        }
-        return lands >= 2 && lands <= 4 && cheapSpells >= 1;
     }
 
     @Override
@@ -914,7 +1321,13 @@ public class LLMFullController extends PlayerControllerAi {
         // the heuristic pick (cheapest cards first by simple grave order) for
         // feasibility; the real LLM call still fires when the spell actually
         // resolves and the choice matters.
-        if (IN_FEASIBILITY.get()) {
+        //
+        // The same is true one level up: while the heuristic AI is being asked
+        // what it would play, any delve cost it prices is hypothetical too. That
+        // route was not covered until 2026-08-15, so every consultation of the
+        // heuristic's own selection with a delve card in hand could spend a call
+        // on a spell nobody was casting.
+        if (isCheckingFeasibility() || isConsultingHeuristic()) {
             int take = Math.min(genericAmount, grave.size());
             CardCollection picked = new CardCollection();
             for (int i = 0; i < take; i++) picked.add(grave.get(i));
@@ -1340,14 +1753,56 @@ public class LLMFullController extends PlayerControllerAi {
         return chooseFromGenericList(allTargets, "Choose target");
     }
 
+    /**
+     * Where a triggered, copied or otherwise engine-driven ability points.
+     *
+     * <p>The inherited version asks the heuristic AI's {@code doTrigger}, which
+     * both decides whether to use the ability and sets its targets. Keep that —
+     * it is the only thing that knows whether the ability is worth using at all
+     * — then let the model re-point the result. With
+     * {@code FORGE_LLM_HEURISTIC_TARGETS} on (the default) this is exactly the
+     * inherited behaviour.
+     */
+    @Override
+    public boolean chooseTargetsFor(SpellAbility currentAbility) {
+        boolean heuristicTargeted = super.chooseTargetsFor(currentAbility);
+        if (!heuristicTargeted) {
+            // The heuristic found no targets it would accept. There is nothing
+            // to re-point, and overriding that verdict would put an ability on
+            // the stack the seat never decided to use.
+            return false;
+        }
+        chooseTargetsWithLLM(currentAbility, "chooseTargetsFor");
+        return true;
+    }
+
     // =======================================================================
     // Starting player / hand
     // =======================================================================
 
     @Override
     public Player chooseStartingPlayer(boolean isFirstgame) {
-        // Always choose to play first
-        return getPlayer();
+        // Muzzle: FORGE_LLM_HARDCODED_PLAY_FIRST (on by default) always chooses
+        // to play first without asking. Off, the model chooses play or draw —
+        // a real decision in Pauper, where several decks want the extra card.
+        // Any failure (no client, bad answer) keeps today's play-first answer.
+        if (HARDCODED_PLAY_FIRST || client == null) {
+            return getPlayer();
+        }
+        Player opponent = null;
+        for (Player p : getGame().getPlayers()) {
+            if (!p.equals(getPlayer())) {
+                opponent = p;
+                break;
+            }
+        }
+        if (opponent == null) {
+            return getPlayer();
+        }
+        int chosen = callLLM(PromptTemplates.startingPlayer(isFirstgame), 2, "chooseStartingPlayer");
+        boolean playFirst = chosen != 1;
+        recordAction(playFirst ? "Chose to play first" : "Chose to draw first");
+        return playFirst ? getPlayer() : opponent;
     }
 
     @Override

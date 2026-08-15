@@ -43,31 +43,57 @@ final class LLMSpellSelection {
             // filters to only instant-speed playable spells during non-MAIN phases
         }
 
-        // Delegate land drops to heuristic (no benefit from LLM deciding which basic to play),
-        // but ONLY the land drop — don't let heuristic also choose spells.
-        // After the land resolves, the engine loops and calls us again for spell decisions.
-        CardCollection landsWannaPlay = ComputerUtilAbility.getAvailableLandsToPlay(ctrl.getGame(), ctrl.getPlayer());
-        if (landsWannaPlay != null && !landsWannaPlay.isEmpty()) {
-            List<SpellAbility> heuristicChoice = ctrl.defaultChooseSpellAbilityToPlay();
-            if (heuristicChoice != null && !heuristicChoice.isEmpty()
-                    && heuristicChoice.get(0).isLandAbility()) {
-                return heuristicChoice; // Play just the land; engine will call us again for spells
+        // Muzzle: FORGE_LLM_HEURISTIC_LAND_DROPS (on by default) delegates land
+        // drops to the heuristic — which land, and whether to hold it for MAIN2 —
+        // but ONLY the land drop; don't let the heuristic also choose spells.
+        // After the land resolves, the engine loops and calls us again for spells.
+        // Off, the block is skipped and land plays are listed as ordinary options
+        // below, so the model owns the whole decision.
+        if (LLMFullController.HEURISTIC_LAND_DROPS) {
+            CardCollection landsWannaPlay = ComputerUtilAbility.getAvailableLandsToPlay(ctrl.getGame(), ctrl.getPlayer());
+            if (landsWannaPlay != null && !landsWannaPlay.isEmpty()) {
+                List<SpellAbility> heuristicChoice = ctrl.defaultChooseSpellAbilityToPlay();
+                if (heuristicChoice != null && !heuristicChoice.isEmpty()
+                        && heuristicChoice.get(0).isLandAbility()) {
+                    return heuristicChoice; // Play just the land; engine will call us again for spells
+                }
+                // Heuristic decided not to play a land (e.g., holding for MAIN2) — fall through to LLM
             }
-            // Heuristic decided not to play a land (e.g., holding for MAIN2) — fall through to LLM
         }
 
         CardCollection cards = ComputerUtilAbility.getAvailableCards(ctrl.getGame(), ctrl.getPlayer());
         List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, ctrl.getPlayer());
 
         List<SpellAbility> playable = new ArrayList<>();
-        LLMFullController.IN_FEASIBILITY.set(true);
+        LLMFullController.enterFeasibility();
         try {
             for (SpellAbility sa : candidates) {
-                // Filter out mana abilities and land abilities — engine handles these automatically
-                if (sa.isManaAbility() || sa.isLandAbility()) {
+                // Filter out mana abilities — the engine handles these automatically.
+                // Land abilities are filtered too while the heuristic owns land
+                // drops (see the muzzle above); when it doesn't, they stay in the
+                // list so the model can choose to play a land or not.
+                if (sa.isManaAbility()) {
+                    continue;
+                }
+                if (sa.isLandAbility() && LLMFullController.HEURISTIC_LAND_DROPS) {
                     continue;
                 }
                 sa.setActivatingPlayer(ctrl.getPlayer());
+                if (sa.isLandAbility()) {
+                    // Land plays cost nothing and target nothing, so the spell
+                    // checks below say nothing about them. canPlay() is the one
+                    // that matters: it enforces "your turn, sorcery speed, land
+                    // drop not used yet". Offering a land the engine would then
+                    // refuse would hand priority straight back and spin.
+                    try {
+                        if (sa.canPlay()) {
+                            playable.add(sa);
+                        }
+                    } catch (Exception e) {
+                        // Skip
+                    }
+                    continue;
+                }
                 try {
                     // Phase-legality filter: at non-MAIN we got transcripts of sorceries
                     // (e.g. Lórien Revealed) leaking into the option list during own
@@ -90,7 +116,7 @@ final class LLMSpellSelection {
                 }
             }
         } finally {
-            LLMFullController.IN_FEASIBILITY.set(false);
+            LLMFullController.exitFeasibility();
         }
 
         if (playable.isEmpty()) {
@@ -100,19 +126,25 @@ final class LLMSpellSelection {
 
         // A1: PASS+1 short-circuit. With one option, trust the heuristic's
         // canPlaySa() answer instead of paying for an LLM call.
-        if (playable.size() == 1) {
+        // Muzzle: FORGE_LLM_SINGLE_OPTION_SHORTCUT (on by default). It saves a
+        // call per forced-looking turn, but "cast it or hold it" with one card
+        // in hand is a real decision and the heuristic is making it. Off, the
+        // single option goes to the model like any other list.
+        if (playable.size() == 1 && LLMFullController.SINGLE_OPTION_SHORTCUT) {
             SpellAbility only = playable.get(0);
+            if (only.isLandAbility()) {
+                // Reachable only when the model owns land drops; the heuristic
+                // has no verdict for a land play, so just take it.
+                return commit(only, phase);
+            }
             AiPlayDecision decision;
             try {
-                decision = ctrl.getAi().canPlaySa(only);
+                decision = ctrl.askHeuristicVerdict(only);
             } catch (Exception e) {
                 decision = AiPlayDecision.WillPlay;
             }
             if (decision == AiPlayDecision.WillPlay) {
-                recordSpellAction(only, phase);
-                List<SpellAbility> result = new ArrayList<>();
-                result.add(only);
-                return result;
+                return commit(only, phase);
             }
             return null; // heuristic refuses → PASS
         }
@@ -134,10 +166,7 @@ final class LLMSpellSelection {
         if (isMainPhase) {
             SpellAbility planned = popValidPlanStep(pruned, phase);
             if (planned != null) {
-                recordSpellAction(planned, phase);
-                List<SpellAbility> result = new ArrayList<>();
-                result.add(planned);
-                return result;
+                return commit(planned, phase);
             }
 
             // No valid cached plan — request a new one.
@@ -160,72 +189,79 @@ final class LLMSpellSelection {
                 ctrl.planPhase = phase;
                 ctrl.planTurn = ctrl.getGame().getPhaseHandler().getTurn();
                 ctrl.planStackSize = ctrl.getGame().getStack().size();
+                ctrl.planOpponentState = ctrl.opponentBoardState();
+                ctrl.planOwnPermanents = ctrl.ownPermanentIds();
 
-                // Heuristic-priority override (aggressive): when the LLM's
-                // first plan step is anything other than pruned[0] AND
-                // pruned[0] is willingToPlay, replace with pruned[0].
+                // Muzzle: FORGE_LLM_TRUST_HEURISTIC_TOP (on by default).
+                // When the model's first plan step is not the spell the
+                // heuristic would have played, play the heuristic's spell.
                 //
-                // Why aggressive: mirror-eval transcripts show the LLM's
+                // Why so aggressive: mirror-eval transcripts show the model's
                 // dominant failure mode is reordering WITHIN the WillPlay
-                // bucket (e.g. picking Lunarch Veteran when heuristic prefers
-                // Novice Inspector — both willingToPlay) and these reorderings
-                // cost ~25-50 percentage points vs the heuristic mirror
-                // baseline. A narrower verdict-class check (only catch
-                // wait/weak picks) misses every such case. Restricting the
-                // LLM to pruned[0] when a clear "play this" exists eliminates
-                // the cost; the LLM keeps influence when the heuristic itself
-                // is uncertain (no willingToPlay → LLM gets full agency)
-                // and when it returns plan:[] (existing empty-plan path).
+                // bucket (e.g. picking Lunarch Veteran when the heuristic
+                // prefers Novice Inspector — both willingToPlay) and these
+                // reorderings cost ~25-50 percentage points against the
+                // heuristic mirror baseline. A narrower verdict-class check
+                // (only catch wait/weak picks) misses every such case. The
+                // model keeps influence when the heuristic itself has nothing
+                // it wants to play, and when it returns plan:[] (the
+                // empty-plan path below).
                 //
-                // Toggle off via FORGE_LLM_TRUST_HEURISTIC_TOP=0 to restore
-                // pre-fix behaviour.
+                // What "the heuristic's pick" means here: askHeuristicPick()
+                // runs the heuristic's own full selection, the same one the
+                // fallback paths use. It is NOT pruned.get(0). pruned is
+                // ordered by verdict class only — WillPlay first, then wait,
+                // then weak — and within a class the order is whatever order
+                // the cards came out of hand. So pruned.get(0) is "the first
+                // card in hand the heuristic would be willing to play", which
+                // in a hand with two playable creatures is frequently not the
+                // one the heuristic would actually cast. Until 2026-08-15 the
+                // veto substituted pruned.get(0), so it was not comparing the
+                // model against the heuristic at all, and a run with the veto
+                // on was not playing the heuristic's game.
                 if (!planIndices.isEmpty() && !pruned.isEmpty()
                         && LLMFullController.TRUST_HEURISTIC_TOP) {
                     int firstIdx = planIndices.get(0);
-                    if (firstIdx > 0 && firstIdx < pruned.size()) {
-                        SpellAbility heurTop = pruned.get(0);
-                        AiPlayDecision heurVerdict;
-                        try {
-                            heurVerdict = ctrl.getAi().canPlaySa(heurTop);
-                        } catch (Exception e) {
-                            heurVerdict = null;
-                        }
-                        if (heurVerdict != null && heurVerdict.willingToPlay()) {
-                            SpellAbility llmFirst = pruned.get(firstIdx);
+                    if (firstIdx >= 0 && firstIdx < pruned.size()) {
+                        SpellAbility llmFirst = pruned.get(firstIdx);
+                        SpellAbility heurPick = askHeuristicPick();
+                        if (heurPick != null && heurPick != llmFirst
+                                && !sameCard(heurPick, llmFirst)) {
                             if (ctrl.client.isDebug()) {
                                 System.err.println("[LLM] LLM picked "
-                                        + llmFirst.getHostCard().getName()
-                                        + " over heuristic top "
-                                        + heurTop.getHostCard().getName()
-                                        + " (WillPlay) → overriding with heuristic pick");
+                                        + nameOrNull(llmFirst)
+                                        + " over heuristic pick "
+                                        + nameOrNull(heurPick)
+                                        + " → overriding with heuristic pick");
                             }
                             ctrl.mainPhasePlan.clear();
-                            ctrl.mainPhasePlan.addLast(heurTop.getHostCard().getName());
-                            recordSpellAction(heurTop, phase);
-                            List<SpellAbility> result = new ArrayList<>();
-                            result.add(heurTop);
-                            return result;
+                            Card heurHost = heurPick.getHostCard();
+                            if (heurHost != null) {
+                                ctrl.mainPhasePlan.addLast(heurHost.getName());
+                            }
+                            return commit(heurPick, phase);
                         }
                     }
                 }
 
                 SpellAbility firstStep = popValidPlanStep(pruned, phase);
                 if (firstStep != null) {
-                    recordSpellAction(firstStep, phase);
-                    List<SpellAbility> result = new ArrayList<>();
-                    result.add(firstStep);
-                    return result;
+                    return commit(firstStep, phase);
                 }
-                // Empty plan recovery: small models occasionally emit "plan":[]
-                // even when a clear play exists (transcripts show this happens
-                // when reasoning truncates into ellipsis garbage). If the
-                // heuristic strongly recommends pruned[0] (verdict.willingToPlay),
-                // override the LLM's PASS — it's almost certainly a model glitch.
-                if (planIndices.isEmpty() && !pruned.isEmpty()) {
+                // Muzzle: FORGE_LLM_EMPTY_PLAN_OVERRIDE (on by default).
+                // Small models occasionally emit "plan":[] even when a clear
+                // play exists (transcripts show this happens when reasoning
+                // truncates into ellipsis garbage). If the heuristic strongly
+                // recommends pruned[0] (verdict.willingToPlay), override the
+                // model's PASS — it's most likely a model glitch. The cost is
+                // that a model which meant to hold everything cannot: off
+                // (FORGE_LLM_EMPTY_PLAN_OVERRIDE=0) the pass is honoured.
+                if (planIndices.isEmpty() && !pruned.isEmpty()
+                        && LLMFullController.EMPTY_PLAN_OVERRIDE) {
                     SpellAbility heuristicTop = pruned.get(0);
                     AiPlayDecision verdict;
                     try {
-                        verdict = ctrl.getAi().canPlaySa(heuristicTop);
+                        verdict = ctrl.askHeuristicVerdict(heuristicTop);
                     } catch (Exception e) {
                         verdict = null;
                     }
@@ -235,10 +271,7 @@ final class LLMSpellSelection {
                                     + heuristicTop.getHostCard().getName()
                                     + " → recovering with heuristic top pick");
                         }
-                        recordSpellAction(heuristicTop, phase);
-                        List<SpellAbility> result = new ArrayList<>();
-                        result.add(heuristicTop);
-                        return result;
+                        return commit(heuristicTop, phase);
                     }
                 }
                 // No matches and heuristic doesn't push back → honour PASS.
@@ -265,11 +298,59 @@ final class LLMSpellSelection {
 
         SpellAbility selectedSa = pruned.get(chosen);
         logShadowMode("chooseSpellAbilityToPlay", pruned, Collections.singletonList(chosen));
-        recordSpellAction(selectedSa, phase);
+        return commit(selectedSa, phase);
+    }
 
+    /**
+     * Hand back the ability the seat has settled on.
+     *
+     * <p>Two things happen here and the order matters. The targets are decided
+     * first — the muzzle {@code FORGE_LLM_HEURISTIC_TARGETS} decides whether
+     * that is the heuristic's existing choice or a fresh one from the model —
+     * and only then is the action written into the history, so the history line
+     * names the target that will actually be used.
+     */
+    private List<SpellAbility> commit(SpellAbility sa, PhaseType phase) {
+        ctrl.chooseTargetsWithLLM(sa, "spellTargets");
+        recordSpellAction(sa, phase);
         List<SpellAbility> result = new ArrayList<>();
-        result.add(selectedSa);
+        result.add(sa);
         return result;
+    }
+
+    /**
+     * The spell the heuristic AI would actually cast right now, or null if it
+     * would pass or would play a land. This runs the heuristic's own full
+     * selection — the same call the fallback paths use — rather than reading
+     * an entry out of the pruned option list, because the pruned list is
+     * ordered by verdict class and not by the heuristic's preference within a
+     * class. Any failure reads as "the heuristic has no pick", which leaves
+     * the model's choice standing.
+     */
+    private SpellAbility askHeuristicPick() {
+        List<SpellAbility> choice;
+        try {
+            choice = ctrl.defaultChooseSpellAbilityToPlay();
+        } catch (Exception e) {
+            return null;
+        }
+        if (choice == null || choice.isEmpty()) return null;
+        SpellAbility pick = choice.get(0);
+        if (pick == null || pick.isLandAbility()) return null;
+        return pick;
+    }
+
+    /**
+     * Whether two spell abilities are the same physical card. Identity on the
+     * host card, not on the ability: the heuristic's selection rebuilds its own
+     * ability objects, and alternative-cost variants of one card are separate
+     * objects too, so comparing abilities would report a disagreement where
+     * there is none.
+     */
+    private static boolean sameCard(SpellAbility a, SpellAbility b) {
+        if (a == null || b == null) return false;
+        Card hostA = a.getHostCard();
+        return hostA != null && hostA == b.getHostCard();
     }
 
     /**
@@ -307,9 +388,17 @@ final class LLMSpellSelection {
         List<String> weakTags = new ArrayList<>();
 
         for (SpellAbility sa : playable) {
+            if (sa.isLandAbility()) {
+                // Reachable only when the model owns land drops. The heuristic
+                // has no canPlaySa verdict for a land play, so don't ask for
+                // one — rank it with the plays the heuristic wants.
+                wants.add(sa);
+                wantsTags.add("PlayLand");
+                continue;
+            }
             AiPlayDecision verdict;
             try {
-                verdict = ctrl.getAi().canPlaySa(sa);
+                verdict = ctrl.askHeuristicVerdict(sa);
             } catch (Exception e) {
                 verdict = null;
             }
@@ -325,8 +414,15 @@ final class LLMSpellSelection {
                 waits.add(sa);
                 waitsTags.add(verdict.toString());
             } else if (isHopelessVerdict(verdict)) {
-                // Drop entirely — heuristic considers this fundamentally bad.
-                continue;
+                // Muzzle: FORGE_LLM_PRUNE_HOPELESS (on by default). The
+                // heuristic considers this fundamentally bad, so the model
+                // never sees it — cheaper prompts, but the model also cannot
+                // disagree. Off, it stays in the list ranked last.
+                if (LLMFullController.PRUNE_HOPELESS) {
+                    continue;
+                }
+                weak.add(sa);
+                weakTags.add(verdict.toString());
             } else {
                 weak.add(sa);
                 weakTags.add(verdict.toString());
@@ -441,9 +537,29 @@ final class LLMSpellSelection {
     }
 
     /**
-     * B1: Pop the next step from the cached MAIN-phase plan, if the plan is
-     * still valid for the current turn/phase and the planned card still exists
-     * in {@code playable}. Returns null if the plan is stale or empty.
+     * B1: Pop the next step from the cached MAIN-phase plan, if the plan still
+     * describes this game and the planned card is still in {@code playable}.
+     * Returns null if the plan is stale or empty, which sends the caller back
+     * for a fresh plan against the board as it is now.
+     *
+     * <p>A plan is a sequence of casts written from one look at the board, and
+     * it is played out over several priority passes. Between those passes the
+     * opponent gets priority. Until 2026-08-15 the only things that ended a
+     * plan early were a change of turn or phase and a stack that had grown, so
+     * an opponent who countered the first spell, killed the creature the second
+     * one was going to pump, or bounced the permanent the third one needed, saw
+     * the rest of the plan played out anyway — every step of it chosen against
+     * a board that no longer existed. Their spell had resolved by the time the
+     * seat next had priority, so the stack was empty again and the plan looked
+     * fine.
+     *
+     * <p>What is checked now is everything the plan could not have anticipated:
+     * anything the opponent did ({@link LLMFullController#opponentBoardState()})
+     * and any permanent of the seat's own that has left the battlefield. What
+     * is not checked is the seat's own additions and the opponent's life total,
+     * because those are the plan doing what it said it would do; invalidating
+     * on them would cost a fresh LLM call after every step and leave no plan
+     * batching at all.
      */
     private SpellAbility popValidPlanStep(List<SpellAbility> playable, PhaseType phase) {
         if (ctrl.mainPhasePlan.isEmpty()) return null;
@@ -455,13 +571,36 @@ final class LLMSpellSelection {
             ctrl.mainPhasePlan.clear();
             return null;
         }
+        if (ctrl.planOpponentState != null
+                && !ctrl.planOpponentState.equals(ctrl.opponentBoardState())) {
+            if (ctrl.client.isDebug()) {
+                System.err.println("[LLM] opponent acted since the plan was made → replanning");
+            }
+            ctrl.mainPhasePlan.clear();
+            return null;
+        }
+        if (!ctrl.ownPermanentsIntact(ctrl.planOwnPermanents)) {
+            if (ctrl.client.isDebug()) {
+                System.err.println("[LLM] a permanent the plan counted on has left → replanning");
+            }
+            ctrl.mainPhasePlan.clear();
+            return null;
+        }
 
         while (!ctrl.mainPhasePlan.isEmpty()) {
             String targetName = ctrl.mainPhasePlan.pollFirst();
             SpellAbility match = findByCardName(playable, targetName);
             if (match == null) continue; // card no longer playable, try next
+            // Muzzle: FORGE_LLM_PLAN_STEP_APPROVAL (on by default). Every step
+            // of the model's own plan is put back to the heuristic, and a step
+            // the heuristic will not endorse is dropped — so a multi-step plan
+            // survives only as far as the heuristic agrees with it. Off, the
+            // plan is played as the model wrote it.
+            if (!LLMFullController.PLAN_STEP_APPROVAL || match.isLandAbility()) {
+                return match;
+            }
             try {
-                AiPlayDecision decision = ctrl.getAi().canPlaySa(match);
+                AiPlayDecision decision = ctrl.askHeuristicVerdict(match);
                 if (decision == AiPlayDecision.WillPlay) {
                     return match;
                 }
@@ -483,7 +622,18 @@ final class LLMSpellSelection {
         return null;
     }
 
-    /** Record a cast-spell entry in the sliding window history. */
+    /**
+     * Record the seat's decision in the sliding window history.
+     *
+     * <p>Worded as an attempt, because that is all it is. This runs when the
+     * ability is handed back to the engine, before the cost is paid and long
+     * before the spell resolves: it can still be countered, its target can be
+     * removed in response, or the cost can turn out to be unpayable. Saying
+     * "Cast Lightning Bolt" here put a claim in the model's own context that
+     * the game had not made yet, and the model has no way to tell the
+     * difference — whereas the board state travelling with every prompt does
+     * show what really landed.
+     */
     private void recordSpellAction(SpellAbility selectedSa, PhaseType phase) {
         String phaseName = phase != null ? phase.toString() : "MAIN";
         int turn = ctrl.getGame().getPhaseHandler().getTurn();
@@ -491,31 +641,57 @@ final class LLMSpellSelection {
         String spellName = host != null ? host.getName() : selectedSa.toString();
         StringBuilder actionSb = new StringBuilder();
         actionSb.append("Turn ").append(turn).append(' ').append(phaseName)
-                .append(": Cast ").append(spellName);
-        if (selectedSa.usesTargeting() && selectedSa.getTargets() != null
-                && !selectedSa.getTargets().isEmpty()) {
-            actionSb.append(" targeting ");
-            boolean first = true;
-            for (Card tc : selectedSa.getTargets().getTargetCards()) {
-                if (!first) actionSb.append(", ");
-                first = false;
-                actionSb.append(tc.getName());
-            }
-            for (Player tp : selectedSa.getTargets().getTargetPlayers()) {
-                if (!first) actionSb.append(", ");
-                first = false;
-                actionSb.append(tp.getName());
-            }
-        }
+                .append(selectedSa.isLandAbility() ? ": Attempted to play land " : ": Attempted to cast ")
+                .append(spellName);
+        actionSb.append(describeTargets(selectedSa));
         ctrl.recordAction(actionSb.toString());
+    }
+
+    /**
+     * The {@code " targeting …"} clause for a history entry, or an empty string
+     * when the ability points at nothing worth naming.
+     *
+     * <p>Spells on the stack are named too. Only cards and players were listed
+     * before, so a Counterspell — whose one target is a stack entry, neither of
+     * those — produced the line "Attempted to cast Counterspell targeting "
+     * with nothing after it: a sentence in the model's own context that reads
+     * as an unfinished thought, on the one card where what it points at is the
+     * whole decision.
+     */
+    private static String describeTargets(SpellAbility sa) {
+        if (!sa.usesTargeting() || sa.getTargets() == null || sa.getTargets().isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        for (Card tc : sa.getTargets().getTargetCards()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append(tc.getName());
+        }
+        for (Player tp : sa.getTargets().getTargetPlayers()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append(tp.getName());
+        }
+        for (SpellAbility ts : sa.getTargets().getTargetSpells()) {
+            if (!first) sb.append(", ");
+            first = false;
+            Card host = ts.getHostCard();
+            sb.append(host != null ? host.getName() : ts.toString()).append(" on the stack");
+        }
+        return first ? "" : " targeting " + sb;
     }
 
     /**
      * Shadow-mode telemetry: log the heuristic's top pick alongside the LLM's
      * choice so divergence can be analysed offline when a runner captures stderr
      * to per-match transcripts. No-op unless {@code FORGE_LLM_SHADOW=1}.
-     * Heuristic top pick is index 0 of {@code pruned} since {@code applyHeuristicPrior}
-     * sorts WillPlay verdicts first.
+     *
+     * <p>The "heuristic" name logged here is index 0 of {@code pruned} — the
+     * first option in the list the heuristic is willing to play, not the spell
+     * it would actually cast (see {@link #askHeuristicPick()}). It is a cheap
+     * divergence signal for offline reading, not the veto's comparison.
      */
     private void logShadowMode(String label, List<SpellAbility> pruned, List<Integer> llmIndices) {
         if (!LLMFullController.SHADOW_MODE || pruned.isEmpty()) return;
