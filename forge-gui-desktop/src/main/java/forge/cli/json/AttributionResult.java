@@ -48,6 +48,15 @@ public class AttributionResult {
         public String profile;
         /** The forced action spec, or null when no arm forces anything. */
         public String force;
+        /**
+         * Times the forced arm was allowed to play the action in its turn.
+         *
+         * <p>Part of what the run measured, not a tuning detail. At one, the difference
+         * between the arms is what taking the action once was worth. Higher, it is what
+         * spending the turn on it was worth — a different question, and for a repeatable
+         * self-damaging ability a much worse deal for the forced arm.
+         */
+        public int forceTimes;
         /** The turn the restored position starts in, which is the turn forcing is allowed in. */
         public int restoredTurn;
     }
@@ -83,15 +92,34 @@ public class AttributionResult {
         public int turns;
         /** Forge's own end reason, or {@code Timeout} when the clock ended it. */
         public String endReason;
+        /**
+         * What the game died of, or null when it finished.
+         *
+         * <p>A crashed game is booked as a draw by the engine, because something has to end
+         * it. Without this field a reader cannot tell "nobody won" from "this game never
+         * happened", and would count the crash as a non-win for whichever arm crashed — which
+         * silently drags that arm's win rate down and flattens the difference the run exists
+         * to measure. A row with this set is not a result; it is a missing result.
+         */
+        public String failure;
         /** True when the clock ended the game rather than the game ending itself. */
         public boolean timedOut;
-        /** How many times the forced action was played. Zero on a natural arm. */
+        /** How many times the forced action was really played. Zero on a natural arm. */
         public int forcedAttempts;
+        /**
+         * How many times the forced action was handed to the engine, played or not. Higher
+         * than {@link #forcedAttempts} exactly when a cost the estimate approved could not
+         * actually be paid, which is the case that used to be reported as a clean force.
+         */
+        public int forcedOffers;
         /** Phase of the first force, or null if it never happened. */
         public String forcedFirstPhase;
         /**
-         * How far the forcing got: {@code FORCED}, {@code NO_LEGAL_TARGET},
-         * {@code COST_CHECK_FAILED} or {@code NEVER_OFFERED}. Null on a natural arm.
+         * How far the forcing got: {@code FORCED}, {@code PAYMENT_FAILED},
+         * {@code NO_LEGAL_TARGET}, {@code COST_CHECK_FAILED} or {@code NEVER_OFFERED}.
+         * Null on a natural arm. {@code PAYMENT_FAILED} means the action was legal and the
+         * cost estimate approved it, but paying it failed and it was never played — a
+         * rollout that measured nothing, not a rollout in which forcing changed nothing.
          */
         public String taxonomy;
         /** Wall-clock milliseconds the game took. */

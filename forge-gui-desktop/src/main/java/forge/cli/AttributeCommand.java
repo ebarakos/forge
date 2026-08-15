@@ -34,6 +34,7 @@ import forge.StaticData;
 import forge.ai.ForcedActionController;
 import forge.ai.ForcedLobbyPlayer;
 import forge.ai.GameState;
+import forge.ai.StateDumpChecksum;
 import forge.cli.json.AttributionResult;
 import forge.deck.Deck;
 import forge.game.Game;
@@ -83,6 +84,13 @@ import picocli.CommandLine.Option;
  * <p>And after every restore the position is compared, field by field, against the file it
  * came from: life totals, per-zone card counts, turn, phase and active player. A mismatch
  * stops the run. Numbers about a board nobody chose are worse than no numbers.
+ *
+ * <p>That comparison proves the game matches the file, which is not the same as the file
+ * matching the dump that was taken. A dump cut short mid-write restores cleanly into a
+ * different position and agrees with itself the whole way. So the file's own
+ * {@link StateDumpChecksum} line is checked first, before anything is played; a file whose
+ * checksum is present and wrong is refused, and one with no checksum at all — a hand-built
+ * board — is accepted with a note saying so.
  */
 @Command(
     name = "attribute",
@@ -182,6 +190,15 @@ public class AttributeCommand implements Callable<Integer> {
     )
     private String force;
 
+    @Option(
+        names = {"--force-times"},
+        defaultValue = "1",
+        description = "Times the forced arm plays the action in its turn. One asks what taking the action"
+                + " was worth; more asks what spending the turn on it was worth. Default: ${DEFAULT-VALUE}",
+        paramLabel = "N"
+    )
+    private int forceTimes;
+
     // === Output ===
 
     @Option(
@@ -221,6 +238,11 @@ public class AttributeCommand implements Callable<Integer> {
             ORIGINAL_ERR.println("Error: --force only has an arm to act in under --mode ab.");
             return ExitCode.ARGS_ERROR;
         }
+        if (forceTimes < 1 || forceTimes > ForcedActionController.MAX_ATTEMPTS) {
+            ORIGINAL_ERR.println("Error: --force-times must be between 1 and "
+                    + ForcedActionController.MAX_ATTEMPTS + ".");
+            return ExitCode.ARGS_ERROR;
+        }
         if (profile == null || profile.trim().isEmpty()) {
             profile = "Default";
         }
@@ -239,6 +261,21 @@ public class AttributeCommand implements Callable<Integer> {
             ORIGINAL_ERR.println("Error: could not read the state file " + stateFile + " - " + e.getMessage());
             return ExitCode.ARGS_ERROR;
         }
+        // Before anything else: is this the board that was written? The restore check below
+        // compares the game against the file, which cannot notice that the file itself is
+        // no longer the dump — a truncated one restores cleanly into a different position
+        // and agrees with itself all the way through.
+        final String checksumProblem = StateDumpChecksum.problem(text);
+        if (checksumProblem != null) {
+            ORIGINAL_ERR.println("Error: " + stateFile + " - " + checksumProblem);
+            return ExitCode.ARGS_ERROR;
+        }
+        if (StateDumpChecksum.declaredIn(text) == null) {
+            ORIGINAL_ERR.println("Note: " + stateFile.getName() + " has no '"
+                    + StateDumpChecksum.HEADER_PREFIX + "' line, so it is taken on trust. Every dump"
+                    + " written by the AI decision trace carries one; a hand-built board does not.");
+        }
+
         stateLines = readableLines(text);
         expectedFields = summarize(text);
         if (expectedFields.isEmpty()) {
@@ -264,7 +301,8 @@ public class AttributeCommand implements Callable<Integer> {
 
         ORIGINAL_ERR.println("Attribution: " + stateFile.getName() + ", seat " + seat
                 + ", turn " + restoredTurn + ", mode " + mode
-                + ", " + rollouts + " rollouts per arm, clock " + clock + "s, profile " + profile);
+                + ", " + rollouts + " rollouts per arm, clock " + clock + "s, profile " + profile
+                + (mode == Mode.ab ? ", forcing " + forceTimes + "x" : ""));
 
         // Play nothing until the restored position has been shown to be the position the file
         // describes. Everything downstream is conditional on this having passed.
@@ -295,10 +333,25 @@ public class AttributeCommand implements Callable<Integer> {
 
         System.setOut(NULL_PRINT_STREAM);
         try {
-            for (final Arm arm : arms()) {
-                for (int i = 0; i < rollouts; i++) {
+            // Interleaved, not one arm's block after the other's. Anything that drifts over
+            // the length of a run — JIT warmup, heap growth, the machine heating up, another
+            // position's JVM finishing beside this one — lands entirely on the difference
+            // between the arms if each arm owns a contiguous block of wall-clock. It reaches
+            // the numbers through the per-game clock: a game abandoned at --clock seconds is
+            // booked as a draw, so a few percent more timeouts in the second block is a few
+            // percent shaved off that arm's win rate, well inside the pre-registered timeout
+            // gate and invisible in the output. Seeds derive from the arm and the index only
+            // (see seedFor), so the order games are played in changes nothing else.
+            for (int i = 0; i < rollouts; i++) {
+                for (final Arm arm : arms()) {
                     final long rolloutSeed = seedFor(arm, i);
                     final Replay rollout = runOne(arm.name, i, rolloutSeed, arm.forcing, false);
+                    // A crash is recorded on the row (see Rollout.failure) rather than ending
+                    // the run: one game dying of a rules-engine bug is a missing result, and
+                    // the caller drops it from the arm's denominator and reports how many
+                    // there were. A mismatch is different in kind — the board that landed is
+                    // not the board the file describes, so every later rollout of this
+                    // position would be about the same wrong board. That stops the run.
                     if (!rollout.mismatches.isEmpty()) {
                         result.verification.passed = false;
                         result.verification.mismatches.addAll(rollout.mismatches);
@@ -464,6 +517,7 @@ public class AttributeCommand implements Callable<Integer> {
         row.timeMs = stopWatch.getTime();
         row.turns = game.getPhaseHandler().getTurn();
         row.isDraw = game.getOutcome() == null || game.getOutcome().isDraw();
+        row.failure = outcome.failure;
         if (row.timedOut) {
             row.endReason = "Timeout";
         } else if (outcome.failure != null) {
@@ -479,6 +533,7 @@ public class AttributeCommand implements Callable<Integer> {
         if (forcedSeat != null && forcedSeat.getForcedController() != null) {
             final ForcedActionController controller = forcedSeat.getForcedController();
             row.forcedAttempts = controller.getAttempts();
+            row.forcedOffers = controller.getOffers();
             row.forcedFirstPhase = controller.getFirstForcedPhase();
             row.taxonomy = controller.getOutcome().name();
         }
@@ -544,8 +599,8 @@ public class AttributeCommand implements Callable<Integer> {
     }
 
     private ForcedLobbyPlayer forcedSeat() {
-        final ForcedLobbyPlayer forced =
-                new ForcedLobbyPlayer("Ai(" + (seat + 1) + ")-forced", null, force.trim(), restoredTurn);
+        final ForcedLobbyPlayer forced = new ForcedLobbyPlayer(
+                "Ai(" + (seat + 1) + ")-forced", null, force.trim(), restoredTurn, forceTimes);
         forced.setAiProfile(profile);
         forced.setAvatarIndex(0);
         forced.setSleeveIndex(0);
@@ -789,6 +844,7 @@ public class AttributeCommand implements Callable<Integer> {
         header.clock = clock;
         header.profile = profile;
         header.force = force == null || force.trim().isEmpty() ? null : force.trim();
+        header.forceTimes = forceTimes;
         header.restoredTurn = restoredTurn;
         return header;
     }
@@ -814,7 +870,11 @@ public class AttributeCommand implements Callable<Integer> {
             line.append(" (clock)");
         }
         if (row.taxonomy != null) {
-            line.append(" forced=").append(row.forcedAttempts).append(' ').append(row.taxonomy);
+            line.append(" forced=").append(row.forcedAttempts);
+            if (row.forcedOffers != row.forcedAttempts) {
+                line.append("/of ").append(row.forcedOffers).append(" offered");
+            }
+            line.append(' ').append(row.taxonomy);
         }
         if (rollout.failure != null) {
             line.append(" error=").append(rollout.failure);
