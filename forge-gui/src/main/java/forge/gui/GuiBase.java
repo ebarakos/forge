@@ -8,6 +8,7 @@ public class GuiBase {
     private static IGuiBase guiInterface;
     private static boolean propertyConfig = true;
     private static boolean networkplay = false;
+    private static boolean cliMode = false;
     private static boolean isAndroidport = false;
     private static String adventureDirectory = null;
     private static boolean interrupted = false;
@@ -62,6 +63,15 @@ public class GuiBase {
 
     public static boolean isNetworkplay() { return networkplay; }
     public static void setNetworkplay(boolean value) { networkplay = value; }
+
+    /**
+     * True when Forge is running as a headless CLI command (sim, parse, server, help)
+     * rather than the Swing GUI. No Swing event loop is watching in this mode, so
+     * anything that would normally pop a modal dialog must degrade to console output
+     * instead -- see {@code GuiDesktop.showBugReportDialog}.
+     */
+    public static boolean isCliMode() { return cliMode; }
+    public static void setCliMode(boolean value) { cliMode = value; }
 
     public static boolean hasPropertyConfig() { return propertyConfig; }
     public static void enablePropertyConfig(boolean value) { propertyConfig = value; }
