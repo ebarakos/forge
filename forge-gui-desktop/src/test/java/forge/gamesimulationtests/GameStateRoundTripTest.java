@@ -5,21 +5,15 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
-import forge.StaticData;
 import forge.ai.AITest;
 import forge.ai.GameState;
 import forge.game.Game;
-import forge.item.IPaperCard;
-import forge.util.ThreadUtil;
 
 /**
  * A board written out as {@link GameState} text and read back must be the same board.
@@ -173,51 +167,4 @@ public class GameStateRoundTripTest extends AITest {
                 "The dump does not record " + expected + ", so the round trip proves nothing about it:\n" + dump);
     }
 
-    private static GameState newGameState() {
-        return new GameState() {
-            @Override
-            public IPaperCard getPaperCard(final String cardName, final String setCode, final int artId) {
-                if (setCode != null && !setCode.isEmpty()) {
-                    final IPaperCard exact = StaticData.instance().getCommonCards()
-                            .getCard(cardName, setCode, artId);
-                    if (exact != null) {
-                        return exact;
-                    }
-                }
-                return StaticData.instance().getCommonCards().getCard(cardName);
-            }
-        };
-    }
-
-    /**
-     * Build a game and apply a scripted board to it, the way {@link AiDecisionPuzzleTest}
-     * does: the state has to be applied on a Forge game thread, and the latch is what makes
-     * the caller see the finished position.
-     */
-    private Game scriptedGame(final String... lines) {
-        final Game game = initAndCreateGame();
-        final GameState state = newGameState();
-        state.parse(Arrays.asList(lines));
-        final CountDownLatch applied = new CountDownLatch(1);
-        final AtomicReference<Throwable> failure = new AtomicReference<>();
-        ThreadUtil.invokeInGameThread(() -> {
-            try {
-                state.applyToGame(game);
-            } catch (Throwable t) {
-                failure.set(t);
-            } finally {
-                applied.countDown();
-            }
-        });
-        try {
-            Assert.assertTrue(applied.await(10, TimeUnit.SECONDS), "Timed out applying scripted game state");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AssertionError("Interrupted while applying scripted game state", e);
-        }
-        if (failure.get() != null) {
-            throw new AssertionError("Could not apply scripted game state", failure.get());
-        }
-        return game;
-    }
 }

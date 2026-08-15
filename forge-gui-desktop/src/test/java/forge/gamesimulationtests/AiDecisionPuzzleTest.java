@@ -1,25 +1,17 @@
 package forge.gamesimulationtests;
 
-import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
-import forge.StaticData;
 import forge.ai.AITest;
-import forge.ai.GameState;
 import forge.ai.PlayerControllerAi;
 import forge.game.Game;
 import forge.game.ability.ApiType;
 import forge.game.combat.Combat;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
-import forge.item.IPaperCard;
-import forge.util.ThreadUtil;
 
 /**
  * Small, deterministic board states with one undisputed AI decision.
@@ -112,44 +104,4 @@ public class AiDecisionPuzzleTest extends AITest {
         Assert.assertEquals(combat.getAttackers().get(0).getName(), "Grizzly Bears");
     }
 
-    private Game scriptedGame(final String... lines) {
-        final Game game = initAndCreateGame();
-        final GameState state = new GameState() {
-            @Override
-            public IPaperCard getPaperCard(final String cardName, final String setCode, final int artId) {
-                if (setCode != null && !setCode.isEmpty()) {
-                    final IPaperCard exact = StaticData.instance().getCommonCards()
-                            .getCard(cardName, setCode, artId);
-                    if (exact != null) {
-                        return exact;
-                    }
-                }
-                return StaticData.instance().getCommonCards().getCard(cardName);
-            }
-        };
-        state.parse(Arrays.asList(lines));
-        final CountDownLatch applied = new CountDownLatch(1);
-        final AtomicReference<Throwable> failure = new AtomicReference<>();
-        ThreadUtil.invokeInGameThread(() -> {
-            try {
-                // applyToGame runs inline here because this is already a Forge game
-                // thread, so the latch observes the fully restored position.
-                state.applyToGame(game);
-            } catch (Throwable t) {
-                failure.set(t);
-            } finally {
-                applied.countDown();
-            }
-        });
-        try {
-            Assert.assertTrue(applied.await(10, TimeUnit.SECONDS), "Timed out applying scripted game state");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AssertionError("Interrupted while applying scripted game state", e);
-        }
-        if (failure.get() != null) {
-            throw new AssertionError("Could not apply scripted game state", failure.get());
-        }
-        return game;
-    }
 }
