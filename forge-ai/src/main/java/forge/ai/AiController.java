@@ -67,13 +67,10 @@ import io.sentry.Breadcrumb;
 import io.sentry.Sentry;
 
 import java.util.*;
-import java.util.concurrent.FutureTask;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import static forge.ai.ComputerUtilMana.getAvailableManaEstimate;
 import static java.lang.Math.max;
@@ -98,7 +95,6 @@ public class AiController {
     private int lastAttackAggression;
     private boolean useLivingEnd;
     private List<SpellAbility> skipped;
-    private boolean timeoutReached;
 
     public AiController(final Player computerPlayer, final Game game0) {
         player = computerPlayer;
@@ -1691,10 +1687,12 @@ public class AiController {
         final SpellAbility requiredFinalPick = finalPickRestricted
                 ? ComputerUtilAbility.getFirstCopySASpell(all) : null;
 
-        // in case of infinite loop reset below would not be reached
-        timeoutReached = false;
+        // Time budget for this decision. It is a deadline the loop below checks between
+        // candidates, not a hard stop -- see the comment on the catch block for why the
+        // decision has to run on the calling thread.
+        final long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(game.getAITimeout());
 
-        FutureTask<SpellAbility> future = new FutureTask<>(() -> {
+        try {
             //avoid ComputerUtil.aiLifeInDanger in loops as it slows down a lot.. call this outside loops will generally be fast...
             boolean isLifeInDanger = useLivingEnd && ComputerUtil.aiLifeInDanger(player, true, 0);
             // Null unless FORGE_AI_DECISION_LOG is set, so this allocates nothing normally.
@@ -1706,8 +1704,9 @@ public class AiController {
                     continue;
                 }
 
-                if (timeoutReached) {
-                    timeoutReached = false;
+                // Out of time: stop looking and pass. Checked between candidates, so a
+                // decision can overrun by at most one candidate evaluation.
+                if (System.nanoTime() - deadlineNanos >= 0) {
                     break;
                 }
 
@@ -1790,24 +1789,21 @@ public class AiController {
             // rejected — which makes these the most informative entries in the trace.
             AiDecisionLog.emit(decisionRecord, player, game, logContext, null);
             return null;
-        });
-
-        Thread t = new Thread(future);
-        t.start();
-        try {
-            // instead of computing all available concurrently just add a simple timeout depending on the user prefs
-            return future.get(game.getAITimeout(), TimeUnit.SECONDS);
-        } catch (InterruptedException | ExecutionException | TimeoutException e) {
-            try {
-                e.printStackTrace();
-                t.stop();
-            } catch (UnsupportedOperationException ex) {
-                // Android and Java 20 dropped support to stop so sadly thread will keep running
-                timeoutReached = true;
-                future.cancel(true);
-                // TODO wait a few more seconds to try and exit at a safe point before letting the engine continue
-                // TODO mark some as skipped to increase chance to find something playable next priority
-            }
+        } catch (RuntimeException | StackOverflowError e) {
+            // This used to run on a thread of its own, with the budget enforced by
+            // future.get(timeout) and the thread killed by Thread.stop(). Thread.stop()
+            // throws UnsupportedOperationException from Java 20 on, so the budget stopped
+            // killing anything: it only stopped the game loop from waiting. The decision
+            // thread kept running and kept writing to the same Game the game loop had
+            // moved on with -- two threads mutating one game's cards, views and Tracker.
+            // That surfaced as ConcurrentModificationException out of Tracker.unfreeze,
+            // and silently as decisions written into a game state that had already
+            // changed underneath them. Running on the calling thread keeps a Game owned
+            // by exactly one thread, which is what the rest of the engine assumes.
+            //
+            // A decision that throws still costs only the decision: future.get() used to
+            // hand back an ExecutionException that was turned into a pass, so keep that.
+            e.printStackTrace();
             return null;
         }
     }
