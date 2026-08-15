@@ -1,7 +1,11 @@
 package forge.ai;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.collect.Lists;
 
@@ -26,16 +30,27 @@ import forge.item.IPaperCard;
 import forge.item.PaperToken;
 import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
+import forge.util.ThreadUtil;
 
 public class AITest {
     private static boolean initialized = false;
 
     public Game resetGame() {
+        return resetGame(new LobbyPlayerAi("p1", null));
+    }
+
+    /**
+     * The same empty two-player game, with a caller-supplied AI seat as p1 (player index 1).
+     * Tests that need a non-standard controller on the seat under test build it here rather
+     * than swapping the controller afterwards, so the game is never in a state Forge itself
+     * could not have produced.
+     */
+    public Game resetGame(LobbyPlayerAi aiSeat) {
         // need to be done after FModel.initialize, or the Localizer isn't loaded yet
         List<RegisteredPlayer> players = Lists.newArrayList();
         Deck d1 = new Deck();
         players.add(new RegisteredPlayer(d1).setPlayer(new LobbyPlayerAi("p2", null)));
-        players.add(new RegisteredPlayer(d1).setPlayer(new LobbyPlayerAi("p1", null)));
+        players.add(new RegisteredPlayer(d1).setPlayer(aiSeat));
         GameRules rules = new GameRules(GameType.Constructed);
         Match match = new Match(rules, players, "Test");
         Game game = new Game(players, rules, match);
@@ -49,6 +64,19 @@ public class AITest {
     }
 
     protected Game initAndCreateGame() {
+        initModel();
+        // Deliberately the no-argument resetGame: subclasses override it to build a
+        // different game (SimulationTest, for one), and going through the overload
+        // instead would silently throw their setup away.
+        return resetGame();
+    }
+
+    protected Game initAndCreateGame(LobbyPlayerAi aiSeat) {
+        initModel();
+        return resetGame(aiSeat);
+    }
+
+    private static void initModel() {
         if (!initialized) {
             GuiBase.setInterface(new GuiDesktop());
             FModel.initialize(null, preferences -> {
@@ -58,8 +86,75 @@ public class AITest {
             });
             initialized = true;
         }
+    }
 
-        return resetGame();
+    /**
+     * A {@link GameState} that resolves card names against the loaded card database, falling
+     * back to any printing when the exact set and art are not available.
+     */
+    protected GameState newGameState() {
+        return new GameState() {
+            @Override
+            public IPaperCard getPaperCard(final String cardName, final String setCode, final int artId) {
+                if (setCode != null && !setCode.isEmpty()) {
+                    final IPaperCard exact = StaticData.instance().getCommonCards()
+                            .getCard(cardName, setCode, artId);
+                    if (exact != null) {
+                        return exact;
+                    }
+                }
+                return StaticData.instance().getCommonCards().getCard(cardName);
+            }
+        };
+    }
+
+    /** Build a game and apply a board written in {@link GameState} text to it. */
+    protected Game scriptedGame(final String... lines) {
+        return applyScriptedState(initAndCreateGame(), lines);
+    }
+
+    /**
+     * Build a game with the given AI seat as p1 and apply a board written in
+     * {@link GameState} text to it.
+     */
+    protected Game scriptedGame(final LobbyPlayerAi aiSeat, final String... lines) {
+        return applyScriptedState(initAndCreateGame(aiSeat), lines);
+    }
+
+    /**
+     * Apply a board written in {@link GameState} text to an already built game.
+     *
+     * <p>The state has to be applied on a Forge game thread; the latch is what makes the
+     * calling test see the finished position rather than a half-applied one.
+     */
+    private Game applyScriptedState(final Game game, final String... lines) {
+        final GameState state = newGameState();
+        state.parse(Arrays.asList(lines));
+        final CountDownLatch applied = new CountDownLatch(1);
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        ThreadUtil.invokeInGameThread(() -> {
+            try {
+                // applyToGame runs inline here because this is already a Forge game
+                // thread, so the latch observes the fully restored position.
+                state.applyToGame(game);
+            } catch (Throwable t) {
+                failure.set(t);
+            } finally {
+                applied.countDown();
+            }
+        });
+        try {
+            if (!applied.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("Timed out applying scripted game state");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while applying scripted game state", e);
+        }
+        if (failure.get() != null) {
+            throw new AssertionError("Could not apply scripted game state", failure.get());
+        }
+        return game;
     }
 
     protected int countCardsWithName(Game game, String name) {

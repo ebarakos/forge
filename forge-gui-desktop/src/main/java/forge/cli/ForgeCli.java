@@ -17,6 +17,7 @@ import picocli.CommandLine.IVersionProvider;
     subcommands = {
         CommandLine.HelpCommand.class,
         SimCommand.class,
+        AttributeCommand.class,
         ParseCommand.class,
         ServerCommand.class
     }
