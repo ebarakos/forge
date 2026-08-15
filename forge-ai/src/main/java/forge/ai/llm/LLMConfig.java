@@ -14,9 +14,9 @@ public final class LLMConfig {
 
     // Default models for each provider
     private static final String DEFAULT_LOCAL_MODEL = "llama3";
-    // Defaults track the llm-relay curated catalog (allowed-models.json).
-    // Both upstream defaults are free-tier and the only models the relay
-    // accepts on those upstreams as of relay v1.6.8 (2026-04-27).
+    // Defaults track the curated model catalog used by the relay gateway.
+    // Both upstream defaults are free-tier and were the only accepted models
+    // on those upstreams when these defaults were last updated.
     private static final String DEFAULT_OPENROUTER_MODEL = "inclusionai/ling-2.6-1t:free";
     private static final String DEFAULT_CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507";
     // OpenAI-compatible endpoint default — points at the model name; the URL
@@ -113,7 +113,7 @@ public final class LLMConfig {
     }
 
     /**
-     * Whether LLM traffic should default to going through the local llm-relay
+     * Whether LLM traffic should default to going through the configured relay
      * gateway. Reads {@code LLM_VIA_RELAY} (preferred) then {@code RELAY} from
      * env / .env, defaulting to {@code true} when unset. Any value other than
      * {@code 0} / {@code false} (case-insensitive) is treated as truthy.
@@ -445,7 +445,7 @@ public final class LLMConfig {
 
     /**
      * Maps a relay upstream provider name to its API key env var.
-     * Covers all 5 providers defined in llm-relay.
+     * Covers every managed upstream supported by the relay integration.
      */
     public static String providerApiKeyEnvVar(String provider) {
         if (provider == null) return null;

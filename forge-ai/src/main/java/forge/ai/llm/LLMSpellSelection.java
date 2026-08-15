@@ -512,8 +512,8 @@ final class LLMSpellSelection {
 
     /**
      * Shadow-mode telemetry: log the heuristic's top pick alongside the LLM's
-     * choice so divergence can be analysed offline (mtg-discovery captures
-     * stderr to per-match transcripts). No-op unless {@code FORGE_LLM_SHADOW=1}.
+     * choice so divergence can be analysed offline when a runner captures stderr
+     * to per-match transcripts. No-op unless {@code FORGE_LLM_SHADOW=1}.
      * Heuristic top pick is index 0 of {@code pruned} since {@code applyHeuristicPrior}
      * sorts WillPlay verdicts first.
      */

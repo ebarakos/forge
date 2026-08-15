@@ -113,8 +113,8 @@ public class LLMFullController extends PlayerControllerAi {
 
     /**
      * Shadow mode: log heuristic vs LLM divergence per call to stderr without
-     * changing behaviour. Useful for offline analysis from mtg-discovery
-     * transcripts. Opt-in via {@code FORGE_LLM_SHADOW=1}.
+     * changing behaviour. Useful for offline analysis of captured transcripts.
+     * Opt-in via {@code FORGE_LLM_SHADOW=1}.
      */
     static final boolean SHADOW_MODE = isTruthy(System.getenv("FORGE_LLM_SHADOW"));
 
