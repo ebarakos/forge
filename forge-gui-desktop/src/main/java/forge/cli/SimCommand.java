@@ -111,7 +111,7 @@ public class SimCommand implements Callable<Integer> {
 
     @Option(
         names = {"--no-snapshot"},
-        description = "Disable snapshot restore (default; kept for backward compatibility)."
+        description = "Disable snapshot restore. This is already what happens without -s; the flag is kept for backward compatibility."
     )
     private boolean noSnapshot;
 

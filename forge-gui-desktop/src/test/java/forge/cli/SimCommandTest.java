@@ -16,9 +16,11 @@ public class SimCommandTest {
     }
 
     @Test
-    public void testSnapshotEnabledByDefault() {
+    public void testSnapshotDisabledByDefault() {
+        // Snapshot-restore game copying is opt-in: the copies can desync static
+        // abilities, so a sim run only uses it when the caller asks for it with -s.
         SimCommand cmd = parseArgs("-d", "deck1.dck", "-d", "deck2.dck");
-        Assert.assertTrue(cmd.isUseSnapshot(), "Snapshot should be enabled by default in sim mode");
+        Assert.assertFalse(cmd.isUseSnapshot(), "Snapshot restore should be off unless -s is passed");
     }
 
     @Test
@@ -28,10 +30,9 @@ public class SimCommandTest {
     }
 
     @Test
-    public void testExplicitSnapshotFlagStillWorks() {
-        // -s flag is now a no-op (snapshot is default on), but should still parse without error
+    public void testExplicitSnapshotFlagEnablesSnapshot() {
         SimCommand cmd = parseArgs("-d", "deck1.dck", "-d", "deck2.dck", "-s");
-        Assert.assertTrue(cmd.isUseSnapshot(), "-s flag should keep snapshot enabled");
+        Assert.assertTrue(cmd.isUseSnapshot(), "-s should turn snapshot restore on");
     }
 
     @Test
