@@ -426,8 +426,33 @@ public class LLMClient {
     /** Whether prompt caching is configured on (ignores the session-level fallback). */
     public boolean isPromptCachingEnabled() { return config.isPromptCachingEnabled(); }
 
-    /** Record that a fallback to heuristic occurred. */
-    public void recordFallback() { totalFallbacks.incrementAndGet(); }
+    /** Record that a fallback to heuristic occurred, without naming the seat or the failure. */
+    public void recordFallback() { recordFallback(null, null); }
+
+    /**
+     * Record that an LLM call fell back to the heuristic AI.
+     *
+     * <p>Every fallback path funnels through here, so this is also where
+     * {@link LLMStrictMode} gets its chance to end the run rather than let a
+     * heuristic decision pass as a model decision.
+     *
+     * @param playerName the seat whose call failed
+     * @param reason     what went wrong (timeout, HTTP status, unusable answer)
+     */
+    public void recordFallback(String playerName, String reason) {
+        int fallbacks = totalFallbacks.incrementAndGet();
+        if (LLMStrictMode.isEnabled()) {
+            LLMStrictMode.onFallback(playerName, describeEndpoint(), reason,
+                    totalCalls.get(), fallbacks);
+        }
+    }
+
+    /** Human-readable routing for this client, e.g. {@code relay→cerebras:qwen-3}. */
+    public String describeEndpoint() {
+        String upstream = (config.getRelayProvider() != null && !config.getRelayProvider().isEmpty())
+                ? "→" + config.getRelayProvider() : "";
+        return config.getProvider() + upstream + ":" + config.getModel();
+    }
 
     // Config delegate getters for JSON output
     public String getModel() { return config.getModel(); }

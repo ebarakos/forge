@@ -19,6 +19,7 @@ import com.google.gson.GsonBuilder;
 import forge.LobbyPlayer;
 import forge.ai.llm.LLMClient;
 import forge.ai.llm.LLMConfig;
+import forge.ai.llm.LLMStrictMode;
 import forge.ai.simulation.EvalFeatureCollector;
 import forge.cli.ExitCode;
 import forge.cli.ProgressBar;
@@ -268,6 +269,16 @@ public class SimulateMatch {
 
         // Tournament mode
         if (cmd.getTournamentType() != null) {
+            // Tournament mode never builds LLM clients, so a seat asking for one here
+            // plays as the plain heuristic AI and says nothing about it.
+            for (Map.Entry<Integer, String> entry : aiProfiles.entrySet()) {
+                if (LLMConfig.isLlmProfile(entry.getValue()) && LLMStrictMode.isEnabled()) {
+                    ORIGINAL_ERR.println(LLMStrictMode.silentHeuristicSeatMessage(
+                            "player " + (entry.getKey() + 1), entry.getValue(),
+                            "tournament mode does not create LLM players"));
+                    return LLMStrictMode.EXIT_CODE;
+                }
+            }
             boolean useSnapshot = cmd.isUseSnapshot();
             simulateTournamentFromCmd(cmd, rules, outputGamelog, aiProfiles, useSnapshot, customDeckBaseDir);
             System.out.flush();
@@ -301,6 +312,14 @@ public class SimulateMatch {
                     llmClients.put(entry.getKey(), client);
                     ORIGINAL_ERR.println("Player " + (entry.getKey() + 1)
                             + ": LLM (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")");
+                } else if (LLMStrictMode.isEnabled()) {
+                    // No config means no client, and no client means this seat runs on the
+                    // heuristic AI while still being labelled as an LLM seat everywhere else.
+                    ORIGINAL_ERR.println(LLMStrictMode.silentHeuristicSeatMessage(
+                            "player " + (entry.getKey() + 1), profile,
+                            "the profile could not be turned into an LLM configuration"
+                                    + " (any [LLM] line printed above says which setting is missing)"));
+                    return LLMStrictMode.EXIT_CODE;
                 }
             }
         }
@@ -468,7 +487,10 @@ public class SimulateMatch {
             // Summary already printed by parallel method
         }
 
-        // Print LLM usage summary if any LLM clients were used
+        // Per-seat call and fallback counts. Printed on ORIGINAL_ERR, so it survives
+        // the stdout/stderr suppression that -q, --json and -j turn on: every win
+        // rate from an LLM seat is only worth as much as these two numbers.
+        boolean strictSeatUnused = false;
         if (!llmClients.isEmpty()) {
             ORIGINAL_ERR.println();
             for (Map.Entry<Integer, LLMClient> entry : llmClients.entrySet()) {
@@ -487,11 +509,18 @@ public class SimulateMatch {
                         inTok, c.getTotalOutputTokens(),
                         cachePct, cacheRead, inTok,
                         c.getTotalLatencyMs());
+                // A client that was never called is the same silent heuristic seat as
+                // a client that was never built — it just fails later.
+                if (calls == 0 && LLMStrictMode.isEnabled()) {
+                    ORIGINAL_ERR.println(LLMStrictMode.zeroCallSeatMessage(
+                            "player " + (entry.getKey() + 1), c.describeEndpoint()));
+                    strictSeatUnused = true;
+                }
             }
         }
 
         System.out.flush();
-        return ExitCode.SUCCESS;
+        return strictSeatUnused ? LLMStrictMode.EXIT_CODE : ExitCode.SUCCESS;
     }
 
     /**

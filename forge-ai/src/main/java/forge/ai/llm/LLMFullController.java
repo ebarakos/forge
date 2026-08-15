@@ -325,7 +325,8 @@ public class LLMFullController extends PlayerControllerAi {
                 if (client.isDebug()) {
                     System.err.println("[LLM FALLBACK] " + callLabel + ": parse failed");
                 }
-                client.recordFallback();
+                client.recordFallback(getPlayer().getName(), callLabel
+                        + ": answer held no usable option index (" + numOptions + " options offered)");
                 return -1;
             }
             return choice;
@@ -334,9 +335,32 @@ public class LLMFullController extends PlayerControllerAi {
                 System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
                         + " - " + e.getMessage());
             }
-            client.recordFallback();
+            client.recordFallback(getPlayer().getName(), describeFailure(callLabel, e));
             return -1;
         }
+    }
+
+    /**
+     * Failure text recorded with a fallback. Wider than the debug line on
+     * purpose: {@link LLMException} often wraps a cause whose own message is the
+     * only useful part (a bare connection refusal arrives with a null message),
+     * and this string is what strict mode prints as its whole explanation.
+     */
+    private static String describeFailure(String callLabel, Exception e) {
+        StringBuilder sb = new StringBuilder(callLabel).append(": ")
+                .append(e.getClass().getSimpleName());
+        if (e.getMessage() != null && !e.getMessage().isEmpty()) {
+            sb.append(" - ").append(e.getMessage());
+        }
+        Throwable cause = e.getCause();
+        if (cause != null) {
+            sb.append(" (cause: ").append(cause.getClass().getName());
+            if (cause.getMessage() != null && !cause.getMessage().isEmpty()) {
+                sb.append(": ").append(cause.getMessage());
+            }
+            sb.append(')');
+        }
+        return sb.toString();
     }
 
     /**
@@ -368,7 +392,7 @@ public class LLMFullController extends PlayerControllerAi {
                 System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
                         + " - " + e.getMessage());
             }
-            client.recordFallback();
+            client.recordFallback(getPlayer().getName(), describeFailure(callLabel, e));
             return null;
         }
     }

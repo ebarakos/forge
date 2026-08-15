@@ -6,6 +6,7 @@ import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.llm.LLMClient;
 import forge.ai.llm.LLMConfig;
+import forge.ai.llm.LLMStrictMode;
 import forge.ai.llm.LobbyPlayerLLM;
 import forge.gui.GuiBase;
 import forge.gui.util.SOptionPane;
@@ -147,6 +148,12 @@ public final class GamePlayerUtil {
         LLMConfig config = LLMConfig.fromProfileString(profileString, apiKey,
                 0.2, 0, debug);
         if (config == null) {
+            if (LLMStrictMode.isEnabled()) {
+                throw new IllegalStateException(LLMStrictMode.silentHeuristicSeatMessage(
+                        "'" + name + "'", profileString,
+                        "the profile could not be turned into an LLM configuration"
+                                + " (any [LLM] line printed above says which setting is missing)"));
+            }
             System.err.println("[LLM] Could not build LLMConfig from profile '"
                     + profileString + "' — falling back to heuristic AI for seat '" + name + "'.");
             return createAiPlayer(name);
