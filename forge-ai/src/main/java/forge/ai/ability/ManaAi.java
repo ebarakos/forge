@@ -57,6 +57,7 @@ public class ManaAi extends SpellAbilityAi {
             return true;
         }
         if (!ph.is(PhaseType.MAIN2)) {
+            AiDecisionLog.reason("ManaAi: mana production held until second main phase");
             return false;
         }
         return super.checkPhaseRestrictions(ai, sa, ph);
@@ -73,7 +74,11 @@ public class ManaAi extends SpellAbilityAi {
     @Override
     protected boolean checkPhaseRestrictions(Player ai, SpellAbility sa, PhaseHandler ph, String logic) {
         if (logic.startsWith("ManaRitual")) {
-             return ph.is(PhaseType.MAIN2, ai) || ph.is(PhaseType.MAIN1, ai);
+            final boolean mainPhase = ph.is(PhaseType.MAIN2, ai) || ph.is(PhaseType.MAIN1, ai);
+            if (!mainPhase) {
+                AiDecisionLog.reason("ManaAi: ritual held outside its controller's main phase");
+            }
+            return mainPhase;
         }
         if ("AtOppEOT".equals(logic)) {
             return ph.is(PhaseType.END_OF_TURN) && ph.getNextTurn() == ai
@@ -136,6 +141,7 @@ public class ManaAi extends SpellAbilityAi {
         if (sa.usesTargeting()) { // Rousing Refrain
             PlayerCollection targetableOpps = ai.getOpponents().filter(PlayerPredicates.isTargetableBy(sa));
             if (targetableOpps.isEmpty()) {
+                AiDecisionLog.reason("ManaAi: ritual has no legal opponent target");
                 return false;
             }
             Player mostCards = targetableOpps.max(PlayerPredicates.compareByZoneSize(ZoneType.Hand));
@@ -186,6 +192,7 @@ public class ManaAi extends SpellAbilityAi {
         }
 
         if (searchCMC <= 0) {
+            AiDecisionLog.reason("ManaAi: ritual would not leave positive usable mana");
             return false;
         }
 
@@ -250,7 +257,15 @@ public class ManaAi extends SpellAbilityAi {
         }
 
         // TODO: this will probably still waste the card from time to time. Somehow improve detection of castable material.
-        return castableSpells.size() > 0;
+        if (castableSpells.isEmpty()) {
+            // Set the reason only now that the outcome is known: a ritual that DOES find a
+            // payoff must not leave this "no payoff" explanation behind for some later,
+            // unrelated rejection (e.g. failing to pay the ritual's own cost) to inherit.
+            AiDecisionLog.reason("ManaAi: no willing noninstant payoff fits the ritual's "
+                    + searchCMC + " available mana in this phase and colors");
+            return false;
+        }
+        return true;
     }
 
     private boolean improvesPosition(Player ai, SpellAbility sa) {

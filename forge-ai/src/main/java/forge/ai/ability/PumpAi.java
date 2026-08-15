@@ -89,9 +89,11 @@ public class PumpAi extends PumpAiBase {
         boolean main1Preferred = "Main1IfAble".equals(sa.getParam("AILogic")) && ph.is(PhaseType.MAIN1, ai);
         if (game.getStack().isEmpty() && sa.getPayCosts().hasTapCost()) {
             if (ph.getPhase().isBefore(PhaseType.COMBAT_DECLARE_ATTACKERS) && ph.isPlayerTurn(ai)) {
+                AiDecisionLog.reason("PumpAi: tap-cost pump held until own declare-attackers");
                 return false;
             }
             if (ph.getPhase().isBefore(PhaseType.COMBAT_BEGIN) && ph.getPlayerTurn().isOpponentOf(ai)) {
+                AiDecisionLog.reason("PumpAi: tap-cost pump held until opponent's combat");
                 return false;
             }
         }
@@ -99,7 +101,11 @@ public class PumpAi extends PumpAiBase {
                 || ph.getPhase().isAfter(PhaseType.COMBAT_DECLARE_BLOCKERS))) {
             // Instant-speed pumps should not be cast outside of combat when the
             // stack is empty
-            return sa.isCurse() || isSorcerySpeed(sa, ai) || main1Preferred;
+            boolean ok = sa.isCurse() || isSorcerySpeed(sa, ai) || main1Preferred;
+            if (!ok) {
+                AiDecisionLog.reason("PumpAi: instant-speed pump held outside combat window");
+            }
+            return ok;
         }
         return true;
     }
@@ -292,6 +298,7 @@ public class PumpAi extends PumpAiBase {
         }
 
         if ((numDefense.contains("X") && defense == 0) || (numAttack.contains("X") && attack == 0 && !isBerserk)) {
+            AiDecisionLog.reason("PumpAi: X pump amount computes to 0 (att=" + attack + " def=" + defense + ")");
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
@@ -336,6 +343,7 @@ public class PumpAi extends PumpAiBase {
                     }
                 }
             }
+            AiDecisionLog.reason("PumpAi: no defined creature was both a legal curse/pump candidate and worth pumping");
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
@@ -343,6 +351,7 @@ public class PumpAi extends PumpAiBase {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         }
 
+        AiDecisionLog.reason("PumpAi: pumpTgtAI found no target worth pumping");
         return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
     }
 

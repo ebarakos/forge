@@ -89,10 +89,12 @@ public class DrawAi extends SpellAbilityAi {
     @Override
     protected boolean willPayCosts(Player payer, SpellAbility sa, Cost cost, Card source) {
         if (!ComputerUtilCost.checkCreatureSacrificeCost(payer, cost, source, sa)) {
+            AiDecisionLog.reason("DrawAi: sacrifice cost has no scripted or synergistic creature");
             return false;
         }
 
         if (!ComputerUtilCost.checkLifeCost(payer, cost, source, 4, sa)) {
+            AiDecisionLog.reason("DrawAi: life cost would leave fewer than four life");
             return false;
         }
 
@@ -101,10 +103,13 @@ public class DrawAi extends SpellAbilityAi {
             for (final CostPart part : cost.getCostParts()) {
                 if (part instanceof CostDiscard) {
                     PaymentDecision decision = part.accept(aiDecisions);
-                    if (null == decision)
+                    if (null == decision) {
+                        AiDecisionLog.reason("DrawAi: discard cost has no legal payment");
                         return false;
+                    }
                     for (Card discard : decision.cards) {
                         if (!ComputerUtil.isWorseThanDraw(payer, discard)) {
+                            AiDecisionLog.reason("DrawAi: discard cost would lose a card worth keeping");
                             return false;
                         }
                     }
@@ -113,6 +118,7 @@ public class DrawAi extends SpellAbilityAi {
         }
 
         if (!ComputerUtilCost.checkRemoveCounterCost(cost, source, sa)) {
+            AiDecisionLog.reason("DrawAi: counter-removal cost is not acceptable");
             return false;
         }
 
@@ -137,6 +143,7 @@ public class DrawAi extends SpellAbilityAi {
         // Don't use draw abilities before main 2 if possible
         if (ph.getPhase().isBefore(PhaseType.MAIN2) && !sa.hasParam("ActivationPhases")
                 && !ComputerUtil.castSpellInMain1(ai, sa) && !isSacCost) {
+            AiDecisionLog.reason("DrawAi: draw held until second main phase");
             return false;
         }
 
@@ -165,6 +172,7 @@ public class DrawAi extends SpellAbilityAi {
                 && !sa.hasParam("PlayerTurn") && !isSorcerySpeed(sa, ai)
                 && ai.getCardsIn(ZoneType.Hand).size() > 1 && !ComputerUtil.activateForCost(sa, ai)
                 && !"YawgmothsBargain".equals(logic)) {
+            AiDecisionLog.reason("DrawAi: instant-speed draw held for opponent's end step");
             return false;
         }
         return super.checkPhaseRestrictions(ai, sa, ph, logic);

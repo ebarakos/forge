@@ -32,6 +32,7 @@ import forge.game.cost.CostEnlist;
 import forge.game.cost.CostExert;
 import forge.game.event.*;
 import forge.game.player.Player;
+import forge.game.player.PlayerController;
 import forge.game.replacement.ReplacementResult;
 import forge.game.replacement.ReplacementType;
 
@@ -612,6 +613,8 @@ public class PhaseHandler implements java.io.Serializable {
                 runParams.put(AbilityKey.Cards, tapped);
                 whoDeclares.getGame().getTriggerHandler().runTrigger(TriggerType.TapAll, runParams, false);
             }
+
+            whoDeclares.getController().notifyFinalAttackersDeclared(playerTurn, combat);
         }
 
         if (game.isGameOver()) { // they just like to close window at any moment
@@ -659,12 +662,14 @@ public class PhaseHandler implements java.io.Serializable {
 
     private void declareBlockersTurnBasedAction() {
         Player p = playerTurn;
+        final Map<Player, PlayerController> finalBlockDeclarers = new LinkedHashMap<>();
 
         do {
             p = game.getNextPlayerAfter(p);
             // Apply Odric's effect here
             Player whoDeclaresBlockers = ObjectUtils.firstNonNull(p.getDeclaresBlockers(), p);
             if (combat.isPlayerAttacked(p)) {
+                finalBlockDeclarers.put(p, whoDeclaresBlockers.getController());
                 if (CombatUtil.canBlock(p, combat)) {
                     // Replacement effects (for Camouflage)
                     final Map<AbilityKey, Object> repRunParams = AbilityKey.mapFromAffected(p);
@@ -744,6 +749,10 @@ public class PhaseHandler implements java.io.Serializable {
         combat.orderAttackersForDamageAssignment(); // 509.3
 
         combat.removeAbsentCombatants();
+
+        for (final Map.Entry<Player, PlayerController> entry : finalBlockDeclarers.entrySet()) {
+            entry.getValue().notifyFinalBlockersDeclared(entry.getKey(), combat);
+        }
 
         combat.fireTriggersForUnblockedAttackers(game);
 

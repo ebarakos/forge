@@ -2050,18 +2050,44 @@ public class ComputerUtil {
         return false;
     }
 
+    /** The score and the exact branch that produced a mulligan decision. */
+    public static final class HandEvaluation {
+        private final int score;
+        private final String reason;
+
+        private HandEvaluation(int score, String reason) {
+            this.score = score;
+            this.reason = reason;
+        }
+
+        public int getScore() {
+            return score;
+        }
+
+        public String getReason() {
+            return reason;
+        }
+
+        public boolean shouldKeep() {
+            return score > 0;
+        }
+    }
+
     /**
-     * Scores a hand for mulligan decisions. Returns > 0 to keep, <= 0 to mulligan.
-     * Uses deck statistics for curve-aware land count, color matching, and castability.
+     * Scores and explains a hand for mulligan decisions. A positive score means keep;
+     * zero or less means mulligan. Uses deck statistics for curve-aware land count,
+     * color matching, and castability.
      */
-    public static int scoreHand(CardCollectionView handList, Player ai, int cardsToReturn) {
+    public static HandEvaluation evaluateHand(CardCollectionView handList, Player ai, int cardsToReturn) {
         final AiController aic = ((PlayerControllerAi)ai.getController()).getAi();
         int currentHandSize = handList.size();
         int finalHandSize = currentHandSize - cardsToReturn;
+        int mulliganThreshold = aic.getIntProperty(AiProps.MULLIGAN_THRESHOLD);
 
         // don't mulligan when already too low
-        if (finalHandSize < aic.getIntProperty(AiProps.MULLIGAN_THRESHOLD)) {
-            return finalHandSize;
+        if (finalHandSize < mulliganThreshold) {
+            return new HandEvaluation(finalHandSize, "forced keep: final hand size "
+                    + finalHandSize + " is below mulligan threshold " + mulliganThreshold);
         }
 
         // Get deck statistics for curve-aware decisions
@@ -2072,7 +2098,7 @@ public class ComputerUtil {
 
         // no land deck, can't do anything better
         if (landsInDeck == 0) {
-            return finalHandSize;
+            return new HandEvaluation(finalHandSize, "keep: deck contains no lands");
         }
 
         // Separate mana sources (lands + 0-cost artifacts) from spells
@@ -2087,32 +2113,39 @@ public class ComputerUtil {
         // Special case: Living End decks
         final CardCollectionView livingEnd = CardLists.filter(handList, c -> "Living End".equalsIgnoreCase(c.getName()));
         if (livingEnd.size() > 0) {
-            return -(livingEnd.size() * 10);
+            return new HandEvaluation(-(livingEnd.size() * 10),
+                    "mulligan: Living End must remain in the library");
         }
 
         // === HARD REJECTIONS (edge cases) ===
         // if at mulligan threshold, and we have any lands accept the hand
-        if (handSize == aic.getIntProperty(AiProps.MULLIGAN_THRESHOLD) && landSize > 0) {
-            return handSize;
+        if (handSize == mulliganThreshold && landSize > 0) {
+            return new HandEvaluation(handSize, "forced keep at mulligan threshold with "
+                    + landSize + " mana source(s)");
         }
 
         if (landSize < 2) {
             // 0 or 1 lands - reject unless it's a heavy-spell deck
             if (landsInDeck == 0 || (library.size() > 0 && library.size() / landsInDeck > 6)) {
-                return handSize; // Heavy spell deck it's ok
+                return new HandEvaluation(handSize, "keep: spell-heavy deck accepts "
+                        + landSize + " mana source(s)");
             }
-            return 0;
+            return new HandEvaluation(0, "mulligan: fewer than two mana sources ("
+                    + landSize + ")");
         } else if (landSize == handSize) {
             if (library.size() > 0 && library.size() / landsInDeck < 2) {
-                return handSize; // Heavy land deck/Momir Basic it's ok
+                return new HandEvaluation(handSize,
+                        "keep: land-heavy deck accepts an all-mana-source hand");
             }
-            return 0;
+            return new HandEvaluation(0, "mulligan: every card is a mana source");
         } else if (handSize >= 7 && landSize >= handSize - 1) {
             // BAD Hands - Mana flooding
             if (library.size() > 0 && library.size() / landsInDeck < 2) {
-                return handSize; // Heavy land deck it's ok
+                return new HandEvaluation(handSize,
+                        "keep: land-heavy deck accepts a flooded hand");
             }
-            return 0;
+            return new HandEvaluation(0, "mulligan: " + landSize + " of " + handSize
+                    + " cards are mana sources");
         }
 
         // === SCORING (hand passed hard rejections) ===
@@ -2179,19 +2212,29 @@ public class ComputerUtil {
             float mismatchRatio = (float) colorMismatches / spellsChecked;
             if (mismatchRatio > 0.5f) {
                 // More than half the spells can't be cast - reject hand
-                return 0;
+                return new HandEvaluation(0, "mulligan: available mana colors cannot cast "
+                        + colorMismatches + " of " + spellsChecked + " spell(s)");
             }
             score -= colorMismatches * 3;
         }
 
         // Ensure a keepable hand returns > 0
-        return Math.max(score, 1);
+        int finalScore = Math.max(score, 1);
+        return new HandEvaluation(finalScore, "keep: scored " + finalScore
+                + " (mana sources " + landSize + "/" + handSize + ", ideal " + idealLands
+                + "; castable by turns 1/2/3 " + castableT1 + "/" + castableT2 + "/"
+                + castableT3 + "; color mismatches " + colorMismatches + ")");
+    }
+
+    /** Scores a hand for callers that do not need the explanation. */
+    public static int scoreHand(CardCollectionView handList, Player ai, int cardsToReturn) {
+        return evaluateHand(handList, ai, cardsToReturn).getScore();
     }
 
     // Computer mulligans if there are no cards with converted mana cost of 0 in its hand
     public static boolean wantMulligan(Player ai, int cardsToReturn) {
         final CardCollectionView handList = ai.getCardsIn(ZoneType.Hand);
-        return !handList.isEmpty() && scoreHand(handList, ai, cardsToReturn) <= 0;
+        return !handList.isEmpty() && !evaluateHand(handList, ai, cardsToReturn).shouldKeep();
     }
 
     public static CardCollection getPartialParisCandidates(Player ai) {

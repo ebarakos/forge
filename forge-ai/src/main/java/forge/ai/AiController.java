@@ -708,6 +708,7 @@ public class AiController {
         }
         SpellAbility bestSA = null;
         int bestRestriction = Integer.MIN_VALUE;
+        final java.util.List<String[]> decisionRecord = AiDecisionLog.newRecord();
 
         for (final SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(possibleCounters, player)) {
             SpellAbility currentSA = sa;
@@ -715,6 +716,7 @@ public class AiController {
             // check everything necessary
 
             AiPlayDecision opinion = canPlayAndPayFor(currentSA);
+            AiDecisionLog.consider(decisionRecord, sa, opinion);
             //PhaseHandler ph = game.getPhaseHandler();
             // System.out.printf("Ai thinks '%s' of %s @ %s %s >>> \n", opinion, sa, Lang.getPossesive(ph.getPlayerTurn().getName()), ph.getPhase());
             if (opinion == AiPlayDecision.WillPlay) {
@@ -735,6 +737,7 @@ public class AiController {
 
         // TODO - "Look" at Targeted SA and "calculate" the threshold
         // if (bestRestriction < targetedThreshold) return false;
+        AiDecisionLog.emit(decisionRecord, player, game, "counter-response", bestSA);
         return bestSA;
     }
 
@@ -931,13 +934,25 @@ public class AiController {
             Sentry.setExtra("Card", card.getName());
             Sentry.setExtra("SA", sa.toString());
 
-            boolean canPlay = SpellApiToAi.Converter.get(sa).canPlayWithSubs(player, sa).willingToPlay();
+            final SpellAbilityAi apiAi = SpellApiToAi.Converter.get(sa);
+            AiAbilityDecision apiDecision = apiAi.canPlayWithSubs(player, sa);
 
             // remove added extra
             Sentry.removeExtra("Card");
             Sentry.removeExtra("SA");
 
-            if (!canPlay) {
+            if (!apiDecision.willingToPlay()) {
+                // The specific inner decision is flattened to CantPlayAi here (callers
+                // branch on the flat value), so hand it to the trace before it is lost.
+                // A decision that was willing but scored under the rating floor is a
+                // distinct rejection mode and is named as such.
+                if (AiDecisionLog.ENABLED) {
+                    String detail = apiAi.getClass().getSimpleName() + ": " + apiDecision.decision();
+                    if (apiDecision.decision().willingToPlay()) {
+                        detail += " (rating " + apiDecision.rating() + " below floor)";
+                    }
+                    AiDecisionLog.reason(detail);
+                }
                 return AiPlayDecision.CantPlayAi;
             }
         } else {
@@ -1422,7 +1437,7 @@ public class AiController {
         );
         if (!playBeforeLand.isEmpty()) {
             SpellAbility wantToPlayBeforeLand = chooseSpellAbilityToPlayFromList(
-                    ComputerUtilAbility.getSpellAbilities(playBeforeLand, player), false
+                    ComputerUtilAbility.getSpellAbilities(playBeforeLand, player), false, "before-land"
             );
             if (wantToPlayBeforeLand != null) {
                 return singleSpellAbilityList(wantToPlayBeforeLand);
@@ -1608,7 +1623,7 @@ public class AiController {
             SpellAbility counter = chooseCounterSpell(getPlayableCounters(cards));
             if (counter != null) return counter;
 
-            SpellAbility counterETB = chooseSpellAbilityToPlayFromList(getPossibleETBCounters(), false);
+            SpellAbility counterETB = chooseSpellAbilityToPlayFromList(getPossibleETBCounters(), false, "etb-counter");
             if (counterETB != null)
                 return counterETB;
         }
@@ -1629,9 +1644,19 @@ public class AiController {
         //update LivingEndPlayer
         useLivingEnd = IterableUtil.any(player.getZone(ZoneType.Library), CardPredicates.nameEquals("Living End"));
 
-        SpellAbility chosenSa = chooseSpellAbilityToPlayFromList(saList, true);
+        // When our own spell is on the stack, the outer guard below accepts only the
+        // copy ability. Tell the trace about that final constraint so a different
+        // internally-willing option is recorded as a pass, not as a spell we played.
+        final boolean finalPickRestricted = topOwnedByAI && !mustRespond;
+        SpellAbility chosenSa = chooseSpellAbilityToPlayFromList(saList, true,
+                game.getStack().isEmpty() ? "main" : "response",
+                finalPickRestricted);
 
-        if (topOwnedByAI && !mustRespond && chosenSa != ComputerUtilAbility.getFirstCopySASpell(saList)) {
+        // The chooser sorts saList in place. Preserve the original guard's ordering:
+        // it selected the required copy ability only after that sort completed.
+        final SpellAbility requiredFinalPick = finalPickRestricted
+                ? ComputerUtilAbility.getFirstCopySASpell(saList) : null;
+        if (finalPickRestricted && chosenSa != requiredFinalPick) {
             return null; // not planning to copy the spell and not marked as something the AI would respond to
         }
 
@@ -1639,6 +1664,16 @@ public class AiController {
     }
 
     private SpellAbility chooseSpellAbilityToPlayFromList(final List<SpellAbility> all, boolean skipCounter) {
+        return chooseSpellAbilityToPlayFromList(all, skipCounter, "main");
+    }
+
+    private SpellAbility chooseSpellAbilityToPlayFromList(final List<SpellAbility> all, boolean skipCounter,
+            final String logContext) {
+        return chooseSpellAbilityToPlayFromList(all, skipCounter, logContext, false);
+    }
+
+    private SpellAbility chooseSpellAbilityToPlayFromList(final List<SpellAbility> all, boolean skipCounter,
+            final String logContext, final boolean finalPickRestricted) {
         if (all == null || all.isEmpty())
             return null;
 
@@ -1651,15 +1686,23 @@ public class AiController {
             Sentry.captureMessage(ex.getMessage() + "\nAssertionError [verifyTransitivity]: " + assertex);
         }
 
+        // Match the outer own-stack guard: getFirstCopySASpell is order-sensitive,
+        // so this must be computed after the chooser's in-place sort.
+        final SpellAbility requiredFinalPick = finalPickRestricted
+                ? ComputerUtilAbility.getFirstCopySASpell(all) : null;
+
         // in case of infinite loop reset below would not be reached
         timeoutReached = false;
 
         FutureTask<SpellAbility> future = new FutureTask<>(() -> {
             //avoid ComputerUtil.aiLifeInDanger in loops as it slows down a lot.. call this outside loops will generally be fast...
             boolean isLifeInDanger = useLivingEnd && ComputerUtil.aiLifeInDanger(player, true, 0);
+            // Null unless FORGE_AI_DECISION_LOG is set, so this allocates nothing normally.
+            final java.util.List<String[]> decisionRecord = AiDecisionLog.newRecord();
             for (final SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(all, player)) {
                 // Don't add Counterspells to the "normal" playcard lookups
                 if (skipCounter && sa.getApi() == ApiType.Counter) {
+                    AiDecisionLog.consider(decisionRecord, sa, "SkippedCounterspell");
                     continue;
                 }
 
@@ -1728,12 +1771,24 @@ public class AiController {
                 // PhaseHandler ph = game.getPhaseHandler();
                 // System.out.printf("Ai thinks '%s' of %s -> %s @ %s %s >>> \n", opinion, sa.getHostCard(), sa, Lang.getInstance().getPossesive(ph.getPlayerTurn().getName()), ph.getPhase());
 
+                AiDecisionLog.consider(decisionRecord, sa, opinion);
+
                 if (opinion != AiPlayDecision.WillPlay)
                     continue;
 
+                final boolean acceptedByFinalGuard = !finalPickRestricted || sa == requiredFinalPick;
+                if (!acceptedByFinalGuard) {
+                    AiDecisionLog.veto(decisionRecord, sa,
+                            "AiController: own-stack response guard accepts only the copy ability");
+                }
+                AiDecisionLog.emit(decisionRecord, player, game, logContext,
+                        acceptedByFinalGuard ? sa : null);
                 return sa;
             }
 
+            // A pass. The record is complete here — every option was evaluated and
+            // rejected — which makes these the most informative entries in the trace.
+            AiDecisionLog.emit(decisionRecord, player, game, logContext, null);
             return null;
         });
 

@@ -37,12 +37,14 @@ public class PumpAllAi extends PumpAiBase {
             PhaseHandler ph = ai.getGame().getPhaseHandler();
             if (!(ph.is(PhaseType.COMBAT_DECLARE_BLOCKERS, ai)
                     || (!ph.getPlayerTurn().equals(ai) && ph.is(PhaseType.COMBAT_DECLARE_ATTACKERS)))) {
+                AiDecisionLog.reason("PumpAllAi: untap combat trick held outside its combat window");
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             }
         }
 
         if (abCost != null && source.hasSVar("AIPreference")) {
             if (!ComputerUtilCost.checkSacrificeCost(ai, abCost, source, sa, true)) {
+                AiDecisionLog.reason("PumpAllAi: sacrifice cost has no acceptable permanent");
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             }
         }
@@ -93,6 +95,7 @@ public class PumpAllAi extends PumpAiBase {
                         || phase.isBefore(PhaseType.COMBAT_DECLARE_ATTACKERS)
                         || game.getPhaseHandler().isPlayerTurn(sa.getActivatingPlayer())
                         || game.getReplacementHandler().isPreventCombatDamageThisTurn()) {
+                    AiDecisionLog.reason("PumpAllAi: power reduction held outside opposing combat damage");
                     return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
                 }
                 int totalPower = 0;
@@ -111,6 +114,7 @@ public class PumpAllAi extends PumpAiBase {
                         return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
                     }
                 }
+                AiDecisionLog.reason("PumpAllAi: power reduction does not prevent enough attacking damage");
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             } // -X/-0 end
             
@@ -119,7 +123,13 @@ public class PumpAllAi extends PumpAiBase {
             }
 
             // evaluate both lists and pass only if human creatures are more valuable
-            boolean result = (ComputerUtilCard.evaluateCreatureList(comp) + 200) < ComputerUtilCard.evaluateCreatureList(human);
+            final int ownValue = ComputerUtilCard.evaluateCreatureList(comp);
+            final int opponentValue = ComputerUtilCard.evaluateCreatureList(human);
+            boolean result = ownValue + 200 < opponentValue;
+            if (!result) {
+                AiDecisionLog.reason("PumpAllAi: affected opposing creature value " + opponentValue
+                        + " does not exceed own value " + ownValue + " plus 200");
+            }
             return result ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         } // end Curse
 
@@ -130,6 +140,9 @@ public class PumpAllAi extends PumpAiBase {
 
         boolean result = ai.getCreaturesInPlay().anyMatch(c -> c.isValid(valid, source.getController(), source, sa)
                 && ComputerUtilCard.shouldPumpCard(ai, sa, c, defense, power, keywords));
+        if (!result) {
+            AiDecisionLog.reason("PumpAllAi: no affected creature benefits enough from the pump");
+        }
         return result ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
     }
 

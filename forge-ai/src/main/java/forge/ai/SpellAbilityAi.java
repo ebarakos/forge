@@ -71,6 +71,7 @@ public abstract class SpellAbilityAi {
             final boolean alwaysOnDiscard = "AlwaysOnDiscard".equals(logic) && ai.getGame().getPhaseHandler().is(PhaseType.END_OF_TURN, ai)
                     && !ai.isUnlimitedHandSize() && ai.getCardsIn(ZoneType.Hand).size() > ai.getMaxHandSize();
             if (!checkAiLogic(ai, sa, logic)) {
+                AiDecisionLog.reason(getClass().getSimpleName() + ": AILogic '" + logic + "' rejected");
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             }
             if (!alwaysOnDiscard && !checkPhaseRestrictions(ai, sa, ai.getGame().getPhaseHandler(), logic)) {

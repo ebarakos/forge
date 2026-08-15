@@ -778,7 +778,18 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn)  {
-        return !ComputerUtil.wantMulligan(player, cardsToReturn);
+        final CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
+        if (hand.isEmpty()) {
+            AiDecisionLog.emitMulligan(player, hand, cardsToReturn, 1, true,
+                    "keep: hand is empty");
+            return true;
+        }
+        final ComputerUtil.HandEvaluation evaluation =
+                ComputerUtil.evaluateHand(hand, player, cardsToReturn);
+        final boolean keep = evaluation.shouldKeep();
+        AiDecisionLog.emitMulligan(player, hand, cardsToReturn, evaluation.getScore(), keep,
+                evaluation.getReason());
+        return keep;
     }
 
     @Override
@@ -930,6 +941,16 @@ public class PlayerControllerAi extends PlayerController {
     @Override
     public void declareBlockers(Player defender, Combat combat) {
         brains.declareBlockersFor(defender, combat);
+    }
+
+    @Override
+    public void notifyFinalAttackersDeclared(Player attacker, Combat combat) {
+        AiDecisionLog.emitAttackDeclaration(attacker, combat);
+    }
+
+    @Override
+    public void notifyFinalBlockersDeclared(Player defender, Combat combat) {
+        AiDecisionLog.emitBlockDeclaration(defender, combat);
     }
 
     @Override

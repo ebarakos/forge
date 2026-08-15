@@ -156,6 +156,14 @@ public abstract class PlayerController {
     public abstract void declareAttackers(Player attacker, Combat combat);
     public abstract void declareBlockers(Player defender, Combat combat);
 
+    /** Called after attack retries and mandatory attack costs have settled. */
+    public void notifyFinalAttackersDeclared(Player attacker, Combat combat) {
+    }
+
+    /** Called after mandatory block costs and declaration constraints have settled. */
+    public void notifyFinalBlockersDeclared(Player defender, Combat combat) {
+    }
+
     public abstract CardCollection orderBlockers(Card attacker, CardCollection blockers);
 
     /**

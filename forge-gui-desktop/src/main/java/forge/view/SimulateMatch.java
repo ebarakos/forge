@@ -407,10 +407,15 @@ public class SimulateMatch {
         // - Exception: --llm-debug keeps stderr open for LLM debug trace
         // - Exception: FORGE_LLM_SHADOW=1 keeps stderr open for "[LLM SHADOW]" divergence lines
         //   (much lighter than --llm-debug; emits one short line per spell-selection call).
+        // - Exception: FORGE_AI_DECISION_LOG=1 keeps stderr open for "[AI DECISION]" lines
+        //   (forge.ai.AiDecisionLog). Without this the trace is silently discarded in
+        //   exactly the runs most likely to want it, since any tooling reading results
+        //   programmatically passes --json.
         String shadowEnv = System.getenv("FORGE_LLM_SHADOW");
         boolean shadowMode = shadowEnv != null && !shadowEnv.isEmpty()
                 && !"false".equalsIgnoreCase(shadowEnv) && !"0".equals(shadowEnv);
-        boolean keepStderr = cmd.isLlmDebug() || shadowMode || SIM_POLICY_LOGGING || SIM_COMBAT_LOGGING;
+        boolean keepStderr = cmd.isLlmDebug() || shadowMode || SIM_POLICY_LOGGING || SIM_COMBAT_LOGGING
+                || forge.ai.AiDecisionLog.ENABLED;
         if (quietMode || structuredOutput) {
             System.setOut(NULL_PRINT_STREAM);
             if (!keepStderr) {
@@ -605,7 +610,7 @@ public class SimulateMatch {
         final ProgressBar progress = new ProgressBar(ORIGINAL_ERR, nGames);
 
         System.setOut(NULL_PRINT_STREAM);
-        if (!SIM_POLICY_LOGGING && !SIM_COMBAT_LOGGING) {
+        if (!SIM_POLICY_LOGGING && !SIM_COMBAT_LOGGING && !forge.ai.AiDecisionLog.ENABLED) {
             System.setErr(NULL_PRINT_STREAM);
         }
 

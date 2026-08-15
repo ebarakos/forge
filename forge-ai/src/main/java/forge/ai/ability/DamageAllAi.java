@@ -22,6 +22,7 @@ public class  DamageAllAi extends SpellAbilityAi {
 
         // wait until stack is empty (prevents duplicate kills)
         if (!ai.getGame().getStack().isEmpty()) {
+            AiDecisionLog.reason("DamageAllAi: sweep held while another spell or ability is on the stack");
             return new AiAbilityDecision(0, AiPlayDecision.StackNotEmpty);
         }
 
@@ -41,9 +42,12 @@ public class  DamageAllAi extends SpellAbilityAi {
             }
             // look for other value in this (damaging creatures or
             // creatures + player, e.g. Pestilence, etc.)
-             if (evaluateDamageAll(ai, sa, source, dmg) > 0) {
+             final int sweepValue = evaluateDamageAll(ai, sa, source, dmg);
+             if (sweepValue > 0) {
                  return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
              } else {
+                 AiDecisionLog.reason("DamageAllAi: sweep value " + sweepValue
+                         + " is not positive at " + dmg + " damage");
                  return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
              }
         } else {
@@ -73,6 +77,7 @@ public class  DamageAllAi extends SpellAbilityAi {
                 }
                 return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
             }
+            AiDecisionLog.reason("DamageAllAi: no useful positive damage amount up to " + x);
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
     }
@@ -115,6 +120,7 @@ public class  DamageAllAi extends SpellAbilityAi {
         // TODO: if damage is dependent on mana paid, maybe have X be human's max life
         // Don't kill yourself
         if (validP.equals("Player") && (ai.getLife() <= ComputerUtilCombat.predictDamageTo(ai, dmg, source, false))) {
+            AiDecisionLog.reason("DamageAllAi: " + dmg + " damage would be lethal to its controller");
             return -1;
         }
 
