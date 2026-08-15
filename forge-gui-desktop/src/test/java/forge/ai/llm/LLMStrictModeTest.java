@@ -84,6 +84,30 @@ public class LLMStrictModeTest {
         Assert.assertTrue(message.contains(LLMStrictMode.ENV_VAR), "says which switch did this: " + message);
     }
 
+    /**
+     * Without the hard ending armed, the abort throws instead of stopping the JVM.
+     *
+     * <p>{@code FORGE_LLM_STRICT} is read from a {@code .env} file as well as the
+     * process environment, so a line left over from a benchmark is still in force the
+     * next time the desktop client is launched from that directory. Halting there would
+     * make the whole application disappear mid-game — no dialog, nothing catchable, no
+     * shutdown hooks. Only the command-line entry point arms the halt.
+     */
+    @Test
+    public void aFallbackOutsideAHeadlessRunThrowsInsteadOfKillingTheProcess() {
+        LLMStrictMode.setAborterForTesting(null); // back to the shipped default
+        LLMStrictMode.setEnabledForTesting(true);
+        try {
+            LLMStrictMode.onFallback("Ai(1)-Burn", "relay→cerebras:qwen", "timeout", 3, 1);
+            Assert.fail("A strict-mode fallback has to end the run somehow");
+        } catch (IllegalStateException expected) {
+            Assert.assertTrue(expected.getMessage().contains("Ai(1)-Burn"),
+                    "the thrown message still names the seat: " + expected.getMessage());
+        } finally {
+            LLMStrictMode.setAborterForTesting(aborts::add);
+        }
+    }
+
     @Test
     public void missingFieldsStillProduceAReadableMessage() {
         String message = LLMStrictMode.fallbackMessage(null, null, null, 0, 1);

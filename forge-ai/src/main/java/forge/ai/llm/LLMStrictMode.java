@@ -26,7 +26,17 @@ import java.util.function.Consumer;
  *
  * <p>Either one silently voids a measurement. With {@code FORGE_LLM_STRICT} set
  * they end the run instead, with a message naming the seat, the failure and how
- * many LLM calls had been made, and the process exits {@link #EXIT_CODE}.
+ * many LLM calls had been made.
+ *
+ * <p><b>How the run ends depends on who is running it.</b> A headless run has
+ * {@link #useProcessHalt()} armed by the command-line entry point and stops the
+ * JVM with {@link #EXIT_CODE}; anywhere else — the desktop client above all —
+ * the abort throws instead, so Forge's own error handling reports it. That
+ * distinction is not cosmetic: {@code FORGE_LLM_STRICT} is read from a
+ * {@code .env} file as well as the process environment, so a line left in the
+ * project's {@code .env} after a benchmark is live for the next interactive
+ * game too, and a single timed-out call would otherwise make the whole
+ * application vanish mid-match with no dialog and nothing catchable.
  *
  * <p>With the variable unset every method here is a no-op and behaviour is
  * exactly what it was before this class existed.
@@ -42,8 +52,15 @@ public final class LLMStrictMode {
     /** Resolved lazily so that an ordinary run never touches the filesystem for this. */
     private static volatile Boolean enabled;
 
-    /** What to do with the abort message. Replaced in tests so the JVM survives. */
-    private static volatile Consumer<String> aborter = LLMStrictMode::printAndHalt;
+    /**
+     * What to do with the abort message.
+     *
+     * <p>Throwing is the default because it is the only ending that is safe everywhere:
+     * a GUI game can report it, and a headless run that has not armed the process halt
+     * still fails loudly. {@link #useProcessHalt()} swaps in the harder ending for
+     * command-line runs, where a sim can be several threads deep inside the engine.
+     */
+    private static volatile Consumer<String> aborter = LLMStrictMode::throwAbort;
 
     private LLMStrictMode() {
     }
@@ -96,6 +113,19 @@ public final class LLMStrictMode {
     }
 
     /**
+     * Arm the hard ending for headless runs: print to the real stderr and stop the JVM.
+     *
+     * <p>Called by the command-line entry point, and only there. A sim abort can come
+     * from a game worker thread while other threads hold engine locks, so
+     * {@link Runtime#halt} — which no shutdown hook can block — is the only ending that
+     * reliably happens. In the desktop client the same call would make the application
+     * disappear mid-game, which is why it is opt-in rather than the default.
+     */
+    public static void useProcessHalt() {
+        aborter = LLMStrictMode::printAndHalt;
+    }
+
+    /**
      * Message for a seat whose profile names an LLM but which would play as the
      * plain heuristic AI. The caller decides how to fail — the command line
      * returns {@link #EXIT_CODE}, the desktop client throws.
@@ -145,7 +175,19 @@ public final class LLMStrictMode {
     }
 
     /**
-     * Default abort: write to the process's real stderr and stop the JVM.
+     * Default abort: throw, so whoever is running the game can report it.
+     *
+     * <p>Safe on the GUI's event and game threads, where Forge's own exception handler
+     * turns it into a bug report the player can see, and loud enough in any other
+     * embedding that the run cannot quietly continue as a heuristic one.
+     */
+    private static void throwAbort(String message) {
+        throw new IllegalStateException(message);
+    }
+
+    /**
+     * Hard abort, armed by {@link #useProcessHalt()}: write to the process's real
+     * stderr and stop the JVM.
      *
      * <p>The file descriptor is opened directly rather than going through
      * {@link System#err} because simulation runs replace {@code System.err} with
@@ -175,7 +217,7 @@ public final class LLMStrictMode {
     /** Swaps the abort action and returns the previous one so a test can restore it. */
     static Consumer<String> setAborterForTesting(Consumer<String> next) {
         Consumer<String> previous = aborter;
-        aborter = (next == null) ? LLMStrictMode::printAndHalt : next;
+        aborter = (next == null) ? LLMStrictMode::throwAbort : next;
         return previous;
     }
 }

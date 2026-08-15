@@ -19,6 +19,7 @@ package forge.view;
 
 import forge.GuiDesktop;
 import forge.Singletons;
+import forge.ai.llm.LLMStrictMode;
 import forge.cli.ExitCode;
 import forge.cli.ForgeCli;
 import forge.error.ExceptionHandler;
@@ -69,6 +70,11 @@ public final class Main {
         // uncaught exception here must not try to show a modal dialog for it -- see
         // GuiDesktop.showBugReportDialog.
         GuiBase.setCliMode(true);
+        // Headless runs are the ones that must not be allowed to continue as heuristic
+        // runs, and the ones where an abort can be several threads deep inside the
+        // engine. Only here — in the GUI the same switch would make the application
+        // disappear mid-game.
+        LLMStrictMode.useProcessHalt();
 
         // CLI mode - use picocli for parsing
         int exitCode = new CommandLine(new ForgeCli())
