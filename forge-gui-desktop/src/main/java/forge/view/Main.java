@@ -65,6 +65,11 @@ public final class Main {
             return;
         }
 
+        // CLI mode (sim, parse, server, help) never opens a Swing event loop, so an
+        // uncaught exception here must not try to show a modal dialog for it -- see
+        // GuiDesktop.showBugReportDialog.
+        GuiBase.setCliMode(true);
+
         // CLI mode - use picocli for parsing
         int exitCode = new CommandLine(new ForgeCli())
             .setExecutionExceptionHandler(new ExecutionExceptionHandler())

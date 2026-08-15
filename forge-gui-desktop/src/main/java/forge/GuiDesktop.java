@@ -32,6 +32,7 @@ import forge.gui.BoxedProductCardListViewer;
 import forge.gui.CardListChooser;
 import forge.gui.CardListViewer;
 import forge.gui.FThreads;
+import forge.gui.GuiBase;
 import forge.gui.GuiChoose;
 import forge.gui.download.GuiDownloadService;
 import forge.gui.interfaces.IGuiBase;
@@ -258,6 +259,15 @@ public class GuiDesktop implements IGuiBase {
 
     @Override
     public void showBugReportDialog(final String title, final String text, final boolean showExitAppBtn) {
+        if (GuiBase.isCliMode()) {
+            // A CLI/sim run has no Swing event loop to show this in, and no one at the
+            // keyboard to click it -- an unattended run would just hang on the dialog
+            // (setting java.awt.headless=true instead turns this into a HeadlessException
+            // that kills the process). Print the same report to stderr and move on.
+            System.err.println("=== " + title + " ===");
+            System.err.println(text);
+            return;
+        }
         BugReportDialog.show(title, text, showExitAppBtn);
     }
 
