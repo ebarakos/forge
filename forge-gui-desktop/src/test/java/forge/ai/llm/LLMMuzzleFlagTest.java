@@ -30,6 +30,7 @@ public class LLMMuzzleFlagTest {
             "FORGE_LLM_PLAN_STEP_APPROVAL",
             "FORGE_LLM_EMPTY_PLAN_OVERRIDE",
             "FORGE_LLM_HEURISTIC_LAND_DROPS",
+            "FORGE_LLM_HEURISTIC_TARGETS",
             "FORGE_LLM_HARDCODED_PLAY_FIRST",
     };
 
@@ -102,6 +103,7 @@ public class LLMMuzzleFlagTest {
         Assert.assertTrue(LLMFullController.PLAN_STEP_APPROVAL);
         Assert.assertTrue(LLMFullController.EMPTY_PLAN_OVERRIDE);
         Assert.assertTrue(LLMFullController.HEURISTIC_LAND_DROPS);
+        Assert.assertTrue(LLMFullController.HEURISTIC_TARGETS);
         Assert.assertTrue(LLMFullController.HARDCODED_PLAY_FIRST);
         Assert.assertEquals(LLMFullController.HEURISTIC_TOPK, 8);
         Assert.assertEquals(LLMFullController.COMBAT_MODE, "heuristic");

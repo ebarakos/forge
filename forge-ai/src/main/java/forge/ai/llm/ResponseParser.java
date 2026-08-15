@@ -308,6 +308,53 @@ public final class ResponseParser {
     }
 
     /**
+     * Parse a target selection from an LLM response.
+     *
+     * <p>The answer is a list of indices into the candidate list the prompt
+     * offered, in the order the model wants them targeted. Duplicates are
+     * dropped (targeting the same entity twice is never legal) and indices
+     * outside the candidate list are skipped rather than ending the list — a
+     * model that names one bad index has still expressed a preference about the
+     * rest, and the caller checks legality of every pick against the engine
+     * before applying it.
+     *
+     * <p>Returns an empty list when nothing usable is present. That is not the
+     * same as "target nothing": the caller treats an empty answer as a failed
+     * call and keeps the targets the heuristic AI had already chosen.
+     *
+     * @param response      raw LLM response text
+     * @param numCandidates number of candidates offered (indices must be below this)
+     */
+    public static List<Integer> parseTargetIndices(String response, int numCandidates) {
+        List<Integer> result = new ArrayList<>();
+        if (numCandidates <= 0) return result;
+
+        Set<Integer> seen = new LinkedHashSet<>();
+        JsonObject obj = tryParseJsonObject(response);
+        if (obj != null && obj.has("targets") && obj.get("targets").isJsonArray()) {
+            for (JsonElement el : obj.getAsJsonArray("targets")) {
+                try {
+                    int v = el.getAsInt();
+                    if (v >= 0 && v < numCandidates && seen.add(v)) result.add(v);
+                } catch (Exception ignored) {}
+            }
+            return result;
+        }
+        if (response == null || response.isBlank()) return result;
+
+        // Text fallback for models that ignore the schema: take every integer
+        // that names a real candidate, in the order written.
+        Matcher m = Pattern.compile("\\b(\\d+)\\b").matcher(response);
+        while (m.find()) {
+            int val = Integer.parseInt(m.group(1));
+            if (val >= 0 && val < numCandidates && seen.add(val)) {
+                result.add(val);
+            }
+        }
+        return result;
+    }
+
+    /**
      * Parse an ordered plan sequence from an LLM response (B1 — MAIN-phase plan batching).
      * Format: comma-separated indices, optionally followed by "PASS" to terminate
      * (e.g. "2,0,PASS"). A plain "PASS" or "NONE" returns an empty list. Indices

@@ -135,22 +135,16 @@ final class LLMSpellSelection {
             if (only.isLandAbility()) {
                 // Reachable only when the model owns land drops; the heuristic
                 // has no verdict for a land play, so just take it.
-                recordSpellAction(only, phase);
-                List<SpellAbility> landResult = new ArrayList<>();
-                landResult.add(only);
-                return landResult;
+                return commit(only, phase);
             }
             AiPlayDecision decision;
             try {
-                decision = ctrl.getAi().canPlaySa(only);
+                decision = ctrl.askHeuristicVerdict(only);
             } catch (Exception e) {
                 decision = AiPlayDecision.WillPlay;
             }
             if (decision == AiPlayDecision.WillPlay) {
-                recordSpellAction(only, phase);
-                List<SpellAbility> result = new ArrayList<>();
-                result.add(only);
-                return result;
+                return commit(only, phase);
             }
             return null; // heuristic refuses → PASS
         }
@@ -172,10 +166,7 @@ final class LLMSpellSelection {
         if (isMainPhase) {
             SpellAbility planned = popValidPlanStep(pruned, phase);
             if (planned != null) {
-                recordSpellAction(planned, phase);
-                List<SpellAbility> result = new ArrayList<>();
-                result.add(planned);
-                return result;
+                return commit(planned, phase);
             }
 
             // No valid cached plan — request a new one.
@@ -246,20 +237,14 @@ final class LLMSpellSelection {
                             if (heurHost != null) {
                                 ctrl.mainPhasePlan.addLast(heurHost.getName());
                             }
-                            recordSpellAction(heurPick, phase);
-                            List<SpellAbility> result = new ArrayList<>();
-                            result.add(heurPick);
-                            return result;
+                            return commit(heurPick, phase);
                         }
                     }
                 }
 
                 SpellAbility firstStep = popValidPlanStep(pruned, phase);
                 if (firstStep != null) {
-                    recordSpellAction(firstStep, phase);
-                    List<SpellAbility> result = new ArrayList<>();
-                    result.add(firstStep);
-                    return result;
+                    return commit(firstStep, phase);
                 }
                 // Muzzle: FORGE_LLM_EMPTY_PLAN_OVERRIDE (on by default).
                 // Small models occasionally emit "plan":[] even when a clear
@@ -274,7 +259,7 @@ final class LLMSpellSelection {
                     SpellAbility heuristicTop = pruned.get(0);
                     AiPlayDecision verdict;
                     try {
-                        verdict = ctrl.getAi().canPlaySa(heuristicTop);
+                        verdict = ctrl.askHeuristicVerdict(heuristicTop);
                     } catch (Exception e) {
                         verdict = null;
                     }
@@ -284,10 +269,7 @@ final class LLMSpellSelection {
                                     + heuristicTop.getHostCard().getName()
                                     + " → recovering with heuristic top pick");
                         }
-                        recordSpellAction(heuristicTop, phase);
-                        List<SpellAbility> result = new ArrayList<>();
-                        result.add(heuristicTop);
-                        return result;
+                        return commit(heuristicTop, phase);
                     }
                 }
                 // No matches and heuristic doesn't push back → honour PASS.
@@ -314,10 +296,23 @@ final class LLMSpellSelection {
 
         SpellAbility selectedSa = pruned.get(chosen);
         logShadowMode("chooseSpellAbilityToPlay", pruned, Collections.singletonList(chosen));
-        recordSpellAction(selectedSa, phase);
+        return commit(selectedSa, phase);
+    }
 
+    /**
+     * Hand back the ability the seat has settled on.
+     *
+     * <p>Two things happen here and the order matters. The targets are decided
+     * first — the muzzle {@code FORGE_LLM_HEURISTIC_TARGETS} decides whether
+     * that is the heuristic's existing choice or a fresh one from the model —
+     * and only then is the action written into the history, so the history line
+     * names the target that will actually be used.
+     */
+    private List<SpellAbility> commit(SpellAbility sa, PhaseType phase) {
+        ctrl.chooseTargetsWithLLM(sa, "spellTargets");
+        recordSpellAction(sa, phase);
         List<SpellAbility> result = new ArrayList<>();
-        result.add(selectedSa);
+        result.add(sa);
         return result;
     }
 
@@ -401,7 +396,7 @@ final class LLMSpellSelection {
             }
             AiPlayDecision verdict;
             try {
-                verdict = ctrl.getAi().canPlaySa(sa);
+                verdict = ctrl.askHeuristicVerdict(sa);
             } catch (Exception e) {
                 verdict = null;
             }
@@ -568,7 +563,7 @@ final class LLMSpellSelection {
                 return match;
             }
             try {
-                AiPlayDecision decision = ctrl.getAi().canPlaySa(match);
+                AiPlayDecision decision = ctrl.askHeuristicVerdict(match);
                 if (decision == AiPlayDecision.WillPlay) {
                     return match;
                 }

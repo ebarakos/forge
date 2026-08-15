@@ -98,7 +98,7 @@ public class LLMFullController extends PlayerControllerAi {
     // Muzzles: which decisions the heuristic AI keeps for itself
     // =======================================================================
     //
-    // An "LLM seat" does not actually decide everything. Nine places below
+    // An "LLM seat" does not actually decide everything. Ten places below
     // hand a decision back to the heuristic AI, either always or whenever the
     // heuristic disagrees with the model. That is deliberate — each one was
     // added because it won games — but it also means a run labelled "LLM" is
@@ -126,6 +126,7 @@ public class LLMFullController extends PlayerControllerAi {
     //   FORGE_LLM_EMPTY_PLAN_OVERRIDE   on   — when the model chose to hold, cast anyway if the
     //                                          heuristic wants to play something
     //   FORGE_LLM_HEURISTIC_LAND_DROPS  on   — the heuristic picks which land to play, and when
+    //   FORGE_LLM_HEURISTIC_TARGETS     on   — the heuristic decides where each spell points
     //   FORGE_LLM_HARDCODED_PLAY_FIRST  on   — always choose to play first, without asking
     //
     // Truthiness for the boolean switches follows the rest of FORGE_LLM_*:
@@ -190,6 +191,18 @@ public class LLMFullController extends PlayerControllerAi {
     static final boolean HEURISTIC_LAND_DROPS = muzzleOn("FORGE_LLM_HEURISTIC_LAND_DROPS");
 
     /**
+     * Let the heuristic decide where every spell and ability points. This is
+     * not a decision the seat was ever asked for: targets are set as a side
+     * effect of the heuristic's own {@code canPlaySa} check while the option
+     * list is being built, so a burn spell's face-versus-creature choice
+     * belonged to the heuristic even on a fully "LLM" seat. Off
+     * ({@code FORGE_LLM_HEURISTIC_TARGETS=0}) the model is shown the legal
+     * targets of the ability it just chose and re-points it. See
+     * {@link LLMTargeting} for what stays with the heuristic even then.
+     */
+    static final boolean HEURISTIC_TARGETS = muzzleOn("FORGE_LLM_HEURISTIC_TARGETS");
+
+    /**
      * Always choose to play first, without asking anyone. Off
      * ({@code FORGE_LLM_HARDCODED_PLAY_FIRST=0}) asks the model to choose play
      * or draw; a failed call still falls back to playing first.
@@ -247,11 +260,57 @@ public class LLMFullController extends PlayerControllerAi {
      */
     static final ThreadLocal<Boolean> IN_FEASIBILITY = ThreadLocal.withInitial(() -> false);
 
+    /**
+     * How deep we are inside a question put to the heuristic AI purely for its
+     * opinion — "would you play this?", "what would you play?" — whose answer is
+     * then discarded or revised.
+     *
+     * <p>It matters because some of those questions reach back out to this
+     * controller. A card that says the opponent chooses targets sends the
+     * heuristic's own {@code canPlaySa} through {@code chooseTargetsFor}, so
+     * without this counter a single pass over the option list could spend one
+     * LLM target call per option on abilities that are never cast. Per-thread
+     * for the same reason as {@link #IN_FEASIBILITY}: parallel matches each run
+     * on their own controller.
+     */
+    private static final ThreadLocal<Integer> HEURISTIC_CONSULT_DEPTH =
+            ThreadLocal.withInitial(() -> 0);
+
+    /** True while an answer is being collected from the heuristic AI for comparison. */
+    static boolean isConsultingHeuristic() {
+        return HEURISTIC_CONSULT_DEPTH.get() > 0;
+    }
+
+    private static void enterHeuristicConsult() {
+        HEURISTIC_CONSULT_DEPTH.set(HEURISTIC_CONSULT_DEPTH.get() + 1);
+    }
+
+    private static void exitHeuristicConsult() {
+        HEURISTIC_CONSULT_DEPTH.set(HEURISTIC_CONSULT_DEPTH.get() - 1);
+    }
+
+    /**
+     * The heuristic AI's verdict on one ability. Identical to calling
+     * {@code getAi().canPlaySa(sa)} except that it marks the call as an opinion,
+     * so nothing it reaches decides to spend an LLM call of its own.
+     */
+    AiPlayDecision askHeuristicVerdict(SpellAbility sa) {
+        enterHeuristicConsult();
+        try {
+            return getAi().canPlaySa(sa);
+        } finally {
+            exitHeuristicConsult();
+        }
+    }
+
     /** Spell-selection delegate (heuristic prior, plan caching, choose ability). */
     private final LLMSpellSelection spellSelection;
 
     /** Combat delegate (declare attackers/blockers with heuristic baselines). */
     private final LLMCombat combat;
+
+    /** Target-choice delegate (re-points an ability the heuristic already targeted). */
+    private final LLMTargeting targeting;
 
     private static boolean isTruthy(String v) {
         return v != null && !v.isEmpty() && !"false".equalsIgnoreCase(v) && !"0".equals(v);
@@ -300,6 +359,17 @@ public class LLMFullController extends PlayerControllerAi {
                 ? MAX_HISTORY_CACHED : MAX_HISTORY_UNCACHED;
         this.spellSelection = new LLMSpellSelection(this);
         this.combat = new LLMCombat(this);
+        this.targeting = new LLMTargeting(this);
+    }
+
+    /**
+     * Hand target choice for {@code sa} to the model, if that muzzle is off.
+     * Returns true when the targets changed hands; false leaves the ability
+     * exactly as the heuristic AI targeted it. Package-private so
+     * {@link LLMSpellSelection} can call it on the ability it is about to play.
+     */
+    boolean chooseTargetsWithLLM(SpellAbility sa, String callLabel) {
+        return targeting.chooseTargets(sa, callLabel);
     }
 
     /** Record an action summary for the sliding window history. */
@@ -811,9 +881,20 @@ public class LLMFullController extends PlayerControllerAi {
         return spellSelection.chooseSpellAbilityToPlay();
     }
 
-    /** Default heuristic spell selection — exposed so {@link LLMSpellSelection} can fall back to it. */
+    /**
+     * Default heuristic spell selection — exposed so {@link LLMSpellSelection}
+     * can fall back to it, and so it can ask what the heuristic would do. Marked
+     * as a heuristic consultation for the duration: whatever the caller does
+     * with the answer, nothing reached along the way should spend an LLM call
+     * of its own (see {@link #isConsultingHeuristic()}).
+     */
     List<SpellAbility> defaultChooseSpellAbilityToPlay() {
-        return super.chooseSpellAbilityToPlay();
+        enterHeuristicConsult();
+        try {
+            return super.chooseSpellAbilityToPlay();
+        } finally {
+            exitHeuristicConsult();
+        }
     }
 
 
@@ -1478,6 +1559,29 @@ public class LLMFullController extends PlayerControllerAi {
     public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(
             SpellAbility sa, List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) {
         return chooseFromGenericList(allTargets, "Choose target");
+    }
+
+    /**
+     * Where a triggered, copied or otherwise engine-driven ability points.
+     *
+     * <p>The inherited version asks the heuristic AI's {@code doTrigger}, which
+     * both decides whether to use the ability and sets its targets. Keep that —
+     * it is the only thing that knows whether the ability is worth using at all
+     * — then let the model re-point the result. With
+     * {@code FORGE_LLM_HEURISTIC_TARGETS} on (the default) this is exactly the
+     * inherited behaviour.
+     */
+    @Override
+    public boolean chooseTargetsFor(SpellAbility currentAbility) {
+        boolean heuristicTargeted = super.chooseTargetsFor(currentAbility);
+        if (!heuristicTargeted) {
+            // The heuristic found no targets it would accept. There is nothing
+            // to re-point, and overriding that verdict would put an ability on
+            // the stack the seat never decided to use.
+            return false;
+        }
+        chooseTargetsWithLLM(currentAbility, "chooseTargetsFor");
+        return true;
     }
 
     // =======================================================================
