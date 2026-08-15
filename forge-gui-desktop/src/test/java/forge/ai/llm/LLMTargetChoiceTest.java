@@ -5,6 +5,7 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -156,6 +157,79 @@ public class LLMTargetChoiceTest {
         Assert.assertEquals(
                 ResponseParser.parseTargetIndices("```json\n{\"targets\":[1]}\n```", 3),
                 Arrays.asList(1));
+    }
+
+    /**
+     * Digits in the model's justification must never outrank the answer.
+     *
+     * <p>The candidate list for a burn spell reads {@code 0: Opponent}, {@code 1: their
+     * 2/3 flier}, {@code 2: your own Ornithopter}. Every body below names candidate 1,
+     * and every one of them used to come back as {@code [2, …]} — the seat's own
+     * creature — because the whole response was scanned for integers and "2/3" is
+     * written before the answer is. The engine accepts that target ("any target"), the
+     * count is right, so no fallback was recorded and the run reported a clean model
+     * decision to burn its own board.
+     */
+    @Test
+    public void digitsInTheReasoningNeverBecomeTheTarget() {
+        // Scalar payload: the array branch misses, and everything after it used to scan.
+        Assert.assertEquals(
+                ResponseParser.parseTargetIndices(
+                        "{\"reasoning\":\"Bolt the 2/3 flier\",\"targets\":1}", 3),
+                Arrays.asList(1));
+        // A schema-correct answer wearing a chatty preamble.
+        Assert.assertEquals(
+                ResponseParser.parseTargetIndices(
+                        "Sure: {\"reasoning\":\"Kill their 2/3 blocker\",\"targets\":[1]}", 3),
+                Arrays.asList(1));
+        // Prose with the answer labelled.
+        Assert.assertEquals(
+                ResponseParser.parseTargetIndices(
+                        "Their 2/3 blocks my 2/1 every turn.\nTARGET: 1", 3),
+                Arrays.asList(1));
+        // A structured answer the token limit cut in half is not prose to be mined.
+        Assert.assertTrue(ResponseParser.parseTargetIndices(
+                        "{\"reasoning\":\"Their 2/3 blocks my 2/1 every turn so I remo", 3).isEmpty(),
+                "A truncated JSON answer was scraped for digits");
+        // And an object with no targets field at all names no target.
+        Assert.assertTrue(ResponseParser.parseTargetIndices(
+                        "{\"reasoning\":\"the 2/3 has to go\"}", 3).isEmpty());
+    }
+
+    /**
+     * "The model answered nothing usable" and "the model chose none" have to be
+     * different answers, because only the first is a failed call. Returning an empty
+     * collection for both left the fallback counter — the one {@code FORGE_LLM_STRICT}
+     * and the degraded-run status are read from — at zero while the heuristic AI played
+     * the game.
+     */
+    @Test
+    public void anUnreadableBatchAnswerIsNullAndAnEmptyOneIsNot() {
+        // Recognised, and really empty: the model chose to hold.
+        Assert.assertEquals(ResponseParser.parsePlanSequence("{\"reasoning\":\"holding\",\"plan\":[]}", 8),
+                Collections.emptyList());
+        Assert.assertEquals(ResponseParser.parsePlanSequence("PASS", 8), Collections.emptyList());
+        Assert.assertEquals(ResponseParser.parsePlanSequence("2,0,PASS", 8), Arrays.asList(2, 0));
+
+        // Not recognised at all. The first is the prose reply a model gives once a 400
+        // has turned structured output off for the session; 20 is a life total, and with
+        // eight options it ends the token walk immediately.
+        Assert.assertNull(ResponseParser.parsePlanSequence(
+                "I am at 20 life, so I will hold everything this turn.", 8));
+        Assert.assertNull(ResponseParser.parsePlanSequence("", 8));
+        Assert.assertNull(ResponseParser.parsePlanSequence("{\"reasoning\":\"cut off mid sen", 8));
+        Assert.assertNull(ResponseParser.parsePlanSequence("{\"reasoning\":\"no plan field\"}", 8));
+
+        // Same contract for the two combat parsers.
+        Assert.assertEquals(ResponseParser.parseBatchIndices("{\"indices\":[]}", 4),
+                Collections.emptySet());
+        Assert.assertEquals(ResponseParser.parseBatchIndices("NONE", 4), Collections.emptySet());
+        Assert.assertNull(ResponseParser.parseBatchIndices("They all die if I swing.", 4));
+        Assert.assertNull(ResponseParser.parseBatchIndices("", 4));
+
+        Assert.assertTrue(ResponseParser.parseBatchBlockAssignments("{\"blocks\":[]}", 2, 2).isEmpty());
+        Assert.assertTrue(ResponseParser.parseBatchBlockAssignments("NONE", 2, 2).isEmpty());
+        Assert.assertNull(ResponseParser.parseBatchBlockAssignments("I would rather take it.", 2, 2));
     }
 
     // ---- the schema sent to the provider ----------------------------------

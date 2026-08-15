@@ -94,14 +94,14 @@ public class LLMFullController extends PlayerControllerAi {
      * per candidate is expensive on the current GameCopier; PR4 makes this cheap.
      * Capped at {@link #EVAL_HINT_MAX_CANDIDATES} to bound CPU when the hand is wide.
      */
-    static final boolean EVAL_HINTS_ENABLED = isTruthy(System.getenv("FORGE_LLM_EVAL_HINTS"));
+    static final boolean EVAL_HINTS_ENABLED = isTruthy(switchValue("FORGE_LLM_EVAL_HINTS"));
     static final int EVAL_HINT_MAX_CANDIDATES = 6;
 
     // =======================================================================
     // Muzzles: which decisions the heuristic AI keeps for itself
     // =======================================================================
     //
-    // An "LLM seat" does not actually decide everything. Ten places below
+    // An "LLM seat" does not actually decide everything. Eleven places below
     // hand a decision back to the heuristic AI, either always or whenever the
     // heuristic disagrees with the model. That is deliberate — each one was
     // added because it won games — but it also means a run labelled "LLM" is
@@ -131,17 +131,23 @@ public class LLMFullController extends PlayerControllerAi {
     //   FORGE_LLM_HEURISTIC_LAND_DROPS  on   — the heuristic picks which land to play, and when
     //   FORGE_LLM_HEURISTIC_TARGETS     on   — the heuristic decides where each spell points
     //   FORGE_LLM_HARDCODED_PLAY_FIRST  on   — always choose to play first, without asking
+    //   FORGE_LLM_INSTANT_SPEED_GATE    on   — outside the seat's own main phases, the heuristic
+    //                                          decides unless there is a stack response or a
+    //                                          combat trick to consider
     //
     // Truthiness for the boolean switches follows the rest of FORGE_LLM_*:
     // anything except "0" or "false" (case-insensitive) counts as on; unset or
-    // empty falls through to the default in the list above.
+    // empty falls through to the default in the list above. All of them are read
+    // the way the rest of the LLM configuration is — system property, then process
+    // environment, then a .env file walked up from the working directory — so a
+    // .env that de-muzzles a run really does de-muzzle it.
 
     /**
      * Aggregate de-muzzle switch. Truthy means every muzzle in this block
      * defaults to "the model decides" instead of "the heuristic decides".
      * Declared first because the muzzle constants below read it.
      */
-    static final boolean UNMUZZLED = isTruthy(System.getenv("FORGE_LLM_UNMUZZLED"));
+    static final boolean UNMUZZLED = isTruthy(switchValue("FORGE_LLM_UNMUZZLED"));
 
     /**
      * Heuristic-prior pruning: cap the number of spell options shown to the
@@ -213,19 +219,40 @@ public class LLMFullController extends PlayerControllerAi {
     static final boolean HARDCODED_PLAY_FIRST = muzzleOn("FORGE_LLM_HARDCODED_PLAY_FIRST");
 
     /**
+     * Outside the seat's own main phases, hand the decision to the heuristic unless
+     * {@link #shouldCallLLMForInstantSpeed()} sees something worth asking about — a spell
+     * on the stack to answer, or an attack to answer during the opponent's combat.
+     *
+     * <p>This one is the quietest of the muzzles and it was the only one with no switch,
+     * so a fully "unmuzzled" run still had the heuristic making every upkeep, draw, own-combat
+     * and end-step decision. Those are not idle windows: the heuristic deliberately holds
+     * plays for them — a cycling land at the end step before its own turn, a pump waiting for
+     * its own declare-attackers — so an A/B run under {@code FORGE_LLM_UNMUZZLED} was still
+     * measuring a mixture and attributing the whole of it to the model.
+     *
+     * <p>Off ({@code FORGE_LLM_INSTANT_SPEED_GATE=0}, or {@code FORGE_LLM_UNMUZZLED}) every
+     * such priority goes to the model instead. Falling through is safe — the option list is
+     * filtered by {@code canCastTiming}, {@code canPayCost} and target validity, so a
+     * priority pass with nothing castable is a free PASS with no LLM call — but it is not
+     * free in tokens: each non-MAIN priority that does have a castable instant now costs a
+     * call, which is well above the call-per-game figure a relay budget would be sized from.
+     */
+    static final boolean INSTANT_SPEED_GATE = muzzleOn("FORGE_LLM_INSTANT_SPEED_GATE");
+
+    /**
      * Heuristic-prior verdict annotation: tag each option with the heuristic
      * AI's own opinion (WillPlay / WaitForMain2 / Removal / …). Off by default
      * because tags add ~10 tokens per option; flip on for tuning runs.
      * Pruning of hopeless candidates still happens regardless of this flag.
      */
-    static final boolean VERDICT_TAGS_ENABLED = isTruthy(System.getenv("FORGE_LLM_VERDICT_TAGS"));
+    static final boolean VERDICT_TAGS_ENABLED = isTruthy(switchValue("FORGE_LLM_VERDICT_TAGS"));
 
     /**
      * Shadow mode: log heuristic vs LLM divergence per call to stderr without
      * changing behaviour. Useful for offline analysis of captured transcripts.
      * Opt-in via {@code FORGE_LLM_SHADOW=1}.
      */
-    static final boolean SHADOW_MODE = isTruthy(System.getenv("FORGE_LLM_SHADOW"));
+    static final boolean SHADOW_MODE = isTruthy(switchValue("FORGE_LLM_SHADOW"));
 
     /**
      * Combat decision source ({@code FORGE_LLM_COMBAT}):
@@ -240,7 +267,7 @@ public class LLMFullController extends PlayerControllerAi {
      * Unset or unrecognised values normalise to {@code heuristic}
      * ({@code llm} when unmuzzled).
      */
-    static final String COMBAT_MODE = parseCombatMode(System.getenv("FORGE_LLM_COMBAT"),
+    static final String COMBAT_MODE = parseCombatMode(switchValue("FORGE_LLM_COMBAT"),
             UNMUZZLED ? "llm" : "heuristic");
 
     /**
@@ -344,9 +371,25 @@ public class LLMFullController extends PlayerControllerAi {
         return v != null && !v.isEmpty() && !"false".equalsIgnoreCase(v) && !"0".equals(v);
     }
 
-    /** Read one boolean muzzle switch from the environment. */
+    /**
+     * Read one {@code FORGE_LLM_*} switch, from wherever the rest of the LLM
+     * configuration is read: the {@code forge.llm.env.*} system property, the process
+     * environment, then a {@code .env} file walked up from the working directory.
+     *
+     * <p>Not {@code System.getenv} alone. {@code .env} is the fork's documented place to
+     * configure an LLM run and is where {@code FORGE_LLM_STRICT} is read from, so a
+     * {@code .env} holding {@code FORGE_LLM_UNMUZZLED=1} used to give a run with strict
+     * mode armed and every muzzle still on — combat, land drops, targets and the rest all
+     * still the heuristic's, no warning printed, and the result written up as the
+     * de-muzzled arm of an A/B.
+     */
+    private static String switchValue(String envVar) {
+        return LLMConfig.loadProviderApiKey(envVar);
+    }
+
+    /** Read one boolean muzzle switch. */
     private static boolean muzzleOn(String envVar) {
-        return resolveMuzzle(System.getenv(envVar), UNMUZZLED);
+        return resolveMuzzle(switchValue(envVar), UNMUZZLED);
     }
 
     /**
@@ -363,7 +406,7 @@ public class LLMFullController extends PlayerControllerAi {
     }
 
     private static int parseIntEnv(String name, int fallback) {
-        return resolveInt(System.getenv(name), fallback);
+        return resolveInt(switchValue(name), fallback);
     }
 
     /** @see #resolveMuzzle(String, boolean) — same reason for the argument form. */
@@ -684,6 +727,30 @@ public class LLMFullController extends PlayerControllerAi {
     }
 
     /**
+     * Pass a parsed batch answer through, recording a fallback when there was none.
+     *
+     * <p>{@link ResponseParser} returns null for an answer it could not read and an empty
+     * collection for one that really said "none". Only the first is a failed call, and it
+     * has to be counted: the fallback counter is what {@code FORGE_LLM_STRICT} watches and
+     * what the caller's degraded-run status is computed from, so an unreadable answer that
+     * is quietly replaced by the heuristic leaves a run reporting a clean measurement of a
+     * model that made none of the decisions.
+     *
+     * @return {@code picks} unchanged, or null after recording the fallback
+     */
+    <T> T recordIfUnreadable(T picks, String callLabel, int optionsOffered) {
+        if (picks != null) {
+            return picks;
+        }
+        if (client.isDebug()) {
+            System.err.println("[LLM FALLBACK] " + callLabel + ": parse failed");
+        }
+        client.recordFallback(getPlayer().getName(), callLabel
+                + ": answer held no usable index (" + optionsOffered + " options offered)");
+        return null;
+    }
+
+    /**
      * Call the LLM and return the raw response text (not parsed as a single index).
      * Returns null on failure.
      */
@@ -915,11 +982,13 @@ public class LLMFullController extends PlayerControllerAi {
         String prompt = PromptTemplates.batchPick(gameState, options, context, effectiveMin, effectiveMax);
         String response = callLLMRaw(prompt, "chooseMultipleCardsBatched");
 
-        if (response == null) {
+        Set<Integer> picks = response == null ? null
+                : recordIfUnreadable(ResponseParser.parseBatchIndices(response, cardList.size()),
+                        "chooseMultipleCardsBatched", cardList.size());
+        if (picks == null) {
             fillFromFront(result, cardList, effectiveMin);
             return result;
         }
-        Set<Integer> picks = ResponseParser.parseBatchIndices(response, cardList.size());
         // Honour max
         int taken = 0;
         for (int idx : picks) {
@@ -964,11 +1033,13 @@ public class LLMFullController extends PlayerControllerAi {
         String prompt = PromptTemplates.batchPick(gameState, options, context, min, effectiveMax);
         String response = callLLMRaw(prompt, "chooseMultipleEntitiesBatched");
 
-        if (response == null) {
+        Set<Integer> picks = response == null ? null
+                : recordIfUnreadable(ResponseParser.parseBatchIndices(response, sourceList.size()),
+                        "chooseMultipleEntitiesBatched", sourceList.size());
+        if (picks == null) {
             for (int i = 0; i < min && i < sourceList.size(); i++) result.add(sourceList.get(i));
             return result;
         }
-        Set<Integer> picks = ResponseParser.parseBatchIndices(response, sourceList.size());
         int taken = 0;
         for (int idx : picks) {
             if (taken >= effectiveMax) break;
@@ -1002,11 +1073,13 @@ public class LLMFullController extends PlayerControllerAi {
         String prompt = PromptTemplates.batchPick(gameState, options, context, take, take);
         String response = callLLMRaw(prompt, "chooseMultipleSAsBatched");
 
-        if (response == null) {
+        Set<Integer> picks = response == null ? null
+                : recordIfUnreadable(ResponseParser.parseBatchIndices(response, sourceList.size()),
+                        "chooseMultipleSAsBatched", sourceList.size());
+        if (picks == null) {
             for (int i = 0; i < take; i++) result.add(sourceList.get(i));
             return result;
         }
-        Set<Integer> picks = ResponseParser.parseBatchIndices(response, sourceList.size());
         int taken = 0;
         for (int idx : picks) {
             if (taken >= take) break;
@@ -1480,11 +1553,13 @@ public class LLMFullController extends PlayerControllerAi {
 
         CardCollection toTop = new CardCollection();
         CardCollection toBottom = new CardCollection();
-        if (response == null) {
+        Set<Integer> keepOnTop = response == null ? null
+                : recordIfUnreadable(ResponseParser.parseBatchIndices(response, cardList.size()),
+                        "scry", cardList.size());
+        if (keepOnTop == null) {
             return super.arrangeForScry(topN);
         }
 
-        Set<Integer> keepOnTop = ResponseParser.parseBatchIndices(response, cardList.size());
         for (int i = 0; i < cardList.size(); i++) {
             if (keepOnTop.contains(i)) { toTop.add(cardList.get(i)); }
             else { toBottom.add(cardList.get(i)); }
@@ -1515,11 +1590,13 @@ public class LLMFullController extends PlayerControllerAi {
 
         CardCollection toTop = new CardCollection();
         CardCollection toGraveyard = new CardCollection();
-        if (response == null) {
+        Set<Integer> keepOnTop = response == null ? null
+                : recordIfUnreadable(ResponseParser.parseBatchIndices(response, cardList.size()),
+                        "surveil", cardList.size());
+        if (keepOnTop == null) {
             return super.arrangeForSurveil(topN);
         }
 
-        Set<Integer> keepOnTop = ResponseParser.parseBatchIndices(response, cardList.size());
         for (int i = 0; i < cardList.size(); i++) {
             if (keepOnTop.contains(i)) { toTop.add(cardList.get(i)); }
             else { toGraveyard.add(cardList.get(i)); }

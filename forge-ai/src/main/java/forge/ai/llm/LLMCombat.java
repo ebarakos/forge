@@ -109,10 +109,27 @@ final class LLMCombat {
             return;
         }
 
+        Set<Integer> attackIndices = ResponseParser.parseBatchIndices(response, canAttack.size());
+        if (attackIndices == null) {
+            // An answer nobody could read is a failed call. Applying it as an empty
+            // index set would declare no attackers at all — a decision the model never
+            // made, which CombatUtil.validateAttackers happily accepts, so not even the
+            // rescue below would fire — and it would not be counted as a fallback.
+            ctrl.client.recordFallback(ctrl.getPlayer().getName(),
+                    "declareAttackers: answer named no usable attacker ("
+                            + canAttack.size() + " offered)");
+            ctrl.lastAttackPlan = "";
+            if ("shadow".equals(LLMFullController.COMBAT_MODE) && heuristicAttackIdx != null) {
+                applyAttackIndices(combat, attacker, defaultDefender, canAttack, heuristicAttackIdx);
+            } else {
+                ctrl.defaultDeclareAttackers(attacker, combat);
+            }
+            return;
+        }
+
         // B2: extract the PLAN: line (if any) for carry-over into declareBlockers.
         ctrl.lastAttackPlan = extractPlanLine(response);
 
-        Set<Integer> attackIndices = ResponseParser.parseBatchIndices(response, canAttack.size());
         logCombatShadow("declareAttackers", canAttack, heuristicAttackIdx, attackIndices);
 
         // Shadow: LLM consulted (divergence logged above) but not trusted —
@@ -246,6 +263,20 @@ final class LLMCombat {
 
         Map<Integer, Set<Integer>> assignments = ResponseParser.parseBatchBlockAssignments(
                 response, attackerList.size(), blockerList.size());
+        if (assignments == null) {
+            // Same as declareAttackers: an unreadable answer applied as an empty map is
+            // "block with nothing", a decision the model never made and one that would
+            // never be counted against the fallback rate.
+            ctrl.client.recordFallback(ctrl.getPlayer().getName(),
+                    "declareBlockers: answer named no usable block ("
+                            + attackerList.size() + " attackers, " + blockerList.size() + " blockers)");
+            if ("shadow".equals(LLMFullController.COMBAT_MODE) && heuristicAssignment != null) {
+                applyBlockAssignments(combat, attackerList, blockerList, heuristicAssignment);
+            } else {
+                ctrl.defaultDeclareBlockers(defender, combat);
+            }
+            return;
+        }
         logBlockShadow(attackerList, blockerList, heuristicAssignment, assignments);
 
         // Shadow: LLM consulted (divergence logged above) but not trusted —

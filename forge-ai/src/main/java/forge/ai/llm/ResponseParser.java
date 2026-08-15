@@ -19,6 +19,20 @@ import java.util.regex.Pattern;
  * Handles various response formats: bare integers, "CHOICE: 2",
  * "I choose option 2", first number on first line, etc.
  * Supports thinking model output with {@code <think>} tags.
+ *
+ * <h2>"Empty" and "unreadable" are different answers</h2>
+ *
+ * <p>The batch parsers — {@link #parsePlanSequence}, {@link #parseBatchIndices},
+ * {@link #parseBatchBlockAssignments} — return {@code null} when the response
+ * could not be understood at all, and an empty collection only when the model
+ * really did say "nothing". Callers must treat the two differently: an empty
+ * plan is the model choosing to hold, while an unreadable answer is a failed
+ * call that has to be recorded as a fallback before the heuristic takes over.
+ *
+ * <p>Conflating them is how a run could report zero fallbacks while the
+ * heuristic AI played every MAIN phase: a prose answer parsed to an empty list,
+ * which looked exactly like a deliberate pass, so nothing was counted and
+ * neither {@code FORGE_LLM_STRICT} nor the fallback-rate status ever fired.
  */
 public final class ResponseParser {
     private ResponseParser() {}
@@ -29,6 +43,16 @@ public final class ResponseParser {
 
     private static final Pattern THINK_PATTERN =
             Pattern.compile("<think>[\\s\\S]*?</think>", Pattern.CASE_INSENSITIVE);
+
+    /** A {@code "reasoning": "..."} field, so its digits stay out of the text fallbacks. */
+    private static final Pattern REASONING_FIELD = Pattern.compile(
+            "\"reasoning\"\\s*:\\s*\"(?:\\\\.|[^\"\\\\])*\"", Pattern.CASE_INSENSITIVE);
+
+    /** An explicit {@code TARGET:} / {@code TARGETS:} answer label. */
+    private static final Pattern TARGET_LABEL = Pattern.compile(
+            "TARGETS?\\s*[:=]\\s*([0-9][0-9,\\s]*)", Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern ANY_INTEGER = Pattern.compile("\\b(\\d+)\\b");
 
     /**
      * Strip {@code <think>...</think>} blocks from content.
@@ -74,8 +98,24 @@ public final class ResponseParser {
      * null if the body isn't a JSON object — the caller should then fall back
      * to legacy text parsers. Tolerates leading {@code <think>} blocks (already
      * stripped upstream) and common chatty preambles.
+     *
+     * <p>A chatty preamble really does happen: when a 400 turns structured
+     * output off for the session the prompts stop saying anything about output
+     * shape, and a model that still answers {@code Sure: {"targets":[1]}} is
+     * giving the right answer in the wrong wrapper. So a JSON object embedded
+     * anywhere in the body is found and parsed rather than thrown away.
      */
     private static JsonObject tryParseJsonObject(String response) {
+        String s = jsonBody(response);
+        if (s == null) return null;
+        JsonObject direct = parseObject(s);
+        if (direct != null) return direct;
+        String embedded = firstBalancedObject(s);
+        return embedded == null ? null : parseObject(embedded);
+    }
+
+    /** The response with any code fence removed, or null when there is nothing to read. */
+    private static String jsonBody(String response) {
         if (response == null) return null;
         String s = response.strip();
         if (s.isEmpty()) return null;
@@ -88,6 +128,10 @@ public final class ResponseParser {
             if (closing >= 0) s = s.substring(0, closing);
             s = s.strip();
         }
+        return s.isEmpty() ? null : s;
+    }
+
+    private static JsonObject parseObject(String s) {
         if (!s.startsWith("{")) return null;
         try {
             JsonElement el = JsonParser.parseString(s);
@@ -95,6 +139,73 @@ public final class ResponseParser {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * The first complete {@code {...}} block in the body, or null when there is
+     * none or the braces never close — which is what a reply truncated by the
+     * token limit looks like.
+     */
+    private static String firstBalancedObject(String s) {
+        int start = s.indexOf('{');
+        if (start < 0) return null;
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = start; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (c == '\\') escaped = true;
+                else if (c == '"') inString = false;
+                continue;
+            }
+            if (c == '"') inString = true;
+            else if (c == '{') depth++;
+            else if (c == '}' && --depth == 0) return s.substring(start, i + 1);
+        }
+        return null;
+    }
+
+    /**
+     * Did the model try to answer in JSON and fail? A body that opens with a
+     * brace but cannot be parsed is a truncated or malformed structured answer,
+     * not prose. Scraping digits out of it reads the reasoning text as if it
+     * were the answer, so callers stop there instead.
+     */
+    private static boolean isBrokenJson(String response) {
+        String s = jsonBody(response);
+        return s != null && s.startsWith("{") && tryParseJsonObject(response) == null;
+    }
+
+    /** The body with any {@code "reasoning": "..."} field and think block removed. */
+    private static String withoutReasoning(String response) {
+        String s = stripThinkingTags(response);
+        if (s == null) return "";
+        return REASONING_FIELD.matcher(s).replaceAll(" ");
+    }
+
+    /** Every in-range index in {@code text}, in written order, duplicates dropped. */
+    private static List<Integer> indicesIn(String text, int limit) {
+        List<Integer> found = new ArrayList<>();
+        if (text == null || text.isEmpty()) return found;
+        Set<Integer> seen = new LinkedHashSet<>();
+        Matcher m = ANY_INTEGER.matcher(text);
+        while (m.find()) {
+            int val = Integer.parseInt(m.group(1));
+            if (val >= 0 && val < limit && seen.add(val)) {
+                found.add(val);
+            }
+        }
+        return found;
+    }
+
+    private static String lastNonEmptyLine(String text) {
+        String[] lines = text.split("\\R");
+        for (int i = lines.length - 1; i >= 0; i--) {
+            if (!lines[i].isBlank()) return lines[i].strip();
+        }
+        return "";
     }
 
     /**
@@ -180,13 +291,20 @@ public final class ResponseParser {
      * Parse batch block assignments from LLM response.
      * Expected format: "A0:B1, A2:B0,B1" or "NONE" for no blocks.
      * Returns map of attacker index → set of blocker indices.
+     *
+     * @return the assignments, empty when the model declined to block, or
+     *         {@code null} when the answer could not be read at all — which is
+     *         a failed call, not a decision to block with nothing.
      */
     public static Map<Integer, Set<Integer>> parseBatchBlockAssignments(
             String response, int numAttackers, int numBlockers) {
         Map<Integer, Set<Integer>> result = new LinkedHashMap<>();
         // Try JSON {blocks: [{attacker:int, blockers:int[]}]} first
         JsonObject obj = tryParseJsonObject(response);
-        if (obj != null && obj.has("blocks") && obj.get("blocks").isJsonArray()) {
+        if (obj != null) {
+            if (!obj.has("blocks") || !obj.get("blocks").isJsonArray()) {
+                return null; // an object without the payload field is not an answer
+            }
             JsonArray arr = obj.getAsJsonArray("blocks");
             for (JsonElement el : arr) {
                 if (!el.isJsonObject()) continue;
@@ -206,9 +324,9 @@ public final class ResponseParser {
                 }
                 if (!blockers.isEmpty()) result.put(attIdx, blockers);
             }
-            if (!result.isEmpty()) return result;
+            return result;
         }
-        if (response == null || response.isBlank()) return result;
+        if (response == null || response.isBlank() || isBrokenJson(response)) return null;
 
         String trimmed = response.strip().toUpperCase();
         if (trimmed.equals("NONE") || trimmed.equals("N/A") || trimmed.equals("NO")) {
@@ -261,7 +379,8 @@ public final class ResponseParser {
             }
         }
 
-        return result;
+        // Nothing named a block and nothing said "none": the answer was not understood.
+        return result.isEmpty() ? null : result;
     }
 
     /**
@@ -270,13 +389,18 @@ public final class ResponseParser {
      *
      * @param response raw LLM response text
      * @param maxIndex maximum valid index (exclusive)
-     * @return set of valid indices (may be empty for NONE)
+     * @return the chosen indices, empty when the model chose none, or
+     *         {@code null} when the answer could not be read at all — a failed
+     *         call, which is not the same as a deliberate "none"
      */
     public static Set<Integer> parseBatchIndices(String response, int maxIndex) {
         Set<Integer> result = new LinkedHashSet<>();
         // Try JSON {indices: int[]} first
         JsonObject obj = tryParseJsonObject(response);
-        if (obj != null && obj.has("indices") && obj.get("indices").isJsonArray()) {
+        if (obj != null) {
+            if (!obj.has("indices") || !obj.get("indices").isJsonArray()) {
+                return null; // an object without the payload field is not an answer
+            }
             for (JsonElement el : obj.getAsJsonArray("indices")) {
                 try {
                     int v = el.getAsInt();
@@ -285,7 +409,7 @@ public final class ResponseParser {
             }
             return result;
         }
-        if (response == null || response.isBlank()) return result;
+        if (response == null || response.isBlank() || isBrokenJson(response)) return null;
 
         String trimmed = response.strip().toUpperCase();
         if (trimmed.equals("NONE") || trimmed.equals("N/A") || trimmed.equals("NO")) {
@@ -297,14 +421,15 @@ public final class ResponseParser {
         }
 
         // Extract all integers from the response
-        Matcher m = Pattern.compile("\\b(\\d+)\\b").matcher(response);
+        Matcher m = ANY_INTEGER.matcher(response);
         while (m.find()) {
             int val = Integer.parseInt(m.group(1));
             if (val >= 0 && val < maxIndex) {
                 result.add(val);
             }
         }
-        return result;
+        // No payload field, no sentinel and no index in range: prose, not an answer.
+        return result.isEmpty() ? null : result;
     }
 
     /**
@@ -329,29 +454,54 @@ public final class ResponseParser {
         List<Integer> result = new ArrayList<>();
         if (numCandidates <= 0) return result;
 
-        Set<Integer> seen = new LinkedHashSet<>();
+        // A parsed JSON object is the answer, whatever it holds — never a starting
+        // point for a digit scan. Falling through from here is how a schema-shaped
+        // answer got inverted: {"reasoning":"Bolt the 2/3 flier","targets":1} has a
+        // scalar payload, so the array branch missed, the whole body was scraped, and
+        // the "2" in "2/3" came out ahead of the "1" the model actually chose — with
+        // candidate 2 being the seat's own creature. Every check downstream passed,
+        // because Bolting your own Ornithopter is legal.
         JsonObject obj = tryParseJsonObject(response);
-        if (obj != null && obj.has("targets") && obj.get("targets").isJsonArray()) {
-            for (JsonElement el : obj.getAsJsonArray("targets")) {
-                try {
-                    int v = el.getAsInt();
-                    if (v >= 0 && v < numCandidates && seen.add(v)) result.add(v);
-                } catch (Exception ignored) {}
+        if (obj != null) {
+            Set<Integer> seen = new LinkedHashSet<>();
+            JsonElement payload = obj.get("targets");
+            if (payload != null && payload.isJsonArray()) {
+                for (JsonElement el : payload.getAsJsonArray()) {
+                    addIndex(result, seen, el, numCandidates);
+                }
+            } else if (payload != null && payload.isJsonPrimitive()) {
+                addIndex(result, seen, payload, numCandidates);
             }
             return result;
         }
         if (response == null || response.isBlank()) return result;
+        // A body that opens with a brace and will not parse is a truncated structured
+        // answer. Its reasoning string is full of small numbers — power, toughness,
+        // life, mana — and scraping them would produce a confident wrong target.
+        if (isBrokenJson(response)) return result;
 
-        // Text fallback for models that ignore the schema: take every integer
-        // that names a real candidate, in the order written.
-        Matcher m = Pattern.compile("\\b(\\d+)\\b").matcher(response);
-        while (m.find()) {
-            int val = Integer.parseInt(m.group(1));
-            if (val >= 0 && val < numCandidates && seen.add(val)) {
-                result.add(val);
-            }
+        // Text fallback, narrowest first. Digits inside a justification must never
+        // outrank digits in the answer, so the reasoning field goes before anything
+        // is counted, an explicit TARGETS: label wins, then the last line (chatty
+        // models put the answer at the end), then the body as a whole.
+        String body = withoutReasoning(response);
+        Matcher labelled = TARGET_LABEL.matcher(body);
+        if (labelled.find()) {
+            List<Integer> fromLabel = indicesIn(labelled.group(1), numCandidates);
+            if (!fromLabel.isEmpty()) return fromLabel;
         }
-        return result;
+        List<Integer> fromLastLine = indicesIn(lastNonEmptyLine(body), numCandidates);
+        if (!fromLastLine.isEmpty()) return fromLastLine;
+        return indicesIn(body, numCandidates);
+    }
+
+    private static void addIndex(List<Integer> result, Set<Integer> seen, JsonElement el, int limit) {
+        try {
+            int v = el.getAsInt();
+            if (v >= 0 && v < limit && seen.add(v)) result.add(v);
+        } catch (Exception ignored) {
+            // A non-numeric entry names no candidate; the caller checks the count.
+        }
     }
 
     /**
@@ -360,14 +510,33 @@ public final class ResponseParser {
      * (e.g. "2,0,PASS"). A plain "PASS" or "NONE" returns an empty list. Indices
      * are returned in source order, duplicates skipped, out-of-range values end
      * the plan at that point.
+     *
+     * @return the plan, empty when the model chose to hold everything, or
+     *         {@code null} when the answer could not be read at all
+     *
+     * <p>The distinction is the whole point of this method's contract. An empty
+     * plan is a decision and is not a fallback; an unreadable answer is a failed
+     * call and must be. Returning an empty list for both is how a prose reply
+     * such as "I am at 20 life, so I will hold everything this turn." became a
+     * silent heuristic decision, recorded in the model's own history as though
+     * the model had made it, with the fallback counter still reading zero.
      */
     public static List<Integer> parsePlanSequence(String response, int numOptions) {
         List<Integer> result = new ArrayList<>();
         // Try JSON {plan: int[]} first
         JsonObject obj = tryParseJsonObject(response);
-        if (obj != null && obj.has("plan") && obj.get("plan").isJsonArray()) {
+        if (obj != null) {
+            JsonElement payload = obj.get("plan");
+            if (payload == null || (!payload.isJsonArray() && !payload.isJsonPrimitive())) {
+                return null; // an object without a usable payload field is not an answer
+            }
             Set<Integer> seen = new LinkedHashSet<>();
-            for (JsonElement el : obj.getAsJsonArray("plan")) {
+            JsonArray steps = payload.isJsonArray() ? payload.getAsJsonArray() : null;
+            if (steps == null) {
+                addIndex(result, seen, payload, numOptions);
+                return result;
+            }
+            for (JsonElement el : steps) {
                 try {
                     int v = el.getAsInt();
                     if (v < 0 || v >= numOptions) break; // out-of-range ends plan
@@ -376,7 +545,7 @@ public final class ResponseParser {
             }
             return result;
         }
-        if (response == null || response.isBlank()) return result;
+        if (response == null || response.isBlank() || isBrokenJson(response)) return null;
 
         String trimmed = response.strip().toUpperCase();
         if (trimmed.equals("PASS") || trimmed.equals("NONE") || trimmed.equals("N/A")) {
@@ -386,18 +555,21 @@ public final class ResponseParser {
         // Walk tokens in order, stopping at PASS.
         Matcher tok = Pattern.compile("\\bPASS\\b|\\b(\\d+)\\b").matcher(trimmed);
         Set<Integer> seen = new LinkedHashSet<>();
+        boolean understood = false;
         while (tok.find()) {
             if (tok.group(1) == null) {
-                break; // hit PASS
+                understood = true; // an explicit PASS is an answer, whatever came before
+                break;
             }
             int val = Integer.parseInt(tok.group(1));
             if (val < 0 || val >= numOptions) {
                 break; // out-of-range — end plan here
             }
+            understood = true;
             if (seen.add(val)) {
                 result.add(val);
             }
         }
-        return result;
+        return understood ? result : null;
     }
 }

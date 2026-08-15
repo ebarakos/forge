@@ -34,9 +34,13 @@ final class LLMSpellSelection {
     List<SpellAbility> chooseSpellAbilityToPlay() {
         // Use LLM for MAIN phases always; for non-MAIN phases, only when there's
         // a meaningful instant-speed decision (e.g., counterspell opportunity, combat trick)
+        // Muzzle: FORGE_LLM_INSTANT_SPEED_GATE (on by default). Off, every non-MAIN
+        // priority goes to the model too — the heuristic's held plays (end-step
+        // cycling, own-combat pumps) are decisions, and an "unmuzzled" run that
+        // still made them by heuristic was measuring a mixture.
         PhaseType phase = ctrl.getGame().getPhaseHandler().getPhase();
         if (phase != PhaseType.MAIN1 && phase != PhaseType.MAIN2) {
-            if (!ctrl.shouldCallLLMForInstantSpeed()) {
+            if (LLMFullController.INSTANT_SPEED_GATE && !ctrl.shouldCallLLMForInstantSpeed()) {
                 return ctrl.defaultChooseSpellAbilityToPlay();
             }
             // Fall through to normal spell selection — getSpellAbilities() already
@@ -178,6 +182,18 @@ final class LLMSpellSelection {
 
             if (planResponse != null) {
                 List<Integer> planIndices = ResponseParser.parsePlanSequence(planResponse, pruned.size());
+                if (planIndices == null) {
+                    // The call came back, but nothing in it was a plan. That is a failed
+                    // call, not a decision to hold: without recording it the heuristic
+                    // would play the turn while the run reported a clean LLM measurement,
+                    // with the fallback counter — the one FORGE_LLM_STRICT and the
+                    // degraded-run status both read — still at zero.
+                    ctrl.client.recordFallback(ctrl.getPlayer().getName(),
+                            "mainPhasePlan: answer held no usable plan ("
+                                    + pruned.size() + " options offered)");
+                    ctrl.mainPhasePlan.clear();
+                    return ctrl.defaultChooseSpellAbilityToPlay();
+                }
                 logShadowMode("mainPhasePlan", pruned, planIndices);
                 ctrl.mainPhasePlan.clear();
                 for (int idx : planIndices) {
