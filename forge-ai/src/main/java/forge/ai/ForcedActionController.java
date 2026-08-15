@@ -12,6 +12,7 @@ import forge.game.card.Card;
 import forge.game.card.CardCollection;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
+import forge.game.zone.ZoneType;
 
 /**
  * An AI seat that plays one named spell or ability during one turn whether or not the
@@ -26,10 +27,20 @@ import forge.game.spellability.SpellAbility;
  * <p>What it bypasses is the AI's judgement: {@code canPlaySa}, {@code willPayCosts} and
  * the per-API targeting logic, all of which are the code under investigation. What it never
  * bypasses is the rules. The forced action still has to be a normally enumerated option,
- * still has to pass {@link SpellAbility#canPlay()}, and still has to pass
- * {@link ComputerUtilCost#canPayCost} before it is handed back — that last check because
- * {@link PlayerControllerAi#playChosenSpellAbility} returns {@code true} even when payment
- * fails, so an unpayable pick would vanish without a trace.
+ * still has to pass {@link SpellAbility#canPlay()} and {@link ComputerUtilCost#canPayCost},
+ * and — the part that decides whether the rollout measured anything — it has to actually
+ * get played.
+ *
+ * <p>That last one is not free. {@code canPayCost} is an estimate: it asks the rules
+ * whether a cost <em>could</em> be paid, while paying it runs through the AI's own cost
+ * decisions, which can refuse. A sacrifice cost whose only legal creature is the creature
+ * the fixed targeting rule just aimed the spell at is the clearest case — the estimate says
+ * yes, the payment says no. And {@link PlayerControllerAi#playChosenSpellAbility} returns
+ * {@code true} whether or not the payment worked, so nothing downstream can see it. So this
+ * class does not believe its own offer: it confirms the play and only then records
+ * {@link Outcome#FORCED}. A rollout whose forced cast never happened comes back as
+ * {@link Outcome#PAYMENT_FAILED} instead of being pooled as a measurement of a decision
+ * that was never taken.
  *
  * <p>Targets are chosen by a fixed, stated rule rather than by the AI: the controlled legal
  * target with the highest power, and failing that the first legal target the rules offer.
@@ -37,16 +48,21 @@ import forge.game.spellability.SpellAbility;
  * being investigated, so that a forced result cannot be explained away by "the AI picked a
  * bad target".
  *
- * <p>The window is one turn wide. With no turn given the controller arms itself on the
- * first priority it sees — the turn a restored position starts in — and after that turn it
- * is inert, an ordinary heuristic seat again. Within the window it forces at most
- * {@value #MAX_ATTEMPTS} times, which is what stops a repeatable ability from looping
- * forever.
+ * <p>The window is one turn wide and, by default, one action wide. With no turn given the
+ * controller arms itself on the first priority it sees — the turn a restored position
+ * starts in — and after that turn it is inert, an ordinary heuristic seat again. Within the
+ * window it plays the action {@code maxForces} times and then stops, because the question
+ * being asked is "would taking this action have changed who won", not "would spending every
+ * available mana on it have". Forcing a repeatable, self-damaging ability such as
+ * Pestilence until the mana ran out measured something nobody asked about, and its cost
+ * landed on the forced arm alone. A caller that really wants repetition has to say how many
+ * times. {@value #MAX_ATTEMPTS} offers is the hard ceiling on top of that, so a force whose
+ * payment keeps failing terminates instead of looping.
  *
- * <p>Each rollout records how many times the action was forced, the phase of the first
- * force, and how far the forcing got when it did not happen ({@link Outcome}). That last
- * one is the point: it separates "the replayed position lost something the card needed"
- * from "the AI was right to refuse".
+ * <p>Each rollout records how many times the action was really played, the phase of the
+ * first force, and how far the forcing got when it did not happen ({@link Outcome}). That
+ * last one is the point: it separates "the replayed position lost something the card
+ * needed" from "the AI was right to refuse".
  */
 public class ForcedActionController extends PlayerControllerAi {
 
@@ -64,12 +80,27 @@ public class ForcedActionController extends PlayerControllerAi {
         COST_CHECK_FAILED,
         /** The action was legal and payable, but the rules offered no target the fixed rule could use. */
         NO_LEGAL_TARGET,
+        /**
+         * The action was legal and the cost estimate approved it, but paying actually
+         * failed, so it was never played. Until 2026-08-15 this was reported as
+         * {@link #FORCED}: the forced arm was byte-for-byte the natural arm, and a
+         * candidate that was never once forced was filed as measured.
+         */
+        PAYMENT_FAILED,
         /** The action was played. */
         FORCED
     }
 
-    /** Most forces allowed in one rollout; the guard against a repeatable ability looping. */
+    /**
+     * Hard ceiling on how many times the action may be <em>offered</em> in one rollout.
+     * This is the runaway guard, not the estimand: what bounds how many times the action is
+     * played is {@link #getMaxForces()}, which defaults to one. The ceiling is what stops a
+     * force whose payment keeps failing from being re-offered at every priority of the turn.
+     */
     public static final int MAX_ATTEMPTS = 12;
+
+    /** Actions forced per rollout when the caller does not say otherwise. */
+    public static final int DEFAULT_MAX_FORCES = 1;
 
     private static final String PREFIX = "[AI FORCED] ";
 
@@ -77,12 +108,19 @@ public class ForcedActionController extends PlayerControllerAi {
     private final String cardName;
     /** Lower-case substring of the ability description; empty matches any of the card's abilities. */
     private final String descNeedle;
+    /** How many times the action may be played this rollout. */
+    private final int maxForces;
 
     /** The one turn forcing is allowed in; 0 until the first priority latches it. */
     private int armedTurn;
     private boolean windowClosed;
 
+    /** Times the action was handed to the engine, whether or not the play then succeeded. */
+    private int offers;
+    /** Times the action was really played. */
     private int attempts;
+    /** The action handed back at this priority and not yet confirmed played. */
+    private SpellAbility pendingForced;
     private String firstForcedPhase;
     private Outcome outcome = Outcome.NEVER_OFFERED;
 
@@ -97,16 +135,42 @@ public class ForcedActionController extends PlayerControllerAi {
      */
     public ForcedActionController(final Game game, final Player p, final LobbyPlayer lp, final String spec,
             final int forcedTurn) {
+        this(game, p, lp, spec, forcedTurn, DEFAULT_MAX_FORCES);
+    }
+
+    /**
+     * @param spec {@code "Card Name|description-substring"}; the description part is optional.
+     * @param forcedTurn the turn to force in, or 0 to arm on the first priority seen.
+     * @param maxForces how many times to play the action; clamped to
+     *        [1, {@value #MAX_ATTEMPTS}]. One action per rollout is what keeps the
+     *        difference between the arms attributable to one decision.
+     */
+    public ForcedActionController(final Game game, final Player p, final LobbyPlayer lp, final String spec,
+            final int forcedTurn, final int maxForces) {
         super(game, p, lp);
         final String[] parts = spec == null ? new String[0] : spec.split("\\|", 2);
         this.cardName = parts.length > 0 ? parts[0].trim() : "";
         this.descNeedle = parts.length > 1 ? parts[1].trim().toLowerCase(Locale.ROOT) : "";
         this.armedTurn = Math.max(forcedTurn, 0);
+        this.maxForces = Math.min(Math.max(maxForces, 1), MAX_ATTEMPTS);
     }
 
     /** How many times the forced action was actually played this rollout. */
     public int getAttempts() {
         return attempts;
+    }
+
+    /**
+     * How many times the action was handed to the engine, played or not. Larger than
+     * {@link #getAttempts()} exactly when a cost the estimate approved could not be paid.
+     */
+    public int getOffers() {
+        return offers;
+    }
+
+    /** How many times this rollout was allowed to play the action. */
+    public int getMaxForces() {
+        return maxForces;
     }
 
     /** The phase of the first force, or null if it never happened. */
@@ -136,13 +200,72 @@ public class ForcedActionController extends PlayerControllerAi {
         if (forced == null) {
             return natural;
         }
-        attempts++;
-        if (firstForcedPhase == null) {
-            firstForcedPhase = String.valueOf(getGame().getPhaseHandler().getPhase());
-        }
-        outcome = Outcome.FORCED;
-        emit("forced", describe(forced));
+        // Booked as an offer, not as a force. Whether it counts as a force is decided in
+        // playChosenSpellAbility, once the engine has either played it or failed to.
+        offers++;
+        pendingForced = forced;
+        emit("offered", describe(forced));
         return Lists.newArrayList(forced);
+    }
+
+    /**
+     * Play the action the engine just took from {@link #chooseSpellAbilityToPlay()}, and
+     * record what really happened to it.
+     *
+     * <p>{@link PlayerControllerAi#playChosenSpellAbility} throws away the boolean that
+     * says whether the cost was paid and returns {@code true} regardless, and nothing
+     * downstream of it looks either. So the play is run here instead, on the same code
+     * path, and its answer is kept. Anything the controller did not force is handed
+     * straight on, unchanged.
+     */
+    @Override
+    public boolean playChosenSpellAbility(final SpellAbility sa) {
+        if (sa == null || sa != pendingForced) {
+            return super.playChosenSpellAbility(sa);
+        }
+        pendingForced = null;
+        if (playAndConfirm(sa)) {
+            attempts++;
+            if (firstForcedPhase == null) {
+                firstForcedPhase = String.valueOf(getGame().getPhaseHandler().getPhase());
+            }
+            outcome = Outcome.FORCED;
+            emit("forced", describe(sa));
+        } else {
+            // furthest(), not assignment: a rollout that forced successfully earlier and
+            // then failed a repeat payment still forced.
+            outcome = furthest(outcome, Outcome.PAYMENT_FAILED);
+            emit("payment-failed", describe(sa));
+        }
+        // The engine's contract for an AI seat is unchanged: true either way. A false here
+        // would send the game down the snapshot-rollback path, which attribution runs with
+        // snapshots off.
+        return true;
+    }
+
+    /**
+     * Play {@code sa} and say whether it really happened.
+     *
+     * <p>A land play resolves immediately and reports nothing, so it is confirmed by the
+     * only evidence there is — the card reaching the battlefield. Everything else is run
+     * through the same helper {@link PlayerControllerAi} uses, keeping the answer it drops.
+     */
+    private boolean playAndConfirm(final SpellAbility sa) {
+        if (!sa.isLandAbility()) {
+            return ComputerUtil.handlePlayingSpellAbility(player, sa, getGame());
+        }
+        final Card host = sa.getHostCard();
+        final ZoneType before = zoneOf(host);
+        super.playChosenSpellAbility(sa);
+        final ZoneType after = zoneOf(host == null ? null : getGame().getCardState(host));
+        return after == ZoneType.Battlefield && before != ZoneType.Battlefield;
+    }
+
+    private static ZoneType zoneOf(final Card card) {
+        if (card == null || card.getZone() == null) {
+            return null;
+        }
+        return card.getZone().getZoneType();
     }
 
     /** Is this priority inside the forcing window? Latches the window on the first call. */
@@ -161,8 +284,16 @@ public class ForcedActionController extends PlayerControllerAi {
         if (turn < armedTurn) {
             return false;
         }
-        if (attempts >= MAX_ATTEMPTS) {
-            // Spent, but the turn is not over; say so once and stop looking.
+        if (attempts >= maxForces) {
+            // The action has been played as many times as this rollout asked for. The turn
+            // is not over, so say so once and go back to being an ordinary heuristic seat.
+            windowClosed = true;
+            emit("force-limit-reached", null);
+            return false;
+        }
+        if (offers >= MAX_ATTEMPTS) {
+            // Offered over and over without ever being played — a cost the estimate keeps
+            // approving and the payment keeps refusing. Stop rather than spin.
             windowClosed = true;
             emit("attempt-cap-reached", null);
             return false;
@@ -311,9 +442,9 @@ public class ForcedActionController extends PlayerControllerAi {
     }
 
     /**
-     * One line per force and one line the first time the forcing reaches a new stage, so a
-     * rollout run as a subprocess can be read from its output alone. No line at all means
-     * the action was never offered.
+     * One line per offer, one per force or failed payment, and one the first time the
+     * forcing reaches a new stage, so a rollout run as a subprocess can be read from its
+     * output alone. No line at all means the action was never offered.
      */
     private void emit(final String event, final String option) {
         final StringBuilder sb = new StringBuilder(PREFIX);
@@ -325,6 +456,8 @@ public class ForcedActionController extends PlayerControllerAi {
         sb.append(",\"phase\":");
         quote(sb, String.valueOf(getGame().getPhaseHandler().getPhase()));
         sb.append(",\"attempts\":").append(attempts);
+        sb.append(",\"offers\":").append(offers);
+        sb.append(",\"limit\":").append(maxForces);
         sb.append(",\"option\":");
         quote(sb, option);
         sb.append('}');

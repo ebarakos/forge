@@ -23,9 +23,11 @@ import forge.util.ThreadUtil;
  * Can a card the AI refused be played anyway, from the position where it refused it?
  *
  * <p>These are not tests of whether forcing wins games — that is measured, not asserted.
- * They are the two things that have to be true before a measurement means anything: the
- * forced seat really does overrule a refusal the heuristic AI still makes, and the costs of
- * a forced card really can be paid once the AI's worth-it checks are out of the way.
+ * They are the things that have to be true before a measurement means anything: the forced
+ * seat really does overrule a refusal the heuristic AI still makes; the costs of a forced
+ * card really can be paid once the AI's worth-it checks are out of the way; a cost that
+ * turns out not to be payable is reported as such rather than counted as a force; and one
+ * rollout forces one action rather than spending the whole turn on a repeatable one.
  */
 public class ForcedActionControllerTest extends AITest {
 
@@ -53,9 +55,98 @@ public class ForcedActionControllerTest extends AITest {
                 "The fixed rule has to aim the pump at the AI's own creature, not at the biggest "
                         + "creature on the board");
 
+        // Offering the ability is not forcing it. Nothing is recorded until the engine has
+        // actually played it, so the counters are still at zero here.
+        Assert.assertEquals(controller.getOffers(), 1);
+        Assert.assertEquals(controller.getAttempts(), 0,
+                "An offered action was counted as forced before it was played");
+        Assert.assertEquals(controller.getOutcome(), ForcedActionController.Outcome.NEVER_OFFERED);
+
+        Assert.assertTrue(playOnGameThread(controller, choice.get(0)), "The forced play reported failure");
         Assert.assertEquals(controller.getOutcome(), ForcedActionController.Outcome.FORCED);
         Assert.assertEquals(controller.getAttempts(), 1);
         Assert.assertEquals(controller.getFirstForcedPhase(), "MAIN1");
+    }
+
+    /**
+     * A cost the estimate approves and the payment refuses is not a force.
+     *
+     * <p>{@code ComputerUtilCost.canPayCost} asks the rules whether a cost could be paid;
+     * paying it runs through the AI's own cost decisions, which can refuse. Fling is the
+     * sharpest case: its additional cost is "sacrifice a creature", and the fixed targeting
+     * rule aims it at the seat's own best creature — the only creature it could sacrifice.
+     * The rules-level check sees a creature to sacrifice, because it runs before targets are
+     * chosen; the payment then drops that creature from the choices precisely because it is
+     * the target, and fails.
+     *
+     * <p>Before 2026-08-15 that rollout was recorded as {@code FORCED} anyway. The forced
+     * arm was byte-for-byte the natural arm, the pre-registered "the action was taken in at
+     * least 70% of forced rollouts" gate passed, and a candidate that was never once forced
+     * came back as measured with a difference of about zero.
+     */
+    @Test(description = "A cost that the estimate approved but payment refused is not a force")
+    public void reportsPaymentFailureRatherThanCountingItAsAForce() {
+        final ForcedLobbyPlayer seat = new ForcedLobbyPlayer("p1", null, "Fling|deals damage", 0);
+        final Game game = scriptedGame(seat,
+                "turn=5",
+                "activeplayer=p1",
+                "activephase=MAIN1",
+                "removesummoningsickness=true",
+                "p0life=20",
+                "p0battlefield=",
+                "p0library=" + FILLER_LIBRARY,
+                "p1life=20",
+                "p1battlefield=Mountain;Mountain;Grizzly Bears",
+                "p1hand=Fling",
+                "p1library=" + FILLER_LIBRARY);
+        final Player ai = game.getPlayers().get(1);
+        final ForcedActionController controller = (ForcedActionController) ai.getController();
+
+        final List<SpellAbility> choice = controller.chooseSpellAbilityToPlay();
+        Assert.assertNotNull(choice, "Forcing never offered Fling; it got as far as "
+                + controller.getOutcome() + ", so this board no longer tests payment failure");
+        Assert.assertEquals(choice.get(0).getHostCard().getName(), "Fling");
+
+        playOnGameThread(controller, choice.get(0));
+
+        Assert.assertEquals(controller.getOutcome(), ForcedActionController.Outcome.PAYMENT_FAILED,
+                "A forced cast whose sacrifice could not be paid was recorded as " + controller.getOutcome());
+        Assert.assertEquals(controller.getAttempts(), 0, "A cast that never happened was counted as a force");
+        Assert.assertEquals(controller.getOffers(), 1);
+        Assert.assertEquals(zoneOf(game, "Grizzly Bears"), "Battlefield",
+                "The sacrifice was paid after all, so this board no longer tests payment failure");
+    }
+
+    /**
+     * One rollout forces one action, unless the caller asks for more.
+     *
+     * <p>The forcing window is a whole turn, so with no per-rollout limit a repeatable
+     * activated ability is forced at every priority until the mana runs out. That is a
+     * different measurement from the one the tool is for: "would taking this action have
+     * changed who won" becomes "would spending the whole turn on it have", and for a
+     * repeatable self-damaging ability the difference falls on the forced arm alone.
+     */
+    @Test(description = "A repeatable ability is forced once per rollout, not until the mana runs out")
+    public void forcesTheActionOnceAndThenPlaysNormally() {
+        final ForcedLobbyPlayer seat = new ForcedLobbyPlayer("p1", null, "Basilisk Gate|Target creature", 0);
+        final Game game = scriptedGame(seat, lethalBasiliskGateBoard());
+        final Player ai = game.getPlayers().get(1);
+        final ForcedActionController controller = (ForcedActionController) ai.getController();
+        Assert.assertEquals(controller.getMaxForces(), 1, "One force per rollout has to be the default");
+
+        final List<SpellAbility> first = controller.chooseSpellAbilityToPlay();
+        Assert.assertNotNull(first, "Forcing did not offer the pump");
+        Assert.assertTrue(playOnGameThread(controller, first.get(0)), "The forced play reported failure");
+        Assert.assertEquals(controller.getAttempts(), 1);
+
+        // Three more Gates are untapped and the ability is repeatable, so without the limit
+        // the seat would pump again here and keep going.
+        controller.chooseSpellAbilityToPlay();
+        Assert.assertEquals(controller.getAttempts(), 1,
+                "The action was forced more than once, so the rollout measured spending the turn "
+                        + "on it rather than taking it");
+        Assert.assertEquals(controller.getOffers(), 1,
+                "The action was offered again after its one force, so the window never closed");
     }
 
     @Test(description = "Outside its one turn the forced seat is an ordinary heuristic seat")
@@ -137,9 +228,10 @@ public class ForcedActionControllerTest extends AITest {
                 + "costs are no longer force-payable and candidates that cost a sacrifice are "
                 + "unmeasurable by forcing.");
         Assert.assertEquals(choice.get(0).getHostCard().getName(), "Village Rites");
-        Assert.assertEquals(controller.getOutcome(), ForcedActionController.Outcome.FORCED);
 
         Assert.assertTrue(playOnGameThread(controller, choice.get(0)), "The forced cast reported failure");
+        Assert.assertEquals(controller.getOutcome(), ForcedActionController.Outcome.FORCED,
+                "The cast was not recorded as a force; it got as far as " + controller.getOutcome());
         Assert.assertEquals(zoneOf(game, "Grizzly Bears"), "Graveyard",
                 "Village Rites was cast without its sacrifice being paid");
         Assert.assertEquals(zoneOf(game, "Village Rites"), "Stack",
