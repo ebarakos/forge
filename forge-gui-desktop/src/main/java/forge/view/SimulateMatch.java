@@ -109,7 +109,8 @@ public class SimulateMatch {
                 rp = new RegisteredPlayer((Deck) deck.copyTo(deck.getName()));
             }
             if (llmClient != null) {
-                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClient));
+                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClient,
+                        LLMConfig.aiProfilePart(aiProfile)));
             } else {
                 rp.setPlayer(GamePlayerUtil.createAiPlayer(name, aiProfile));
             }
@@ -231,16 +232,27 @@ public class SimulateMatch {
         // itself, without a single line of output to say so. Fail instead.
         for (Map.Entry<Integer, String> entry : aiProfiles.entrySet()) {
             String profile = entry.getValue();
-            if (profile.isEmpty() || LLMConfig.isLlmProfile(profile)) {
+            if (profile.isEmpty()) {
                 continue;
             }
-            String lower = profile.toLowerCase();
-            if (lower.equals("sim")) {
-                continue; // simulation engine with default dials, no profile file needed
-            }
-            String name = lower.startsWith("sim:") ? profile.substring("sim:".length()).trim() : profile;
-            if (name.isEmpty()) {
-                continue;
+            String name;
+            if (LLMConfig.isLlmProfile(profile)) {
+                // An LLM seat may name the AI profile its heuristic half plays
+                // under, after '@'. Check that one exists; the model part is
+                // validated by the client build below.
+                name = LLMConfig.aiProfilePart(profile);
+                if (name.isEmpty()) {
+                    continue;
+                }
+            } else {
+                String lower = profile.toLowerCase();
+                if (lower.equals("sim")) {
+                    continue; // simulation engine with default dials, no profile file needed
+                }
+                name = lower.startsWith("sim:") ? profile.substring("sim:".length()).trim() : profile;
+                if (name.isEmpty()) {
+                    continue;
+                }
             }
             if (!new File(ForgeConstants.AI_PROFILE_DIR, name + ".ai").isFile()) {
                 ORIGINAL_ERR.println("Error: unknown AI profile '" + name + "' for player "
@@ -310,8 +322,11 @@ public class SimulateMatch {
                     }
                     LLMClient client = new LLMClient(llmConfig);
                     llmClients.put(entry.getKey(), client);
+                    String seatAiProfile = LLMConfig.aiProfilePart(profile);
                     ORIGINAL_ERR.println("Player " + (entry.getKey() + 1)
-                            + ": LLM (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")");
+                            + ": LLM (" + llmConfig.getProvider() + ":" + llmConfig.getModel() + ")"
+                            + " on AI profile "
+                            + (seatAiProfile.isEmpty() ? "Default" : seatAiProfile));
                 } else if (LLMStrictMode.isEnabled()) {
                     // No config means no client, and no client means this seat runs on the
                     // heuristic AI while still being labelled as an LLM seat everywhere else.
@@ -366,7 +381,8 @@ public class SimulateMatch {
                 rp = new RegisteredPlayer(d);
             }
             if (llmClients.containsKey(i - 1)) {
-                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClients.get(i - 1)));
+                rp.setPlayer(GamePlayerUtil.createLLMPlayer(name, llmClients.get(i - 1),
+                        LLMConfig.aiProfilePart(profile)));
             } else {
                 rp.setPlayer(GamePlayerUtil.createAiPlayer(name, profile));
             }

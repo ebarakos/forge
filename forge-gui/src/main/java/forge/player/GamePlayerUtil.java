@@ -133,8 +133,24 @@ public final class GamePlayerUtil {
      * @param client LLMClient instance for API calls
      */
     public static LobbyPlayer createLLMPlayer(String name, LLMClient client) {
+        return createLLMPlayer(name, client, null);
+    }
+
+    /**
+     * Create an LLM-backed AI player that plays under a named AI profile.
+     *
+     * <p>The model does not decide everything on an LLM seat: the heuristic AI
+     * underneath it handles every decision the model is not asked about, and
+     * takes its dials from an {@code .ai} profile. This used to be pinned to
+     * {@code Default}, which meant no LLM seat could run a tuned profile.
+     *
+     * @param aiProfile name of a profile in {@code res/ai}; null or empty keeps
+     *                  {@code Default}
+     */
+    public static LobbyPlayer createLLMPlayer(String name, LLMClient client, String aiProfile) {
         LobbyPlayerLLM player = new LobbyPlayerLLM(name, client);
-        player.setAiProfile("Default");
+        player.setAiProfile(aiProfile == null || aiProfile.trim().isEmpty()
+                ? "Default" : aiProfile.trim());
         return player;
     }
 
@@ -166,7 +182,7 @@ public final class GamePlayerUtil {
                 + "' → " + config.getProvider() + upstream + ":" + config.getModel()
                 + " (auth=" + (hasAuth ? "ok" : "MISSING") + ", debug=" + debug + ")");
         LLMClient client = new LLMClient(config);
-        return createLLMPlayer(name, client);
+        return createLLMPlayer(name, client, LLMConfig.aiProfilePart(profileString));
     }
 
     /**

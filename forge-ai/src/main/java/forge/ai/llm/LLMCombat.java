@@ -141,16 +141,20 @@ final class LLMCombat {
             ctrl.defaultDeclareAttackers(attacker, combat);
         }
 
-        // Record attack action
-        if (!attackIndices.isEmpty()) {
+        // Record the attack that the engine actually holds, not the one that was
+        // asked for. When validateAttackers rejects the configuration above, the
+        // declaration is thrown away and the heuristic makes its own — so writing
+        // the requested indices into the history told the model it had attacked
+        // with creatures that never attacked.
+        CardCollection declared = combat.getAttackers();
+        if (declared != null && !declared.isEmpty()) {
             int turn = ctrl.getGame().getPhaseHandler().getTurn();
             StringBuilder actionSb = new StringBuilder();
             actionSb.append("Turn ").append(turn).append(" COMBAT: Attacked with ");
             boolean first = true;
-            for (int idx : attackIndices) {
+            for (Card c : declared) {
                 if (!first) actionSb.append(", ");
                 first = false;
-                Card c = canAttack.get(idx);
                 actionSb.append(c.getName());
                 if (c.isCreature()) {
                     actionSb.append(" (").append(c.getNetPower()).append('/')
@@ -274,25 +278,29 @@ final class LLMCombat {
             }
         }
 
-        // Record block action
-        if (!assignments.isEmpty()) {
-            int turn = ctrl.getGame().getPhaseHandler().getTurn();
-            StringBuilder actionSb = new StringBuilder();
-            actionSb.append("Turn ").append(turn).append(" COMBAT: Blocked ");
-            boolean first = true;
-            for (Map.Entry<Integer, Set<Integer>> entry2 : assignments.entrySet()) {
-                if (!first) actionSb.append("; ");
-                first = false;
-                Card att = attackerList.get(entry2.getKey());
-                actionSb.append(att.getName()).append(" with ");
-                boolean firstB = true;
-                for (int bIdx : entry2.getValue()) {
-                    if (!firstB) actionSb.append("+");
-                    firstB = false;
-                    actionSb.append(blockerList.get(bIdx).getName());
-                }
+        // Record the blocks the engine accepted. Every pair above is re-checked
+        // with canBlock and quietly dropped when illegal, so the requested
+        // assignment and the real one are routinely different — and the history
+        // used to report the requested one, telling the model an attacker was
+        // blocked when it was about to connect.
+        int turn = ctrl.getGame().getPhaseHandler().getTurn();
+        StringBuilder actionSb = new StringBuilder();
+        boolean first = true;
+        for (Card att : combat.getAttackers()) {
+            CardCollection blockers = combat.getBlockers(att);
+            if (blockers == null || blockers.isEmpty()) continue;
+            if (!first) actionSb.append("; ");
+            first = false;
+            actionSb.append(att.getName()).append(" with ");
+            boolean firstB = true;
+            for (Card blocker : blockers) {
+                if (!firstB) actionSb.append("+");
+                firstB = false;
+                actionSb.append(blocker.getName());
             }
-            ctrl.recordAction(actionSb.toString());
+        }
+        if (!first) {
+            ctrl.recordAction("Turn " + turn + " COMBAT: Blocked " + actionSb);
         }
     }
 

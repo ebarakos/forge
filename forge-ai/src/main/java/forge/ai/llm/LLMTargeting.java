@@ -73,7 +73,7 @@ final class LLMTargeting {
         // and throw the answer away. Paying for a target decision inside one
         // would be pure waste — the real decision comes later, on the ability
         // that is actually being played.
-        if (LLMFullController.IN_FEASIBILITY.get()) return false;
+        if (LLMFullController.isCheckingFeasibility()) return false;
         // Same reasoning one level up: while the heuristic AI is being asked
         // what it thinks, any ability it targets along the way is a hypothetical.
         // A card that lets a player choose targets routes the heuristic's own

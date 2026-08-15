@@ -159,7 +159,7 @@ public final class LLMConfig {
                                                double temperature, int timeoutMs,
                                                boolean debug, boolean free) {
         if (profile == null) return null;
-        String trimmed = profile.trim();
+        String trimmed = modelPart(profile).trim();
         if (trimmed.isEmpty()) return null;
         String lower = trimmed.toLowerCase();
 
@@ -391,9 +391,47 @@ public final class LLMConfig {
         return fromProfileString(profile, apiKey, temperature, timeoutMs, debug, false);
     }
 
+    /**
+     * Separator between the model an LLM seat talks to and the AI profile it
+     * plays under, as in {@code "cerebras:gpt-oss-120b@Cautious"}.
+     *
+     * <p>An LLM seat is still a Forge AI seat. The heuristic AI underneath it
+     * decides everything the model is not asked about, and reads its dials —
+     * aggression, mulligan threshold, how much life it will spend — from an
+     * {@code .ai} profile in {@code res/ai}. That profile was fixed at
+     * {@code Default} for every LLM seat, so an LLM seat could not be compared
+     * against, or combined with, any of the tuned profiles a heuristic seat can
+     * use. Naming one after {@code '@'} sets it. Left out, the profile stays
+     * {@code Default} and nothing changes.
+     *
+     * <p>{@code '@'} is safe as a separator because it appears in no provider
+     * name and in no model id.
+     */
+    public static final char AI_PROFILE_SEPARATOR = '@';
+
+    /**
+     * The provider-and-model part of a seat profile — everything before
+     * {@link #AI_PROFILE_SEPARATOR}. Unchanged when there is no separator.
+     */
+    public static String modelPart(String profile) {
+        if (profile == null) return null;
+        int at = profile.indexOf(AI_PROFILE_SEPARATOR);
+        return at < 0 ? profile : profile.substring(0, at);
+    }
+
+    /**
+     * The {@code .ai} profile named after {@link #AI_PROFILE_SEPARATOR}, or an
+     * empty string when the seat profile names none.
+     */
+    public static String aiProfilePart(String profile) {
+        if (profile == null) return "";
+        int at = profile.indexOf(AI_PROFILE_SEPARATOR);
+        return at < 0 ? "" : profile.substring(at + 1).trim();
+    }
+
     public static boolean isLlmProfile(String profile) {
         if (profile == null) return false;
-        String trimmed = profile.trim();
+        String trimmed = modelPart(profile).trim();
         if (trimmed.isEmpty()) return false;
         String lower = trimmed.toLowerCase();
 

@@ -65,7 +65,7 @@ final class LLMSpellSelection {
         List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, ctrl.getPlayer());
 
         List<SpellAbility> playable = new ArrayList<>();
-        LLMFullController.IN_FEASIBILITY.set(true);
+        LLMFullController.enterFeasibility();
         try {
             for (SpellAbility sa : candidates) {
                 // Filter out mana abilities — the engine handles these automatically.
@@ -116,7 +116,7 @@ final class LLMSpellSelection {
                 }
             }
         } finally {
-            LLMFullController.IN_FEASIBILITY.set(false);
+            LLMFullController.exitFeasibility();
         }
 
         if (playable.isEmpty()) {
@@ -189,6 +189,8 @@ final class LLMSpellSelection {
                 ctrl.planPhase = phase;
                 ctrl.planTurn = ctrl.getGame().getPhaseHandler().getTurn();
                 ctrl.planStackSize = ctrl.getGame().getStack().size();
+                ctrl.planOpponentState = ctrl.opponentBoardState();
+                ctrl.planOwnPermanents = ctrl.ownPermanentIds();
 
                 // Muzzle: FORGE_LLM_TRUST_HEURISTIC_TOP (on by default).
                 // When the model's first plan step is not the spell the
@@ -535,9 +537,29 @@ final class LLMSpellSelection {
     }
 
     /**
-     * B1: Pop the next step from the cached MAIN-phase plan, if the plan is
-     * still valid for the current turn/phase and the planned card still exists
-     * in {@code playable}. Returns null if the plan is stale or empty.
+     * B1: Pop the next step from the cached MAIN-phase plan, if the plan still
+     * describes this game and the planned card is still in {@code playable}.
+     * Returns null if the plan is stale or empty, which sends the caller back
+     * for a fresh plan against the board as it is now.
+     *
+     * <p>A plan is a sequence of casts written from one look at the board, and
+     * it is played out over several priority passes. Between those passes the
+     * opponent gets priority. Until 2026-08-15 the only things that ended a
+     * plan early were a change of turn or phase and a stack that had grown, so
+     * an opponent who countered the first spell, killed the creature the second
+     * one was going to pump, or bounced the permanent the third one needed, saw
+     * the rest of the plan played out anyway — every step of it chosen against
+     * a board that no longer existed. Their spell had resolved by the time the
+     * seat next had priority, so the stack was empty again and the plan looked
+     * fine.
+     *
+     * <p>What is checked now is everything the plan could not have anticipated:
+     * anything the opponent did ({@link LLMFullController#opponentBoardState()})
+     * and any permanent of the seat's own that has left the battlefield. What
+     * is not checked is the seat's own additions and the opponent's life total,
+     * because those are the plan doing what it said it would do; invalidating
+     * on them would cost a fresh LLM call after every step and leave no plan
+     * batching at all.
      */
     private SpellAbility popValidPlanStep(List<SpellAbility> playable, PhaseType phase) {
         if (ctrl.mainPhasePlan.isEmpty()) return null;
@@ -546,6 +568,21 @@ final class LLMSpellSelection {
         int currentStackSize = ctrl.getGame().getStack().size();
         if (ctrl.planPhase != phase || ctrl.planTurn != currentTurn || currentStackSize > ctrl.planStackSize) {
             // Phase/turn change or unexpected stack object → conservative invalidation.
+            ctrl.mainPhasePlan.clear();
+            return null;
+        }
+        if (ctrl.planOpponentState != null
+                && !ctrl.planOpponentState.equals(ctrl.opponentBoardState())) {
+            if (ctrl.client.isDebug()) {
+                System.err.println("[LLM] opponent acted since the plan was made → replanning");
+            }
+            ctrl.mainPhasePlan.clear();
+            return null;
+        }
+        if (!ctrl.ownPermanentsIntact(ctrl.planOwnPermanents)) {
+            if (ctrl.client.isDebug()) {
+                System.err.println("[LLM] a permanent the plan counted on has left → replanning");
+            }
             ctrl.mainPhasePlan.clear();
             return null;
         }
@@ -585,7 +622,18 @@ final class LLMSpellSelection {
         return null;
     }
 
-    /** Record a cast-spell entry in the sliding window history. */
+    /**
+     * Record the seat's decision in the sliding window history.
+     *
+     * <p>Worded as an attempt, because that is all it is. This runs when the
+     * ability is handed back to the engine, before the cost is paid and long
+     * before the spell resolves: it can still be countered, its target can be
+     * removed in response, or the cost can turn out to be unpayable. Saying
+     * "Cast Lightning Bolt" here put a claim in the model's own context that
+     * the game had not made yet, and the model has no way to tell the
+     * difference — whereas the board state travelling with every prompt does
+     * show what really landed.
+     */
     private void recordSpellAction(SpellAbility selectedSa, PhaseType phase) {
         String phaseName = phase != null ? phase.toString() : "MAIN";
         int turn = ctrl.getGame().getPhaseHandler().getTurn();
@@ -593,24 +641,46 @@ final class LLMSpellSelection {
         String spellName = host != null ? host.getName() : selectedSa.toString();
         StringBuilder actionSb = new StringBuilder();
         actionSb.append("Turn ").append(turn).append(' ').append(phaseName)
-                .append(selectedSa.isLandAbility() ? ": Played land " : ": Cast ")
+                .append(selectedSa.isLandAbility() ? ": Attempted to play land " : ": Attempted to cast ")
                 .append(spellName);
-        if (selectedSa.usesTargeting() && selectedSa.getTargets() != null
-                && !selectedSa.getTargets().isEmpty()) {
-            actionSb.append(" targeting ");
-            boolean first = true;
-            for (Card tc : selectedSa.getTargets().getTargetCards()) {
-                if (!first) actionSb.append(", ");
-                first = false;
-                actionSb.append(tc.getName());
-            }
-            for (Player tp : selectedSa.getTargets().getTargetPlayers()) {
-                if (!first) actionSb.append(", ");
-                first = false;
-                actionSb.append(tp.getName());
-            }
-        }
+        actionSb.append(describeTargets(selectedSa));
         ctrl.recordAction(actionSb.toString());
+    }
+
+    /**
+     * The {@code " targeting …"} clause for a history entry, or an empty string
+     * when the ability points at nothing worth naming.
+     *
+     * <p>Spells on the stack are named too. Only cards and players were listed
+     * before, so a Counterspell — whose one target is a stack entry, neither of
+     * those — produced the line "Attempted to cast Counterspell targeting "
+     * with nothing after it: a sentence in the model's own context that reads
+     * as an unfinished thought, on the one card where what it points at is the
+     * whole decision.
+     */
+    private static String describeTargets(SpellAbility sa) {
+        if (!sa.usesTargeting() || sa.getTargets() == null || sa.getTargets().isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        for (Card tc : sa.getTargets().getTargetCards()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append(tc.getName());
+        }
+        for (Player tp : sa.getTargets().getTargetPlayers()) {
+            if (!first) sb.append(", ");
+            first = false;
+            sb.append(tp.getName());
+        }
+        for (SpellAbility ts : sa.getTargets().getTargetSpells()) {
+            if (!first) sb.append(", ");
+            first = false;
+            Card host = ts.getHostCard();
+            sb.append(host != null ? host.getName() : ts.toString()).append(" on the stack");
+        }
+        return first ? "" : " targeting " + sb;
     }
 
     /**
