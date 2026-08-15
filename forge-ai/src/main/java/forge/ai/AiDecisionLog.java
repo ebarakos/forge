@@ -212,13 +212,54 @@ public final class AiDecisionLog {
     private static final ThreadLocal<String> REASON = new ThreadLocal<>();
 
     /**
+     * How deep the current thread is inside a speculative evaluation — one card's AI
+     * asking what it would do with a <em>different</em> card, rather than deciding the
+     * option being recorded.
+     *
+     * <p>Some checks answer "is this worth playing?" by trying other cards. A mana
+     * ritual asks whether anything in hand becomes castable with the extra mana, which
+     * runs the full AI check for each of those cards. Every rejection along the way
+     * calls {@link #reason(String)}. Because the first writer wins, the first card
+     * tried inside such a loop would claim the reason slot, and the card actually being
+     * evaluated would then be recorded carrying a stranger's explanation — a ritual
+     * blamed on "sacrifice cost has no synergistic creature" when it sacrifices
+     * nothing. Worse, its own genuine reason, set later, would be dropped as a
+     * duplicate.
+     *
+     * <p>Counted rather than a flag because these loops can nest.
+     */
+    private static final ThreadLocal<int[]> SPECULATION = ThreadLocal.withInitial(() -> new int[1]);
+
+    /**
+     * Enter a speculative evaluation: reasons recorded until the matching
+     * {@link #endSpeculation()} describe some other card and are dropped. Always pair
+     * the two with try/finally, or every later reason on this thread is lost.
+     */
+    public static void beginSpeculation() {
+        if (ENABLED) {
+            SPECULATION.get()[0]++;
+        }
+    }
+
+    /** Leave a speculative evaluation opened by {@link #beginSpeculation()}. */
+    public static void endSpeculation() {
+        if (!ENABLED) {
+            return;
+        }
+        final int[] depth = SPECULATION.get();
+        if (depth[0] > 0) {
+            depth[0]--;
+        }
+    }
+
+    /**
      * Name the check that is rejecting the current option, e.g.
      * {@code "PumpAi: X pump amount computes to 0"}. Call it right before returning a
-     * rejection. Safe to call unconditionally: a no-op when the trace is off, and only
-     * the first reason per option is kept.
+     * rejection. Safe to call unconditionally: a no-op when the trace is off, while a
+     * speculative evaluation is open, or when a reason is already held for this option.
      */
     public static void reason(String why) {
-        if (!ENABLED || why == null) {
+        if (!ENABLED || why == null || SPECULATION.get()[0] > 0) {
             return;
         }
         if (REASON.get() == null) {

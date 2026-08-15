@@ -225,7 +225,16 @@ public class ManaAi extends SpellAbilityAi {
                 continue;
             }
             testSaNoCost.setActivatingPlayer(ai);
-            if (((PlayerControllerAi)ai.getController()).getAi().canPlaySa(testSaNoCost) == AiPlayDecision.WillPlay) {
+            // Asking what some other card would do is not a verdict on the ritual, so the
+            // rejections inside must not be recorded as the ritual's own explanation.
+            final AiPlayDecision payoffDecision;
+            AiDecisionLog.beginSpeculation();
+            try {
+                payoffDecision = ((PlayerControllerAi)ai.getController()).getAi().canPlaySa(testSaNoCost);
+            } finally {
+                AiDecisionLog.endSpeculation();
+            }
+            if (payoffDecision == AiPlayDecision.WillPlay) {
                 if (testSa.getHostCard().isPermanent() && !testSa.getHostCard().hasKeyword(Keyword.HASTE)
                     && !ai.getGame().getPhaseHandler().is(PhaseType.MAIN2)) {
                     // AI will waste a ritual in Main 1 unless the casted permanent is a haste creature
