@@ -335,6 +335,26 @@ public final class AiDecisionLog {
      */
     public static void emit(List<String[]> record, Player player, Game game, String context,
             SpellAbility picked) {
+        emit(record, player, game, context, picked, null);
+    }
+
+    /**
+     * Emit the decision, saying whether the option list was cut short before it was
+     * exhausted.
+     *
+     * <p>{@code cutShort} names what ended the evaluation early, or is null when every
+     * option was really considered. It matters because the two look identical otherwise:
+     * a pass whose candidate list the AI time budget ended mid-way writes {@code
+     * "pick":null} with a short considered list, exactly like a pass where every option
+     * was weighed and rejected, and every reader treats {@code pick == null} as "the AI
+     * chose to do nothing". The options never reached are the ones the evaluator ranked
+     * last, so they also drop out of the considered counts without trace.
+     *
+     * <p>Written as a separate top-level field rather than as an entry in the considered
+     * list, so a reader that does not know about it is unaffected.
+     */
+    public static void emit(List<String[]> record, Player player, Game game, String context,
+            SpellAbility picked, String cutShort) {
         if (record == null) {
             return;
         }
@@ -361,6 +381,9 @@ public final class AiDecisionLog {
             sb.append(",\"hand\":").append(player.getCardsIn(ZoneType.Hand).size());
         }
         appendKey(sb, "pick", picked == null ? null : describe(picked));
+        if (cutShort != null) {
+            appendKey(sb, "truncated", cutShort);
+        }
         String stateFile = dumpStateIfWatched(record, player, game, picked);
         if (stateFile != null) {
             appendKey(sb, "state", stateFile);

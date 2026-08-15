@@ -1697,6 +1697,7 @@ public class AiController {
             boolean isLifeInDanger = useLivingEnd && ComputerUtil.aiLifeInDanger(player, true, 0);
             // Null unless FORGE_AI_DECISION_LOG is set, so this allocates nothing normally.
             final java.util.List<String[]> decisionRecord = AiDecisionLog.newRecord();
+            boolean outOfTime = false;
             for (final SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(all, player)) {
                 // Don't add Counterspells to the "normal" playcard lookups
                 if (skipCounter && sa.getApi() == ApiType.Counter) {
@@ -1707,6 +1708,7 @@ public class AiController {
                 // Out of time: stop looking and pass. Checked between candidates, so a
                 // decision can overrun by at most one candidate evaluation.
                 if (System.nanoTime() - deadlineNanos >= 0) {
+                    outOfTime = true;
                     break;
                 }
 
@@ -1785,9 +1787,14 @@ public class AiController {
                 return sa;
             }
 
-            // A pass. The record is complete here — every option was evaluated and
+            // A pass. Normally the record is complete — every option evaluated and
             // rejected — which makes these the most informative entries in the trace.
-            AiDecisionLog.emit(decisionRecord, player, game, logContext, null);
+            // Unless the time budget ended the list early, in which case the pass is a
+            // budget artefact and not a judgement, and the trace has to say so: without
+            // it the two are byte-identical and every reader treats a null pick as "the
+            // AI chose to do nothing".
+            AiDecisionLog.emit(decisionRecord, player, game, logContext, null,
+                    outOfTime ? "AI time budget reached before every option was evaluated" : null);
             return null;
         } catch (RuntimeException | StackOverflowError e) {
             // This used to run on a thread of its own, with the budget enforced by
