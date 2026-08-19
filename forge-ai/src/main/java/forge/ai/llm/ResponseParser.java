@@ -16,8 +16,9 @@ import java.util.regex.Pattern;
 
 /**
  * Extracts a chosen option index from LLM response text.
- * Handles various response formats: bare integers, "CHOICE: 2",
- * "I choose option 2", first number on first line, etc.
+ * Handles the structured JSON answer the prompts ask for, and the legacy text
+ * shapes: a bare index list, an index list behind a "CHOICE:" style label, and
+ * sentinel words such as "PASS" or "NONE".
  * Supports thinking model output with {@code <think>} tags.
  *
  * <h2>"Empty" and "unreadable" are different answers</h2>
@@ -33,13 +34,29 @@ import java.util.regex.Pattern;
  * heuristic AI played every MAIN phase: a prose answer parsed to an empty list,
  * which looked exactly like a deliberate pass, so nothing was counted and
  * neither {@code FORGE_LLM_STRICT} nor the fallback-rate status ever fired.
+ *
+ * <h2>Text parsing accepts an answer, never prose</h2>
+ *
+ * <p>There is a second way to lose the same distinction, one layer out:
+ * treating text nobody could read as text that was understood. A reasoning
+ * model whose reply is cut off by the token limit sends back its
+ * chain-of-thought and no answer at all. That text is full of small integers —
+ * mana costs, option numbers it was still weighing, life totals — and a parser
+ * that scans a whole response for the first in-range digits will find some and
+ * hand them back as a decision. Nothing downstream can tell that apart from a
+ * real answer, so it is not recorded as a fallback and no gate ever sees it.
+ * Measured on one traced match, six of thirty-one calls were plans assembled
+ * this way out of sentences that stopped mid-word.
+ *
+ * <p>So the text paths here accept a response only when the response <em>is</em>
+ * an answer: a bare index list such as {@code "2,0,PASS"}, the same list behind
+ * an explicit label such as {@code "PLAN: 2,0"}, or a sentinel word such as
+ * {@code "PASS"} or {@code "NONE"} on its own. Anything else — any reply with a
+ * sentence in it — is unreadable, returns {@code null} (or {@code -1}), and is
+ * counted as the failed call it is.
  */
 public final class ResponseParser {
     private ResponseParser() {}
-
-    private static final Pattern LABELED_PATTERN =
-            Pattern.compile("(?:CHOICE|ANSWER|OPTION|SELECT)\\s*[:=]?\\s*(\\d+)",
-                    Pattern.CASE_INSENSITIVE);
 
     private static final Pattern THINK_PATTERN =
             Pattern.compile("<think>[\\s\\S]*?</think>", Pattern.CASE_INSENSITIVE);
@@ -53,6 +70,70 @@ public final class ResponseParser {
             "TARGETS?\\s*[:=]\\s*([0-9][0-9,\\s]*)", Pattern.CASE_INSENSITIVE);
 
     private static final Pattern ANY_INTEGER = Pattern.compile("\\b(\\d+)\\b");
+
+    /**
+     * A bare answer: one or more indices, optionally ended by a sentinel word.
+     * {@code "2"}, {@code "2, 0"}, {@code "2,0,PASS"}, {@code "PASS"},
+     * {@code "NONE"}, {@code "ALL"}, {@code "N/A"} all match; a sentence does
+     * not, whatever digits it contains.
+     */
+    private static final Pattern BARE_ANSWER = Pattern.compile(
+            "(?:\\d+(?:\\s*[,+]\\s*\\d+)*(?:\\s*[,+]?\\s*(?:PASS|NONE|ALL|N/A))?"
+                    + "|PASS|NONE|ALL|NO|N/A)",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * An answer label the model may put in front of a bare answer, at the start
+     * of a line. Line-initial on purpose: a model narrating its way to a
+     * decision writes "…so the answer: 0,1" in the middle of a sentence, and
+     * that sentence is exactly the truncated reasoning this class must not
+     * mine. A legacy text answer puts its label first.
+     */
+    private static final Pattern ANSWER_LABEL = Pattern.compile(
+            "^[ \\t]*(?:PLAN|INDICES|CHOICE|ANSWER|OPTIONS?|SELECT|ATTACKERS?)[ \\t]*[:=]?[ \\t]*",
+            Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
+
+    /**
+     * The part of {@code response} that is an answer, or null when none of it
+     * is. Everything after an explicit label is taken, up to the end of that
+     * line; with no label the whole response has to be the answer. Trailing
+     * sentence punctuation is tolerated, a following sentence is not.
+     *
+     * <p>This is the guard that keeps a truncated chain-of-thought from being
+     * read as a decision. It has to run before any digit scan, because by the
+     * time digits have been collected there is no longer anything to tell a
+     * mana cost in an unfinished sentence from the index the model chose.
+     */
+    private static String answerText(String response) {
+        String s = stripThinkingTags(response);
+        if (s == null) return null;
+        s = s.strip();
+        if (s.isEmpty()) return null;
+        // The whole reply is the answer.
+        String whole = bareAnswer(s);
+        if (whole != null) return whole;
+        // Or a line-initial label carries it on its own line.
+        Matcher label = ANSWER_LABEL.matcher(s);
+        while (label.find()) {
+            String rest = s.substring(label.end());
+            int nl = rest.indexOf('\n');
+            if (nl >= 0) rest = rest.substring(0, nl);
+            String found = bareAnswer(rest);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    /** {@code text} when the whole of it is a bare answer, else null. */
+    private static String bareAnswer(String text) {
+        String s = text.strip();
+        // Drop trailing sentence punctuation so "2,0." still reads as an answer.
+        while (!s.isEmpty() && ".;! \t".indexOf(s.charAt(s.length() - 1)) >= 0) {
+            s = s.substring(0, s.length() - 1);
+        }
+        if (s.isEmpty()) return null;
+        return BARE_ANSWER.matcher(s).matches() ? s : null;
+    }
 
     /**
      * Strip {@code <think>...</think>} blocks from content.
@@ -211,80 +292,43 @@ public final class ResponseParser {
     /**
      * Extract a chosen option index. Tries JSON {@code {choice: int}} first;
      * falls back to text parsing for legacy responses.
+     *
+     * @return the chosen index, or {@code -1} when the response named no option
+     *         — a failed call the caller has to record as a fallback
      */
     public static int parseChoiceIndex(String response, int numOptions) {
         JsonObject obj = tryParseJsonObject(response);
-        if (obj != null && obj.has("choice")) {
-            try {
-                int v = obj.get("choice").getAsInt();
-                if (v >= 0 && v < numOptions) return v;
-            } catch (Exception ignored) {}
+        if (obj != null) {
+            // A parsed object is the answer, whatever it holds. Falling through
+            // to text parsing would scan the object's own reasoning string.
+            if (obj.has("choice")) {
+                try {
+                    int v = obj.get("choice").getAsInt();
+                    if (v >= 0 && v < numOptions) return v;
+                } catch (Exception ignored) {}
+            }
+            return -1;
         }
         if (response == null || response.isBlank()) return -1;
+        // A body that opens with a brace and will not parse is a structured
+        // answer the token limit cut in half, not prose to be mined.
+        if (isBrokenJson(response)) return -1;
 
-        String trimmed = response.strip();
-
-        // 1. Try direct integer parse of entire response
-        try {
-            int val = Integer.parseInt(trimmed);
-            if (val >= 0 && val < numOptions) return val;
-        } catch (NumberFormatException ignored) {}
-
-        // 2. Look for "CHOICE: N" / "ANSWER: N" pattern
-        Matcher m = LABELED_PATTERN.matcher(trimmed);
-        if (m.find()) {
+        // Legacy text answers only: the whole reply is the index, or a
+        // line-initial "CHOICE: 2" label carries it, or a chatty model put the
+        // bare index on its own last line. Digits inside a sentence are never
+        // the answer — see the class notes.
+        String answer = answerText(response);
+        if (answer == null) {
+            answer = answerText(lastNonEmptyLine(stripThinkingTags(response)));
+        }
+        if (answer == null) return -1;
+        Matcher m = ANY_INTEGER.matcher(answer);
+        while (m.find()) {
             int val = Integer.parseInt(m.group(1));
             if (val >= 0 && val < numOptions) return val;
         }
-
-        // 3. First integer on first non-empty line
-        String firstLine = trimmed.lines()
-                .filter(l -> !l.isBlank())
-                .findFirst()
-                .orElse("");
-        Matcher lineM = Pattern.compile("\\b(\\d+)\\b").matcher(firstLine);
-        if (lineM.find()) {
-            int val = Integer.parseInt(lineM.group(1));
-            if (val >= 0 && val < numOptions) return val;
-        }
-
-        // 4. Last non-empty line (chatty models put answer at the end)
-        String lastLine = "";
-        String[] lines = trimmed.split("\\n");
-        for (int i = lines.length - 1; i >= 0; i--) {
-            if (!lines[i].isBlank()) {
-                lastLine = lines[i].strip();
-                break;
-            }
-        }
-        if (!lastLine.isEmpty() && !lastLine.equals(firstLine)) {
-            // Try direct parse of last line
-            try {
-                int val = Integer.parseInt(lastLine);
-                if (val >= 0 && val < numOptions) return val;
-            } catch (NumberFormatException ignored) {}
-            // Try labeled pattern on last line
-            Matcher lastM = LABELED_PATTERN.matcher(lastLine);
-            if (lastM.find()) {
-                int val = Integer.parseInt(lastM.group(1));
-                if (val >= 0 && val < numOptions) return val;
-            }
-            // Try first integer on last line
-            Matcher lastLineM = Pattern.compile("\\b(\\d+)\\b").matcher(lastLine);
-            if (lastLineM.find()) {
-                int val = Integer.parseInt(lastLineM.group(1));
-                if (val >= 0 && val < numOptions) return val;
-            }
-        }
-
-        // 5. Last integer in valid range anywhere in response
-        int lastValid = -1;
-        Matcher anyM = Pattern.compile("\\b(\\d+)\\b").matcher(trimmed);
-        while (anyM.find()) {
-            int val = Integer.parseInt(anyM.group(1));
-            if (val >= 0 && val < numOptions) lastValid = val;
-        }
-        return lastValid;
+        return -1;
     }
 
     /**
@@ -411,7 +455,11 @@ public final class ResponseParser {
         }
         if (response == null || response.isBlank() || isBrokenJson(response)) return null;
 
-        String trimmed = response.strip().toUpperCase();
+        // Same rule as the plan parser: read an answer, never a sentence.
+        String answer = answerText(response);
+        if (answer == null) return null;
+
+        String trimmed = answer.toUpperCase();
         if (trimmed.equals("NONE") || trimmed.equals("N/A") || trimmed.equals("NO")) {
             return result;
         }
@@ -420,8 +468,8 @@ public final class ResponseParser {
             return result;
         }
 
-        // Extract all integers from the response
-        Matcher m = ANY_INTEGER.matcher(response);
+        // Extract all integers from the answer
+        Matcher m = ANY_INTEGER.matcher(answer);
         while (m.find()) {
             int val = Integer.parseInt(m.group(1));
             if (val >= 0 && val < maxIndex) {
@@ -547,7 +595,13 @@ public final class ResponseParser {
         }
         if (response == null || response.isBlank() || isBrokenJson(response)) return null;
 
-        String trimmed = response.strip().toUpperCase();
+        // Text path. Only a response that IS an answer is read; a reply with a
+        // sentence in it is a chain-of-thought the token limit cut short, and
+        // its digits are mana costs and life totals, not a plan.
+        String answer = answerText(response);
+        if (answer == null) return null;
+
+        String trimmed = answer.toUpperCase();
         if (trimmed.equals("PASS") || trimmed.equals("NONE") || trimmed.equals("N/A")) {
             return result;
         }

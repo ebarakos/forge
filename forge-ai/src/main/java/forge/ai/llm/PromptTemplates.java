@@ -81,6 +81,12 @@ public final class PromptTemplates {
           + "- Blockers absorb attacker damage; only UNBLOCKED damage reaches the player.\n"
           + "- Sorceries (no Flash/Instant) can only be cast on your own main phase with empty stack.\n"
           + "- Counterspells must be cast in response to a spell already on the stack.\n"
+          + "- Hexproof and Shroud protect only the permanent that has them. They never protect\n"
+          + "  its controller. A spell aimed at the opposing PLAYER is legal however many\n"
+          + "  hexproof creatures they control.\n"
+          + "- Every option listed has already been checked by the game engine, target included.\n"
+          + "  If an option says it targets a player or a permanent, that target is legal. Never\n"
+          + "  pass because you believe a listed option cannot be played.\n"
           + "\n"
           + "When in doubt, prefer the option that keeps the most future options open.\n"
           + "\n"
@@ -109,6 +115,13 @@ public final class PromptTemplates {
      * push and add an explicit timing reminder, because passing is usually
      * correct outside main phases — we observed gpt-oss-20b casting sorceries
      * in COMBAT_DAMAGE because the prompt biased it toward action.
+     *
+     * <p>The instant-speed rule used to name only counters, removal and combat
+     * tricks as reasons to act, which is the reason list of a control deck. An
+     * aggressive deck's reason to act is the opponent's life total, and leaving
+     * it out cost real games: in the recorded Burn run a legal spell aimed at the
+     * opposing player appeared in 17 spell-choice calls and Burn passed in 11 of
+     * them. Damage to the opponent is now named beside the other three.
      */
     public static String spellSelection(String gameState, String options, boolean isMainPhase) {
         StringBuilder sb = new StringBuilder(gameState);
@@ -118,7 +131,10 @@ public final class PromptTemplates {
         } else {
             sb.append("\n[INSTANT SPEED — only flash/instants and activated abilities are listed.]\n");
             sb.append("Choose a spell or ability to play, or PASS (last option).\n");
-            sb.append("Passing is usually correct unless you can counter, remove, or set up a combat trick.\n\n");
+            sb.append("Passing is usually correct unless you can counter, remove, set up a combat\n");
+            sb.append("trick, or push damage at the opponent's life total. Damage aimed at the\n");
+            sb.append("opponent is a clock, not a reaction: hold it only when you expect to need\n");
+            sb.append("it for a specific creature.\n\n");
         }
         sb.append(options);
         return sb.toString();

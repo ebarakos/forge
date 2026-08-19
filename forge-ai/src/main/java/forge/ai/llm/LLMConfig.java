@@ -84,7 +84,44 @@ public final class LLMConfig {
     public boolean isDebug() { return debug; }
     public boolean isPromptCachingEnabled() { return promptCaching; }
 
-    /** Returns true if this model is a thinking/reasoning model that produces chain-of-thought tokens. */
+    /**
+     * Whether an upstream accepts the prompt-caching request format — the
+     * message {@code content} sent as an array of text blocks, one of them
+     * carrying {@code cache_control: {"type":"ephemeral"}}.
+     *
+     * <p>That shape is an Anthropic extension also supported by OpenRouter's
+     * Chat Completions API. Other OpenAI-compatible endpoints used here answer
+     * a plain string only and can reject the block form with HTTP 400
+     * ({@code "content.str: Input should be a valid string"} /
+     * {@code "cache_control is unsupported"}). The client remembers a
+     * rejection and drops back to plain strings for the rest of the session,
+     * but the call that discovered it is already lost: with an LLM seat in a
+     * game that is one decision handed to the heuristic AI on every process
+     * launch. So the format is only sent where it is known to be understood.
+     *
+     * <p>Note this is about the request format, not about caching itself.
+     * Several upstreams (Cerebras among them) cache prompt prefixes
+     * automatically and report the hits in {@code usage}; they simply do not
+     * want to be asked. Anthropic models can use explicit caching either via
+     * the {@code anthropic} provider or through OpenRouter.
+     *
+     * @param upstream provider name, or the relay's upstream name
+     */
+    private static boolean acceptsCacheControl(String upstream) {
+        return "anthropic".equals(upstream) || "openrouter".equals(upstream);
+    }
+
+    /**
+     * Whether the model's name says it produces chain-of-thought tokens.
+     *
+     * <p>A hint, not a test. Reasoning is a property of the model, and model
+     * names are not required to mention it — {@code gpt-oss-120b} thinks for
+     * three to four thousand tokens before it answers and matches nothing here.
+     * {@link LLMClient} therefore treats a name match only as a reason to start
+     * at the large completion budget, and works the rest out from what comes
+     * back: a reply cut off at the limit means this model needs the large
+     * budget too, whatever it is called.
+     */
     public boolean isThinkingModel() {
         if (model == null) return false;
         String lower = model.toLowerCase();
@@ -297,10 +334,7 @@ public final class LLMConfig {
             }
 
             int minInterval = "cerebras".equals(relayProvider) ? CEREBRAS_MIN_INTERVAL_MS : 0;
-            // Anthropic-style cache_control is supported by the cloud upstreams
-            // we proxy, but not by openai-compat (LM Studio / vLLM speak plain
-            // OpenAI without content-block cache hints).
-            boolean cachingOn = !"custom".equals(relayProvider);
+            boolean cachingOn = acceptsCacheControl(relayProvider);
 
             return new Builder()
                     .provider("relay")
@@ -363,10 +397,7 @@ public final class LLMConfig {
         }
 
         int minInterval = "cerebras".equals(providerName) ? CEREBRAS_MIN_INTERVAL_MS : 0;
-        // Direct calls: caching off for ollama / openai-compat (local OpenAI-clone
-        // backends typically don't honour Anthropic-style cache_control), on for
-        // hosted providers that do (cerebras/openrouter/openai).
-        boolean cachingOn = !"ollama".equals(providerName) && !"openai-compat".equals(providerName);
+        boolean cachingOn = acceptsCacheControl(providerName);
 
         return new Builder()
                 .provider(providerName)

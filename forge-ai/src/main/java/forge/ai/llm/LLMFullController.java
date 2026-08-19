@@ -130,7 +130,8 @@ public class LLMFullController extends PlayerControllerAi {
     //                                          heuristic wants to play something
     //   FORGE_LLM_HEURISTIC_LAND_DROPS  on   — the heuristic picks which land to play, and when
     //   FORGE_LLM_HEURISTIC_TARGETS     on   — the heuristic decides where each spell points
-    //   FORGE_LLM_HARDCODED_PLAY_FIRST  on   — always choose to play first, without asking
+    //   FORGE_LLM_HARDCODED_PLAY_FIRST  on   — choose to play first in games two and three
+    //                                          without asking (game one never asks either way)
     //   FORGE_LLM_INSTANT_SPEED_GATE    on   — outside the seat's own main phases, the heuristic
     //                                          decides unless there is a stack response or a
     //                                          combat trick to consider
@@ -212,9 +213,11 @@ public class LLMFullController extends PlayerControllerAi {
     static final boolean HEURISTIC_TARGETS = muzzleOn("FORGE_LLM_HEURISTIC_TARGETS");
 
     /**
-     * Always choose to play first, without asking anyone. Off
+     * Choose to play first without asking anyone. Off
      * ({@code FORGE_LLM_HARDCODED_PLAY_FIRST=0}) asks the model to choose play
-     * or draw; a failed call still falls back to playing first.
+     * or draw in games two and three; a failed call still falls back to playing
+     * first. Game one is decided without the model whatever this is set to — see
+     * {@link #playsFirstWithoutAsking(boolean, boolean, boolean)}.
      */
     static final boolean HARDCODED_PLAY_FIRST = muzzleOn("FORGE_LLM_HARDCODED_PLAY_FIRST");
 
@@ -360,6 +363,14 @@ public class LLMFullController extends PlayerControllerAi {
 
     /** Spell-selection delegate (heuristic prior, plan caching, choose ability). */
     private final LLMSpellSelection spellSelection;
+
+    /**
+     * The spell-selection delegate, so a test can read the option list this
+     * seat builds without putting a decision to a model.
+     */
+    LLMSpellSelection spellSelection() {
+        return spellSelection;
+    }
 
     /** Combat delegate (declare attackers/blockers with heuristic baselines). */
     private final LLMCombat combat;
@@ -685,19 +696,12 @@ public class LLMFullController extends PlayerControllerAi {
                     LLMResponseSchema.CHOICE);
             int choice = ResponseParser.parseChoiceIndex(response, numOptions);
             if (choice < 0) {
-                if (client.isDebug()) {
-                    System.err.println("[LLM FALLBACK] " + callLabel + ": parse failed");
-                }
                 client.recordFallback(getPlayer().getName(), callLabel
                         + ": answer held no usable option index (" + numOptions + " options offered)");
                 return -1;
             }
             return choice;
         } catch (Exception e) {
-            if (client.isDebug()) {
-                System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
-                        + " - " + e.getMessage());
-            }
             client.recordFallback(getPlayer().getName(), describeFailure(callLabel, e));
             return -1;
         }
@@ -742,9 +746,6 @@ public class LLMFullController extends PlayerControllerAi {
         if (picks != null) {
             return picks;
         }
-        if (client.isDebug()) {
-            System.err.println("[LLM FALLBACK] " + callLabel + ": parse failed");
-        }
         client.recordFallback(getPlayer().getName(), callLabel
                 + ": answer held no usable index (" + optionsOffered + " options offered)");
         return null;
@@ -775,10 +776,6 @@ public class LLMFullController extends PlayerControllerAi {
                     PromptTemplates.SYSTEM_PROMPT, parts.stablePrefix, parts.volatileTail,
                     callLabel, getPlayer().getName(), schema);
         } catch (Exception e) {
-            if (client.isDebug()) {
-                System.err.println("[LLM FALLBACK] " + callLabel + ": " + e.getClass().getSimpleName()
-                        + " - " + e.getMessage());
-            }
             client.recordFallback(getPlayer().getName(), describeFailure(callLabel, e));
             return null;
         }
@@ -1857,13 +1854,38 @@ public class LLMFullController extends PlayerControllerAi {
     // Starting player / hand
     // =======================================================================
 
+    /**
+     * Whether this seat plays first without asking the model.
+     *
+     * <p>Game one of a Constructed match is not a decision the model is in a
+     * position to make. Nothing about the opponent is known yet, and the prompt
+     * carries no deck identity, no opening hand and no board, so a model asked to
+     * choose has to invent the context it is missing. In the recorded Burn run it
+     * did exactly that: 10 of 15 calls took the draw, and five of those
+     * explanations described Burn as a deck that "answers threats". Burn is the
+     * deck in the format that least wants to trade a turn for a card. Playing
+     * first is what the heuristic AI does, and it is right here.
+     *
+     * <p>The choice is still the model's in games two and three, where the
+     * previous game is real information — unless
+     * {@code FORGE_LLM_HARDCODED_PLAY_FIRST} (on by default) keeps those too, or
+     * there is no client to ask.
+     *
+     * @param isFirstgame  game one of the match, so nothing is known yet
+     * @param hardcoded    the FORGE_LLM_HARDCODED_PLAY_FIRST muzzle
+     * @param hasClient    whether there is an LLM client that could be asked
+     */
+    static boolean playsFirstWithoutAsking(boolean isFirstgame, boolean hardcoded,
+                                           boolean hasClient) {
+        return isFirstgame || hardcoded || !hasClient;
+    }
+
     @Override
     public Player chooseStartingPlayer(boolean isFirstgame) {
-        // Muzzle: FORGE_LLM_HARDCODED_PLAY_FIRST (on by default) always chooses
-        // to play first without asking. Off, the model chooses play or draw —
-        // a real decision in Pauper, where several decks want the extra card.
-        // Any failure (no client, bad answer) keeps today's play-first answer.
-        if (HARDCODED_PLAY_FIRST || client == null) {
+        // See playsFirstWithoutAsking for why game one never reaches the model.
+        // Any failure past this point (bad answer, no opponent) also keeps the
+        // play-first answer.
+        if (playsFirstWithoutAsking(isFirstgame, HARDCODED_PLAY_FIRST, client != null)) {
             return getPlayer();
         }
         Player opponent = null;

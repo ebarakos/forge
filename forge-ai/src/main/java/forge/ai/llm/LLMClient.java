@@ -30,6 +30,24 @@ public class LLMClient {
     private static final Object THROTTLE_LOCK = new Object();
     private static long lastCallEndNanos = 0L;
 
+    /** Completion budget for a model that answers directly. */
+    private static final int DEFAULT_MAX_TOKENS = 1024;
+    /**
+     * Completion budget for a model that thinks before it answers. Only tokens
+     * actually generated are billed, so a model that replies in sixty tokens is
+     * unaffected by the higher ceiling; a model that reasons for three thousand
+     * is the difference between an answer and a lost decision.
+     */
+    private static final int LARGE_MAX_TOKENS = 16384;
+
+    /**
+     * Models seen to run out of completion budget before answering, by model
+     * name. JVM-wide, so every seat and every game in a process pays the
+     * discovery cost once instead of once per call.
+     */
+    private static final java.util.Set<String> MODELS_NEEDING_LARGE_BUDGET =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     // Thread-safe aggregate counters
     private final AtomicInteger totalCalls = new AtomicInteger(0);
     private final AtomicInteger totalFallbacks = new AtomicInteger(0);
@@ -96,14 +114,100 @@ public class LLMClient {
                                   String callLabel, String playerName,
                                   LLMResponseSchema schema) throws LLMException {
         int callNum = totalCalls.incrementAndGet();
+        // Single-string view of the user prompt (non-caching path + debug output).
+        String fullUserPrompt = (stablePrefix == null || stablePrefix.isEmpty())
+                ? volatileTail : stablePrefix + volatileTail;
 
+        boolean large = usesLargeBudget();
+        Attempt attempt = sendOnce(systemPrompt, stablePrefix, volatileTail, fullUserPrompt,
+                schema, large ? LARGE_MAX_TOKENS : DEFAULT_MAX_TOKENS);
+
+        // The model ran out of room before it answered. Its name did not say it
+        // reasons, so it started on the small budget; now that the reply itself
+        // has said so, raise the ceiling, retry this one call, and remember the
+        // model so the lesson is paid for once per process rather than per call.
+        if (attempt.truncated() && !large) {
+            rememberLargeBudget();
+            if (config.isDebug()) {
+                System.err.println("[LLM] " + config.getModel() + " hit the " + DEFAULT_MAX_TOKENS
+                        + "-token ceiling before answering (finish_reason="
+                        + attempt.finishReason + "); retrying at " + LARGE_MAX_TOKENS
+                        + " and using it for the rest of the session.");
+            }
+            attempt = sendOnce(systemPrompt, stablePrefix, volatileTail, fullUserPrompt,
+                    schema, LARGE_MAX_TOKENS);
+        }
+
+        if (attempt.content == null || attempt.content.isBlank()) {
+            // No content field at all: the whole completion went on reasoning.
+            // A typed failure, not the NullPointerException this used to be, and
+            // without the several thousand characters of chain-of-thought that
+            // embedding the raw body put into every fallback reason string.
+            throw new LLMException("LLM returned no content (finish_reason="
+                    + attempt.finishReason + ", max_tokens=" + attempt.maxTokens
+                    + ", model=" + config.getModel() + ")");
+        }
+
+        if ("length".equals(attempt.finishReason)) {
+            // The larger retry also ran out of room (or this model started on
+            // the large budget). Content returned with finish_reason=length is
+            // still incomplete. Passing it to a text parser would let mana
+            // costs and option numbers in unfinished reasoning become a game
+            // decision that is incorrectly counted as a successful LLM call.
+            throw new LLMException("LLM response was truncated (finish_reason=length"
+                    + ", max_tokens=" + attempt.maxTokens
+                    + ", model=" + config.getModel() + ")");
+        }
+
+        // Strip <think>...</think> tags from thinking models (some providers embed reasoning in content)
+        String content = ResponseParser.stripThinkingTags(attempt.content);
+
+        // Debug output
+        if (config.isDebug()) {
+            printDebug(callNum, playerName, callLabel, systemPrompt, fullUserPrompt,
+                    content, attempt.latencyMs, attempt.inputTokens, attempt.outputTokens);
+        }
+
+        return content;
+    }
+
+    /** Whether this call should start at the large completion budget. */
+    private boolean usesLargeBudget() {
+        return config.isThinkingModel()
+                || (config.getModel() != null && MODELS_NEEDING_LARGE_BUDGET.contains(config.getModel()));
+    }
+
+    private void rememberLargeBudget() {
+        if (config.getModel() != null) {
+            MODELS_NEEDING_LARGE_BUDGET.add(config.getModel());
+        }
+    }
+
+    /** One HTTP exchange: what came back, and what it cost. */
+    private static final class Attempt {
+        String content;        // null when the message carried no content field
+        String finishReason;   // "stop", "length", … or null when absent
+        int maxTokens;
+        long latencyMs;
+        int inputTokens;
+        int outputTokens;
+
+        /** The provider stopped at the ceiling, or answered nothing at all. */
+        boolean truncated() {
+            return "length".equals(finishReason) || content == null || content.isBlank();
+        }
+    }
+
+    /** Build, send and read one request at the given completion budget. */
+    private Attempt sendOnce(String systemPrompt, String stablePrefix, String volatileTail,
+                             String fullUserPrompt, LLMResponseSchema schema,
+                             int maxTokens) throws LLMException {
         // Build request JSON
         JsonObject body = new JsonObject();
         body.addProperty("model", config.getModel());
         body.addProperty("temperature", config.getTemperature());
         // Set max_tokens to bound token usage. Responses include a short
         // reasoning string + the structured payload, plus thinking-model CoT.
-        int maxTokens = config.isThinkingModel() ? 16384 : 1024;
         body.addProperty("max_tokens", maxTokens);
 
         // Inject structured output (json_schema for cloud / format for ollama)
@@ -127,9 +231,6 @@ public class LLMClient {
         }
 
         boolean cachingActive = config.isPromptCachingEnabled() && !cachingDisabledForSession;
-        // Single-string view of the user prompt (non-caching path + debug output).
-        String fullUserPrompt = (stablePrefix == null || stablePrefix.isEmpty())
-                ? volatileTail : stablePrefix + volatileTail;
 
         JsonArray messages = new JsonArray();
         JsonObject sysMsg = new JsonObject();
@@ -230,10 +331,10 @@ public class LLMClient {
             response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             // Up to 3 retries on transient errors; longer backoff for 429/503.
-            int attempt = 0;
+            int retries = 0;
             final int maxRetries = 3;
             long backoffMs = 2000L;
-            while (response.statusCode() >= 400 && attempt < maxRetries) {
+            while (response.statusCode() >= 400 && retries < maxRetries) {
                 int status = response.statusCode();
                 // Relay quota errors (source:"relay") are non-retriable — throw immediately.
                 if (status == 429 && isRelayRateLimit(response.body())) {
@@ -241,10 +342,19 @@ public class LLMClient {
                             + response.body().substring(0, Math.min(200, response.body().length())));
                 }
                 boolean rateLimited = (status == 429 || status == 503);
+                boolean requestTimedOut = status == 408;
+                // A 4xx that is not a rate limit is a verdict on the request
+                // itself — a bad key, an unknown model, a body shape the
+                // upstream will not take. Re-sending the identical body cannot
+                // change the answer; it only spends three more requests and
+                // three more seconds before the caller learns what happened.
+                if (!rateLimited && !requestTimedOut && status < 500) {
+                    break;
+                }
                 long sleepMs = rateLimited ? backoffMs : 1000L;
                 Thread.sleep(sleepMs);
                 if (rateLimited) backoffMs *= 2;
-                attempt++;
+                retries++;
                 throttleBeforeCall();
                 response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             }
@@ -298,18 +408,27 @@ public class LLMClient {
             throw new LLMException("Failed to parse LLM response JSON: " + e.getMessage(), e);
         }
 
-        String content;
+        Attempt attempt = new Attempt();
+        attempt.maxTokens = maxTokens;
+        attempt.latencyMs = latencyMs;
+        // A choice always has a finish_reason; it need not have any content.
+        // "length" with the message carrying only a reasoning field is what a
+        // reasoning model on too small a budget looks like, and reading
+        // content straight off the object used to raise a NullPointerException
+        // wrapped in an LLMException whose text was the entire reply.
         try {
-            content = respJson.getAsJsonArray("choices")
-                    .get(0).getAsJsonObject()
-                    .getAsJsonObject("message")
-                    .get("content").getAsString();
+            JsonObject choice = respJson.getAsJsonArray("choices").get(0).getAsJsonObject();
+            if (choice.has("finish_reason") && !choice.get("finish_reason").isJsonNull()) {
+                attempt.finishReason = choice.get("finish_reason").getAsString();
+            }
+            JsonObject message = choice.getAsJsonObject("message");
+            if (message != null && message.has("content") && !message.get("content").isJsonNull()) {
+                attempt.content = message.get("content").getAsString();
+            }
         } catch (Exception e) {
-            throw new LLMException("Failed to extract content from LLM response: " + response.body(), e);
+            String bodySnippet = response.body().substring(0, Math.min(400, response.body().length()));
+            throw new LLMException("LLM response had no readable choice: " + bodySnippet, e);
         }
-
-        // Strip <think>...</think> tags from thinking models (some providers embed reasoning in content)
-        content = ResponseParser.stripThinkingTags(content);
 
         // Extract token usage if available (some providers omit or null-out usage)
         int inputTokens = 0;
@@ -348,14 +467,10 @@ public class LLMClient {
         } catch (Exception e) {
             // Non-fatal: usage tracking is best-effort
         }
+        attempt.inputTokens = inputTokens;
+        attempt.outputTokens = outputTokens;
 
-        // Debug output
-        if (config.isDebug()) {
-            printDebug(callNum, playerName, callLabel, systemPrompt, fullUserPrompt,
-                    content, latencyMs, inputTokens, outputTokens);
-        }
-
-        return content;
+        return attempt;
     }
 
     /**
@@ -441,6 +556,12 @@ public class LLMClient {
      */
     public void recordFallback(String playerName, String reason) {
         int fallbacks = totalFallbacks.incrementAndGet();
+        // Printed here rather than at each call site: four of them recorded a
+        // fallback and printed nothing, so a debug run explained only ten of
+        // fourteen fallbacks and the rest could not be diagnosed at all.
+        if (config.isDebug() && reason != null && !reason.isEmpty()) {
+            System.err.println("[LLM FALLBACK] " + reason);
+        }
         if (LLMStrictMode.isEnabled()) {
             LLMStrictMode.onFallback(playerName, describeEndpoint(), reason,
                     totalCalls.get(), fallbacks);

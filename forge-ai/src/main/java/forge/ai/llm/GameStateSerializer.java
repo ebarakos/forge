@@ -146,19 +146,88 @@ public final class GameStateSerializer {
     }
 
     /**
+     * Whether a creature counts toward its controller's clock.
+     *
+     * <p>A clock is what each side can do at its <em>next</em> combat, so whether
+     * a creature is tapped or summoning-sick right now is not consulted: a tapped
+     * creature untaps in its controller's untap step, and one that entered this
+     * turn has lost its sickness by their next combat. Both are still there, and
+     * both will attack.
+     *
+     * <p>Counting only what can attack this instant is what printed
+     * {@code they kill you in no clock} in game 2 of the recorded Burn run. Burn
+     * was at 3 life on its turn-9 draw step, facing a tapped 9/7 trample hexproof
+     * Slippery Bogle that would untap and kill it on the following turn. The model
+     * worked out the lethal for itself from the battlefield list, which is proof
+     * the position held the information and the summary threw it away.
+     *
+     * <p>Defenders never attack, and a creature with no power lands nothing.
+     *
+     * @param hasDefender the creature has defender
+     * @param power       its combat damage
+     */
+    static boolean clocksNextTurn(boolean hasDefender, int power) {
+        return !hasDefender && power > 0;
+    }
+
+    /**
+     * Total combat damage a player can land at their next combat, assuming
+     * nothing blocks. Optimistic upper bound, and the projected counterpart of
+     * {@link GameStateEvaluator#totalCombatDamage(Player)} — which stays as it is
+     * because the heuristic evaluator reads it as a right-now figure.
+     */
+    private static int projectedCombatDamage(Player p) {
+        int total = 0;
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isCreature()) continue;
+            int power = c.getNetCombatDamage();
+            if (clocksNextTurn(c.hasKeyword(forge.game.keyword.Keyword.DEFENDER), power)) {
+                total += power;
+            }
+        }
+        return total;
+    }
+
+    /**
+     * The part of {@link #projectedCombatDamage(Player)} that cannot be blocked —
+     * a lower bound on what lands at the next combat whatever the defender does.
+     */
+    private static int projectedEvasiveDamage(Player p) {
+        int total = 0;
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isCreature()) continue;
+            int power = c.getNetCombatDamage();
+            if (!clocksNextTurn(c.hasKeyword(forge.game.keyword.Keyword.DEFENDER), power)) {
+                continue;
+            }
+            if (c.hasKeyword(forge.game.keyword.Keyword.FLYING)
+                    || c.hasKeyword(forge.game.keyword.Keyword.HORSEMANSHIP)
+                    || forge.game.staticability.StaticAbilityCantAttackBlock.cantBlockBy(c, null)) {
+                total += power;
+            }
+        }
+        return total;
+    }
+
+    /**
      * Serialize the combat clock for both players: how many turns until each
-     * player dies at current attack rates. Two figures per side: total combat
-     * damage (assuming nothing blocks — optimistic), and evasive-only damage
-     * (lower bound, since evasive creatures are unblockable for this stat).
+     * player dies, counting what each side can attack with at its next combat.
+     * Two figures per side: total combat damage (assuming nothing blocks —
+     * optimistic), and evasive-only damage (a lower bound, since evasive
+     * creatures are unblockable for this stat).
+     *
+     * <p>The line says "after untap" out loud, because the figures are a
+     * projection: a side whose creatures are all tapped right now still has a
+     * clock, and a reader must not take "you kill them in 1 turn" as "this turn".
      */
     private static void serializeClock(StringBuilder sb, Player me, Player opp) {
         if (opp == null) return;
-        int myTotal = GameStateEvaluator.totalCombatDamage(me);
-        int myEvasive = GameStateEvaluator.evasiveDamage(me);
-        int oppTotal = GameStateEvaluator.totalCombatDamage(opp);
-        int oppEvasive = GameStateEvaluator.evasiveDamage(opp);
+        int myTotal = projectedCombatDamage(me);
+        int myEvasive = projectedEvasiveDamage(me);
+        int oppTotal = projectedCombatDamage(opp);
+        int oppEvasive = projectedEvasiveDamage(opp);
         if (myTotal == 0 && oppTotal == 0) return;
-        sb.append("Clock: ");
+        sb.append("Clock (each side's next combat, after untap): ");
         sb.append("you kill them in ").append(turnsLabel(opp.getLife(), myTotal, myEvasive));
         sb.append("; they kill you in ").append(turnsLabel(me.getLife(), oppTotal, oppEvasive));
         sb.append('\n');

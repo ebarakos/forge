@@ -65,63 +65,7 @@ final class LLMSpellSelection {
             }
         }
 
-        CardCollection cards = ComputerUtilAbility.getAvailableCards(ctrl.getGame(), ctrl.getPlayer());
-        List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, ctrl.getPlayer());
-
-        List<SpellAbility> playable = new ArrayList<>();
-        LLMFullController.enterFeasibility();
-        try {
-            for (SpellAbility sa : candidates) {
-                // Filter out mana abilities — the engine handles these automatically.
-                // Land abilities are filtered too while the heuristic owns land
-                // drops (see the muzzle above); when it doesn't, they stay in the
-                // list so the model can choose to play a land or not.
-                if (sa.isManaAbility()) {
-                    continue;
-                }
-                if (sa.isLandAbility() && LLMFullController.HEURISTIC_LAND_DROPS) {
-                    continue;
-                }
-                sa.setActivatingPlayer(ctrl.getPlayer());
-                if (sa.isLandAbility()) {
-                    // Land plays cost nothing and target nothing, so the spell
-                    // checks below say nothing about them. canPlay() is the one
-                    // that matters: it enforces "your turn, sorcery speed, land
-                    // drop not used yet". Offering a land the engine would then
-                    // refuse would hand priority straight back and spin.
-                    try {
-                        if (sa.canPlay()) {
-                            playable.add(sa);
-                        }
-                    } catch (Exception e) {
-                        // Skip
-                    }
-                    continue;
-                }
-                try {
-                    // Phase-legality filter: at non-MAIN we got transcripts of sorceries
-                    // (e.g. Lórien Revealed) leaking into the option list during own
-                    // COMBAT_DAMAGE because canPayCost only checks mana, not timing.
-                    // canCastTiming returns true for sorceries iff the player canCastSorcery()
-                    // (own MAIN with empty stack) OR the spell has flash.
-                    if (!sa.canCastTiming(ctrl.getPlayer())) {
-                        continue;
-                    }
-                    if (!ComputerUtilCost.canPayCost(sa, ctrl.getPlayer(), sa.isTrigger())) {
-                        continue;
-                    }
-                    // Pre-validate targeting: only show spells that can actually target
-                    if (!ctrl.validateAndSetTargets(sa)) {
-                        continue;
-                    }
-                    playable.add(sa);
-                } catch (Exception e) {
-                    // Skip
-                }
-            }
-        } finally {
-            LLMFullController.exitFeasibility();
-        }
+        List<SpellAbility> playable = collectPlayableOptions();
 
         if (playable.isEmpty()) {
             ctrl.mainPhasePlan.clear();
@@ -315,6 +259,83 @@ final class LLMSpellSelection {
         SpellAbility selectedSa = pruned.get(chosen);
         logShadowMode("chooseSpellAbilityToPlay", pruned, Collections.singletonList(chosen));
         return commit(selectedSa, phase);
+    }
+
+    /**
+     * Every ability this seat is willing to consider right now, before the
+     * heuristic prior in {@link #applyHeuristicPrior} reorders or trims it.
+     *
+     * <p>The starting point — {@code getAvailableCards} then
+     * {@code getSpellAbilities} — is the same one the heuristic AI's own
+     * chooser starts from. What is dropped here is not: mana abilities, land
+     * plays while the heuristic owns land drops, anything the timing rules
+     * forbid, anything unaffordable, and anything that cannot be pointed at a
+     * legal target. Notably absent is the heuristic chooser's own
+     * {@code AI:RemoveDeck:All} removal, so the two seats do not consider the
+     * same cards; {@code RemovedFromAiDecksSeatGapTest} pins that difference.
+     *
+     * <p>Split out from {@link #chooseSpellAbilityToPlay()} so the option list
+     * can be read without a model call. The body is unchanged.
+     */
+    List<SpellAbility> collectPlayableOptions() {
+        CardCollection cards = ComputerUtilAbility.getAvailableCards(ctrl.getGame(), ctrl.getPlayer());
+        List<SpellAbility> candidates = ComputerUtilAbility.getSpellAbilities(cards, ctrl.getPlayer());
+
+        List<SpellAbility> playable = new ArrayList<>();
+        LLMFullController.enterFeasibility();
+        try {
+            for (SpellAbility sa : candidates) {
+                // Filter out mana abilities — the engine handles these automatically.
+                // Land abilities are filtered too while the heuristic owns land
+                // drops (see the muzzle in the caller); when it doesn't, they stay
+                // in the list so the model can choose to play a land or not.
+                if (sa.isManaAbility()) {
+                    continue;
+                }
+                if (sa.isLandAbility() && LLMFullController.HEURISTIC_LAND_DROPS) {
+                    continue;
+                }
+                sa.setActivatingPlayer(ctrl.getPlayer());
+                if (sa.isLandAbility()) {
+                    // Land plays cost nothing and target nothing, so the spell
+                    // checks below say nothing about them. canPlay() is the one
+                    // that matters: it enforces "your turn, sorcery speed, land
+                    // drop not used yet". Offering a land the engine would then
+                    // refuse would hand priority straight back and spin.
+                    try {
+                        if (sa.canPlay()) {
+                            playable.add(sa);
+                        }
+                    } catch (Exception e) {
+                        // Skip
+                    }
+                    continue;
+                }
+                try {
+                    // Phase-legality filter: at non-MAIN we got transcripts of sorceries
+                    // (e.g. Lórien Revealed) leaking into the option list during own
+                    // COMBAT_DAMAGE because canPayCost only checks mana, not timing.
+                    // canCastTiming returns true for sorceries iff the player canCastSorcery()
+                    // (own MAIN with empty stack) OR the spell has flash.
+                    if (!sa.canCastTiming(ctrl.getPlayer())) {
+                        continue;
+                    }
+                    if (!ComputerUtilCost.canPayCost(sa, ctrl.getPlayer(), sa.isTrigger())) {
+                        continue;
+                    }
+                    // Pre-validate targeting: only show spells that can actually target
+                    if (!ctrl.validateAndSetTargets(sa)) {
+                        continue;
+                    }
+                    playable.add(sa);
+                } catch (Exception e) {
+                    // Skip
+                }
+            }
+        } finally {
+            LLMFullController.exitFeasibility();
+        }
+        return playable;
     }
 
     /**
