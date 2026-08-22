@@ -17,8 +17,7 @@ import forge.game.zone.ZoneType;
 import forge.util.MyRandom;
 
 /**
- * Pins how the heuristic AI decides a team-wide pump instant during combat: a
- * guaranteed win is settled by a coin flip rather than recognised.
+ * Pins the corrected combat-lethal read for a team-wide pump instant.
  *
  * <p>The board below is taken from a real game. Three white creatures attack
  * unblocked, the defender is on 7 life, and a {1}{W}{W} instant gives every
@@ -27,25 +26,18 @@ import forge.util.MyRandom;
  *
  * <p>{@code PumpAllAi.checkApiLogic} asks
  * {@code ComputerUtilCard.shouldPumpCard} about one creature at a time. The
- * deterministic lethal check inside that method — the {@code totalPowerUnblocked}
- * loop — adds the pump to the single creature it was asked about and counts every
- * other unblocked attacker at its <em>unpumped</em> damage. A pump that reads
- * "+2/+2 to all your creatures" is therefore scored as +2 damage in total instead
- * of +2 per attacker, and here it comes to 4 + 1 + 1 = 6 rather than 10.
- *
- * <p>Six is short of the defender's 7 life, so the deterministic branch does not
- * fire. What remains is the last line of the method, a random draw against a
- * chance derived from one creature's extra damage. The AI does often cast the
- * pump — it just does so by luck, and with the same probability whether the
- * attack is lethal or not.
+ * lethal-on-board branch inside that method must still count the team pump on
+ * every affected attacker, not only the creature currently being queried. If it
+ * does, a guaranteed lethal is deterministic and never depends on the random
+ * fallback draw.
  *
  * <p>The tests fix the draw at both extremes so nothing here is flaky. With the
- * draw pinned to never fire, the boundary between casting and holding sits at 6
- * life — the undercounted sum — and not at 10, which is where a correct count
- * would put it. That is what identifies the branch.
+ * fix in place the boundary sits at the real pumped total of 10 life: the AI
+ * casts at 10 and below, and with the draw pinned off it holds at 11.
  *
- * <p>This test endorses nothing. It records the behaviour as it is, so that a
- * later fix has to change it deliberately.
+ * <p>Fix B from the plan stays out of scope here. The final test still records
+ * that {@code Guardians' Pledge} is {@code ApiType.PumpAll}, so the separate
+ * mana-reservation work keeps its own executable reminder.
  */
 public class TeamPumpLethalTest extends AITest {
 
@@ -54,9 +46,6 @@ public class TeamPumpLethalTest extends AITest {
 
     /** The pumped attack, and so the life total at which a correct count would see lethal. */
     private static final int REAL_PUMPED_DAMAGE = 10;
-
-    /** What the {@code totalPowerUnblocked} loop counts instead: one creature pumped, the rest not. */
-    private static final int UNDERCOUNTED_SUM = 6;
 
     /**
      * Three unblocked white attackers, exactly enough untapped lands for the
@@ -112,61 +101,51 @@ public class TeamPumpLethalTest extends AITest {
         Assert.assertEquals(pumped, REAL_PUMPED_DAMAGE, "the pumped attack must be lethal");
         Assert.assertTrue(pumped >= defender.getLife(), "the pump must win the game on the spot");
 
-        final SpellAbility pump = teamPump(ai);
+        final SpellAbility pump = spellInHand(ai, TEAM_PUMP);
         Assert.assertTrue(ComputerUtilCost.canPayCost(pump, ai, false),
                 "the AI must be able to pay for " + TEAM_PUMP + ", or the refusal is about mana");
     }
 
-    // ------------------------------------------------- the decision is a gamble
+    // ------------------------------------------------------------ lethal is deterministic
 
     /**
-     * With the random draw pinned so it never fires, nothing deterministic in the
-     * AI sees the win: it holds a pump that would end the game this turn.
+     * A guaranteed lethal must not depend on the random fallback path.
      */
     @Test
-    public void holdsTheLethalWhenTheCoinFlipDoesNotFire() {
+    public void castsTheLethalWhenTheCoinFlipDoesNotFire() {
         neverDraw();
         final Game game = scriptedGame(board(7));
-        Assert.assertEquals(decision(game), AiPlayDecision.CantPlayAi,
-                "with no luck involved the AI is expected to hold the lethal team pump");
+        Assert.assertEquals(decision(game), AiPlayDecision.WillPlay,
+                "with no luck involved the AI must still cast a lethal team pump");
     }
 
     /**
-     * The very same board, with the draw pinned so it always fires, is cast. The
-     * two results differ only by the coin flip, which is the point: whether the
-     * AI takes a guaranteed win here is decided at random.
+     * The same lethal remains cast when the draw is pinned the other way, proving
+     * the branch is deterministic rather than lucky.
      */
     @Test
-    public void castsTheSameLethalWhenTheCoinFlipFires() {
+    public void castsTheSameLethalWhenTheCoinFlipDoesFire() {
         alwaysDraw();
         final Game game = scriptedGame(board(7));
         Assert.assertEquals(decision(game), AiPlayDecision.WillPlay,
-                "the same position is cast when the draw happens to succeed");
+                "the same lethal should be cast regardless of the random draw");
     }
 
     // ------------------------------------------------------------- the boundary
 
     /**
-     * Names the branch. With the draw pinned off, the AI casts the pump as soon
-     * as the defender's life drops to the undercounted sum of 6 — not at the
-     * real pumped damage of 10, and not at 4, which is the most any single
-     * pumped creature deals. A boundary at exactly 6 can only come from the
-     * {@code totalPowerUnblocked} loop, which counts one attacker pumped and the
-     * other two unpumped.
+     * Names the branch. With the draw pinned off, the AI casts at the real pumped
+     * damage total and holds one point above it.
      */
     @Test
-    public void theDeterministicBoundarySitsAtTheUndercountedSum() {
+    public void theDeterministicBoundarySitsAtTheRealPumpedTotal() {
         neverDraw();
-        Assert.assertEquals(decision(scriptedGame(board(UNDERCOUNTED_SUM))), AiPlayDecision.WillPlay,
-                "at " + UNDERCOUNTED_SUM + " life the undercounted sum reaches the defender and the AI casts");
+        Assert.assertEquals(decision(scriptedGame(board(REAL_PUMPED_DAMAGE))), AiPlayDecision.WillPlay,
+                "at " + REAL_PUMPED_DAMAGE + " life the real pumped total reaches the defender and the AI casts");
 
         neverDraw();
-        Assert.assertEquals(decision(scriptedGame(board(UNDERCOUNTED_SUM + 1))), AiPlayDecision.CantPlayAi,
-                "one point of life higher and the same lethal is held");
-
-        neverDraw();
-        Assert.assertEquals(decision(scriptedGame(board(REAL_PUMPED_DAMAGE))), AiPlayDecision.CantPlayAi,
-                "even at exactly the real pumped damage the AI does not see the win");
+        Assert.assertEquals(decision(scriptedGame(board(REAL_PUMPED_DAMAGE + 1))), AiPlayDecision.CantPlayAi,
+                "one point of life higher and the deterministic lethal is gone");
     }
 
     // ------------------------------------------------- why no mana is held back
@@ -183,8 +162,42 @@ public class TeamPumpLethalTest extends AITest {
     public void theTeamPumpIsOutsideTheCombatTrickHoldPath() {
         final Game game = scriptedGame(board(7));
         final Player ai = game.getPlayers().get(1);
-        Assert.assertEquals(teamPump(ai).getApi(), ApiType.PumpAll,
+        Assert.assertEquals(spellInHand(ai, TEAM_PUMP).getApi(), ApiType.PumpAll,
                 TEAM_PUMP + " is a team pump, and the mana-reserving trick path only covers ApiType.Pump");
+    }
+
+    /**
+     * The queried attacker's precomputed trample damage already has blocker
+     * toughness accounted for. The team-pump board-sum helper must not subtract
+     * the blocker a second time or it turns a lethal trampler into a false miss.
+     */
+    @Test
+    public void aBlockedTramplerIsNotCountedAfterSubtractingItsBlockerTwice() {
+        neverDraw();
+
+        final Game game = scriptedGame(
+                "turn=9",
+                "activeplayer=p1",
+                "activephase=COMBAT_DECLARE_BLOCKERS",
+                "p0life=3",
+                "p0battlefield=Grizzly Bears",
+                "p1life=12",
+                "p1battlefield=Mountain;Mountain;Mountain;Mountain;Mountain;"
+                        + "Hill Giant|Attacking|NoETBTrigs",
+                "p1hand=Volcanic Rush"
+        );
+
+        final Combat combat = game.getCombat();
+        final Card attacker = findCardWithName(game, "Hill Giant");
+        final Card blocker = findCardWithName(game, "Grizzly Bears");
+        combat.addBlocker(attacker, blocker);
+        combat.getBandOfAttacker(attacker).setBlocked(true);
+        combat.orderBlockersForDamageAssignment();
+        combat.orderAttackersForDamageAssignment();
+        game.getAction().checkStateEffects(true);
+
+        Assert.assertEquals(decision(game, "Volcanic Rush"), AiPlayDecision.WillPlay,
+                "the trampler should still count for 3 damage after one blocker subtraction");
     }
 
     // ----------------------------------------------------------------- helpers
@@ -214,17 +227,22 @@ public class TeamPumpLethalTest extends AITest {
     /** The AI's own verdict on casting the pump, as {@code AiController} asks for it. */
     private AiPlayDecision decision(final Game game) {
         final Player ai = game.getPlayers().get(1);
-        return ((PlayerControllerAi) ai.getController()).getAi().canPlaySa(teamPump(ai));
+        return ((PlayerControllerAi) ai.getController()).getAi().canPlaySa(spellInHand(ai, TEAM_PUMP));
     }
 
-    private SpellAbility teamPump(final Player ai) {
+    private AiPlayDecision decision(final Game game, final String spellName) {
+        final Player ai = game.getPlayers().get(1);
+        return ((PlayerControllerAi) ai.getController()).getAi().canPlaySa(spellInHand(ai, spellName));
+    }
+
+    private SpellAbility spellInHand(final Player ai, final String spellName) {
         for (final Card c : ai.getCardsIn(ZoneType.Hand)) {
-            if (TEAM_PUMP.equals(c.getName())) {
+            if (spellName.equals(c.getName())) {
                 final SpellAbility sa = c.getFirstSpellAbility();
                 sa.setActivatingPlayer(ai);
                 return sa;
             }
         }
-        throw new AssertionError(TEAM_PUMP + " is not in hand");
+        throw new AssertionError(spellName + " is not in hand");
     }
 }

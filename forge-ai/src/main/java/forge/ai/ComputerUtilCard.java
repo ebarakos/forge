@@ -1568,20 +1568,8 @@ public class ComputerUtilCard {
                     if (phase.is(PhaseType.COMBAT_DECLARE_BLOCKERS)) {
                         int totalPowerUnblocked = 0;
                         for (Card atk : combat.getAttackers()) {
-                            if (combat.isBlocked(atk) && !atk.hasKeyword(Keyword.TRAMPLE)) {
-                                continue;
-                            }
-                            if (atk == c) {
-                                totalPowerUnblocked += pumpedDmg; // this accounts for Trample by now
-                            } else {
-                                totalPowerUnblocked += ComputerUtilCombat.damageIfUnblocked(atk, opp, combat, true);
-                                if (combat.isBlocked(atk)) {
-                                    // consider Trample damage properly for a blocked creature
-                                    for (Card blk : combat.getBlockers(atk)) {
-                                        totalPowerUnblocked -= ComputerUtilCombat.getDamageToKill(blk, false);
-                                    }
-                                }
-                            }
+                            totalPowerUnblocked += damageWithCombatPump(ai, sa, combat, atk, atk == c ? pumped : null,
+                                    atk == c ? pumpedDmg : null, toughness, power, keywords, opp);
                         }
                         if (totalPowerUnblocked >= opp.getLife()) {
                             return true;
@@ -1684,6 +1672,43 @@ public class ComputerUtilCard {
         }
 
         return simAI || MyRandom.getRandom().nextFloat() < chance;
+    }
+
+    private static int damageWithCombatPump(final Player ai, final SpellAbility sa, final Combat combat, final Card attacker,
+                                            final Card alreadyPumped, final Integer alreadyPumpedDamage, final int toughness,
+                                            final int power, final List<String> keywords, final Player defender) {
+        Card countedAttacker = alreadyPumped;
+        Integer countedDamage = alreadyPumpedDamage;
+        boolean damageNeedsTrampleAdjustment = false;
+
+        if (countedAttacker == null && isAffectedByTeamPump(sa, attacker)) {
+            countedAttacker = getPumpedCreature(ai, sa, attacker, toughness, power, keywords);
+        }
+        if (countedDamage == null) {
+            countedDamage = ComputerUtilCombat.damageIfUnblocked(
+                    countedAttacker != null ? countedAttacker : attacker, defender, combat, true);
+            damageNeedsTrampleAdjustment = true;
+        }
+
+        boolean blocked = combat.isBlocked(attacker);
+        boolean hasTrample = countedAttacker != null ? countedAttacker.hasKeyword(Keyword.TRAMPLE)
+                : attacker.hasKeyword(Keyword.TRAMPLE);
+        if (blocked && !hasTrample) {
+            return 0;
+        }
+        if (blocked && damageNeedsTrampleAdjustment) {
+            for (Card blk : combat.getBlockers(attacker)) {
+                countedDamage -= ComputerUtilCombat.getDamageToKill(blk, false);
+            }
+        }
+        return Math.max(0, countedDamage);
+    }
+
+    private static boolean isAffectedByTeamPump(final SpellAbility sa, final Card attacker) {
+        if (sa.getApi() != ApiType.PumpAll || !sa.hasParam("ValidCards")) {
+            return false;
+        }
+        return attacker.isValid(sa.getParam("ValidCards").split(","), sa.getActivatingPlayer(), sa.getHostCard(), sa);
     }
 
     /**
